@@ -1,0 +1,5 @@
+aliases:
+  core switch: SITE-A-CORE-01
+  site a core: SITE-A-CORE-01
+  access switch: SITE-A-ACCESS-01
+  wireless controller: SITE-A-WLC-01

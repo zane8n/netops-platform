@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# NetOps Smart SSH Connector
+source "$(dirname "$(realpath "$0")")/netops-lib.sh"
+
+CONNECT_TEMP_ERR=""
+CONNECT_INTERRUPTED=false
+CONNECT_CHILD_PID=""
+
+connect_terminate_tree() {
+    local pid="$1" child
+    local -a children=()
+    if command -v pgrep >/dev/null 2>&1; then
+        mapfile -t children < <(pgrep -P "$pid" 2>/dev/null || true)
+        for child in "${children[@]}"; do
+            [[ -n "$child" ]] && connect_terminate_tree "$child"
+        done
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+}
+
+connect_cleanup() {
+    local rc=$?
+    trap - EXIT HUP INT TERM
+    if [[ -n "$CONNECT_CHILD_PID" ]]; then
+        connect_terminate_tree "$CONNECT_CHILD_PID"
+        wait "$CONNECT_CHILD_PID" 2>/dev/null || true
+    fi
+    [[ -n "$CONNECT_TEMP_ERR" ]] && rm -f -- "$CONNECT_TEMP_ERR"
+    exit "$rc"
+}
+
+connect_signal() {
+    CONNECT_INTERRUPTED=true
+    case "$1" in
+        HUP) exit 129 ;;
+        INT) exit 130 ;;
+        TERM) exit 143 ;;
+    esac
+}
+
+trap connect_cleanup EXIT
+trap 'connect_signal HUP' HUP
+trap 'connect_signal INT' INT
+trap 'connect_signal TERM' TERM
+
+show_usage() {
+    echo -e "\033[1mNetOps ${NETOPS_VERSION} - SSH Connector\033[0m"
+    echo -e "\033[1mUSAGE:\033[0m netops device ssh [options] <target>"
+    echo -e "\033[1mOPTIONS:\033[0m"
+    echo "  -p, --set-password  Encrypt and save a password in the sudo-gated vault."
+    echo "      --legacy-vault  With --set-password, use terminal-passphrase GPG instead."
+    echo "      --migrate-vault Migrate an existing legacy GPG vault to sudo-gated GPG."
+    echo "      --unlock-vault  Authenticate with sudo and verify the encrypted vault."
+    echo "      --vault-status  Show vault mode and lock state without prompting."
+    echo "      --secret-list   List named secrets without displaying values."
+    echo "      --secret-status Show named-secret store security and lock state."
+    echo "      --secret-set N  Prompt for and store named secret N."
+    echo "      --secret-delete N  Delete named secret N."
+    echo "      --secret-import-ssh Import the legacy SSH vault as ssh/default/password."
+    echo "  -l, --legacy        Use legacy SSH algorithms for older switches."
+    echo "  -s, --sync          Deprecated; remote vault sync is disabled and returns an error."
+    echo "      --first         Select the first inventory match without prompting."
+}
+
+if [[ $# -eq 0 ]]; then
+    show_usage
+    exit 0
+fi
+
+CONNECT_ACTION="connect"
+VAULT_MODE="sudo-gpg"
+SECRET_NAME=""
+TARGET_PARTS=()
+while (($#)); do
+    case "$1" in
+        -h|--help) show_usage; exit 0 ;;
+        -p|--set-password) CONNECT_ACTION="set-password"; shift ;;
+        --legacy-vault) VAULT_MODE="legacy-gpg"; shift ;;
+        --migrate-vault) CONNECT_ACTION="migrate-vault"; shift ;;
+        --unlock-vault) CONNECT_ACTION="unlock-vault"; shift ;;
+        --vault-status) CONNECT_ACTION="vault-status"; shift ;;
+        --secret-list) CONNECT_ACTION="secret-list"; shift ;;
+        --secret-status) CONNECT_ACTION="secret-status"; shift ;;
+        --secret-set) [[ $# -ge 2 ]] || { echo "Error: --secret-set requires a name." >&2; exit 2; }; CONNECT_ACTION="secret-set"; SECRET_NAME="$2"; shift 2 ;;
+        --secret-delete) [[ $# -ge 2 ]] || { echo "Error: --secret-delete requires a name." >&2; exit 2; }; CONNECT_ACTION="secret-delete"; SECRET_NAME="$2"; shift 2 ;;
+        --secret-get) [[ $# -ge 2 ]] || { echo "Error: --secret-get requires a name." >&2; exit 2; }; CONNECT_ACTION="secret-get"; SECRET_NAME="$2"; shift 2 ;;
+        --secret-import-ssh) CONNECT_ACTION="secret-import-ssh"; shift ;;
+        -s|--sync) CONNECT_ACTION="sync"; shift ;;
+        -l|--legacy) CONFIG[legacy_ssh]="true"; shift ;;
+        --first) export NETOPS_RESOLVE_MODE=first; shift ;;
+        --) shift; TARGET_PARTS+=("$@"); break ;;
+        -*) echo "Error: Unknown connection option: $1" >&2; show_usage >&2; exit 2 ;;
+        *) TARGET_PARTS+=("$1"); shift ;;
+    esac
+done
+
+if [[ "$CONNECT_ACTION" == "set-password" ]]; then
+    ((${#TARGET_PARTS[@]} == 0)) || { echo "Error: --set-password does not accept a target." >&2; exit 2; }
+    set_password "$VAULT_MODE"
+    exit $?
+fi
+if [[ "$VAULT_MODE" != "sudo-gpg" ]]; then
+    echo "Error: --legacy-vault is only valid with --set-password." >&2
+    exit 2
+fi
+if [[ "$CONNECT_ACTION" == "migrate-vault" ]]; then
+    ((${#TARGET_PARTS[@]} == 0)) || { echo "Error: --migrate-vault does not accept a target." >&2; exit 2; }
+    migrate_password_store
+    exit $?
+fi
+if [[ "$CONNECT_ACTION" == "unlock-vault" ]]; then
+    ((${#TARGET_PARTS[@]} == 0)) || { echo "Error: --unlock-vault does not accept a target." >&2; exit 2; }
+    unlock_password_store
+    exit $?
+fi
+if [[ "$CONNECT_ACTION" == "vault-status" ]]; then
+    ((${#TARGET_PARTS[@]} == 0)) || { echo "Error: --vault-status does not accept a target." >&2; exit 2; }
+    password_store_status
+    exit $?
+fi
+if [[ "$CONNECT_ACTION" == "secret-list" ]]; then
+    ((${#TARGET_PARTS[@]} == 0)) || { echo "Error: --secret-list does not accept a target." >&2; exit 2; }
+    named_secret_list
+    exit $?
+fi
+if [[ "$CONNECT_ACTION" == "secret-status" ]]; then
+    ((${#TARGET_PARTS[@]} == 0)) || { echo "Error: --secret-status does not accept a target." >&2; exit 2; }
+    named_secret_status
+    exit $?
+fi
+if [[ "$CONNECT_ACTION" == "secret-set" ]]; then
+    ((${#TARGET_PARTS[@]} == 0)) || { echo "Error: --secret-set does not accept a target." >&2; exit 2; }
+    named_secret_set "$SECRET_NAME"
+    exit $?
+fi
+if [[ "$CONNECT_ACTION" == "secret-delete" ]]; then
+    ((${#TARGET_PARTS[@]} == 0)) || { echo "Error: --secret-delete does not accept a target." >&2; exit 2; }
+    named_secret_delete "$SECRET_NAME"
+    exit $?
+fi
+if [[ "$CONNECT_ACTION" == "secret-get" ]]; then
+    ((${#TARGET_PARTS[@]} == 0)) || { echo "Error: --secret-get does not accept a target." >&2; exit 2; }
+    named_secret_get "$SECRET_NAME"
+    exit $?
+fi
+if [[ "$CONNECT_ACTION" == "secret-import-ssh" ]]; then
+    ((${#TARGET_PARTS[@]} == 0)) || { echo "Error: --secret-import-ssh does not accept a target." >&2; exit 2; }
+    named_secret_import_ssh
+    exit $?
+fi
+if [[ "$CONNECT_ACTION" == "sync" ]]; then
+    ((${#TARGET_PARTS[@]} == 0)) || { echo "Error: --sync does not accept a target." >&2; exit 2; }
+    if NETOPS_CLOUD_SYNC_FORCE=true sync_password_from_gist; then
+        echo -e "\033[0;32mCloud sync successful.\033[0m"
+        exit 0
+    fi
+    echo -e "\033[0;31mCloud sync failed.\033[0m"
+    exit 1
+fi
+
+TARGET_INPUT="${TARGET_PARTS[*]}"
+[[ -z "$TARGET_INPUT" ]] && { echo "Error: No search pattern provided."; exit 1; }
+
+IP=$(resolve_targets "$TARGET_INPUT" "DEVICES" "false") || exit $?
+[[ -z "$IP" ]] && exit 1
+if [[ "$IP" == *$'\n'* || "$IP" == *' '* ]]; then
+    echo "Error: SSH requires one unambiguous target. Use an exact hostname/IP or --first." >&2
+    exit 2
+fi
+
+HOST=$(db_get_device "$IP" | cut -d'|' -f2)
+_ssh_user_value >/dev/null || exit $?
+echo -e "\033[0;32mAttempting to connect to \033[1m${HOST:-$IP} ($IP)\033[0m..."
+
+if [[ "${CONFIG[legacy_ssh]}" == "true" ]]; then
+    echo -e "\033[1;33m[WARNING] Legacy SSH compatibility is enabled for KEX, host keys, ciphers, and MACs supported by this OpenSSH client.\033[0m"
+fi
+
+get_password_from_store || exit $?
+
+CONNECT_TEMP_ERR=$(mktemp /tmp/netops-connect.XXXXXX) || {
+    echo "Error: Could not create SSH diagnostic state." >&2
+    exit 1
+}
+NETOPS_SSH_SHOW_ERRORS=true netops_ssh "$IP" <&0 2> "$CONNECT_TEMP_ERR" &
+CONNECT_CHILD_PID=$!
+if wait "$CONNECT_CHILD_PID"; then
+    rc=0
+else
+    rc=$?
+fi
+CONNECT_CHILD_PID=""
+
+if [[ "$CONNECT_INTERRUPTED" != true && -s "$CONNECT_TEMP_ERR" ]]; then
+    diagnostic=$(cat "$CONNECT_TEMP_ERR")
+    failure_kind=$(ssh_failure_kind "$diagnostic")
+    offered=$(ssh_failure_offer "$diagnostic")
+    case "$failure_kind" in
+        KEX|HOST_KEY|CIPHER|MAC|NEGOTIATION)
+            echo -e "\n\033[1;33m[!] SSH negotiation failed ($failure_kind).\033[0m"
+            [[ -n "$offered" ]] && echo "    Device offer: $offered"
+            if [[ "${CONFIG[legacy_ssh]}" == "true" ]]; then
+                echo "    Legacy mode was already active. The offered algorithm may be unavailable in this OpenSSH build, or the device may require a firmware upgrade."
+            else
+                echo -e "    \033[1;32mRetry once with:\033[0m netops device ssh -l $TARGET_INPUT"
+            fi
+            ;;
+        LEGACY_PROTOCOL)
+            echo -e "\n\033[1;31m[!] The device appears to require SSH protocol 1.\033[0m"
+            echo "    NetOps does not enable SSHv1. Upgrade the device SSH service or use an isolated approved migration host."
+            ;;
+        AUTHENTICATION)
+            echo -e "\n\033[1;33m[!] SSH authentication was rejected.\033[0m"
+            if IFS='|' read -r credential_state recorded_at expected_at window_start window_end remaining < <(_vault_credential_lifecycle); then
+                echo "    Stored password state: $credential_state"
+                echo "    Password recorded: $(_vault_iso_time "$recorded_at")"
+                echo "    Expected expiry: $(_vault_iso_time "$expected_at")"
+            fi
+            echo -e "    \033[1;32mRecord the newly rotated password with:\033[0m connect -p"
+            ;;
+        *)
+            printf '%s\n' "$diagnostic" >&2
+            ;;
+    esac
+elif [[ $rc -ne 0 ]]; then
+    echo -e "\n\033[1;33m[!] SSH session ended with exit code $rc.\033[0m"
+fi
+exit $rc

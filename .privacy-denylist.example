@@ -1,0 +1,4 @@
+# One private identifier per line. Keep the real file untracked.
+EXAMPLE-ORGANIZATION-NAME
+EXAMPLE-LEGACY-DEVICE-PREFIX
+example.operator

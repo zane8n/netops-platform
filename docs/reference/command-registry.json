@@ -1,0 +1,4139 @@
+{
+  "commands": [
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops ap list '<target>'",
+      "description": "Search current reconciled AP inventory.",
+      "domain": "ap",
+      "examples": [],
+      "id": "ap-list",
+      "label": "AP list",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops ap moves",
+      "description": "Show recorded AP attachment changes newest first.",
+      "domain": "ap",
+      "examples": [],
+      "id": "ap-moves",
+      "label": "AP moves",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops ap on-switch '<target>'",
+      "description": "Show canonical APs attached to a switch or site.",
+      "domain": "ap",
+      "examples": [],
+      "id": "ap-on-switch",
+      "label": "APs on switch",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops ap scan",
+      "description": "Refresh AP inventory.",
+      "domain": "ap",
+      "examples": [],
+      "id": "ap-scan",
+      "label": "AP scan",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops ap timeline '<target>'",
+      "description": "Show AP attachment history newest first.",
+      "domain": "ap",
+      "examples": [],
+      "id": "ap-timeline",
+      "label": "AP timeline",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops ap unjoined '<target>'",
+      "description": "List AP observations that are not joined to a controller.",
+      "domain": "ap",
+      "examples": [],
+      "id": "ap-unjoined",
+      "label": "Unjoined APs",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Phrase",
+          "name": "phrase",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "phrase"
+      ],
+      "cancellable": true,
+      "command": "netops ask alias remove '<phrase>'",
+      "description": "Remove a durable deterministic phrase alias.",
+      "domain": "ask",
+      "examples": [],
+      "id": "ask-alias-remove",
+      "label": "Remove Ask alias",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Phrase",
+          "name": "phrase",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Alias Target",
+          "name": "alias_target",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "phrase",
+        "alias_target"
+      ],
+      "cancellable": true,
+      "command": "netops ask alias set '<phrase>' '<alias_target>'",
+      "description": "Create or update a durable deterministic phrase alias.",
+      "domain": "ask",
+      "examples": [],
+      "id": "ask-alias-set",
+      "label": "Set Ask alias",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops ask aliases",
+      "description": "List deterministic phrase aliases.",
+      "domain": "ask",
+      "examples": [],
+      "id": "ask-aliases",
+      "label": "Ask aliases",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops ask",
+      "description": "Open the stateful Natural Ask terminal session.",
+      "domain": "ask",
+      "examples": [],
+      "id": "ask-chat",
+      "label": "Ask chat",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "interactive-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops ask patterns",
+      "description": "List supported retrieval and command-center examples.",
+      "domain": "ask",
+      "examples": [],
+      "id": "ask-patterns",
+      "label": "Ask patterns",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Question",
+          "name": "question",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "question"
+      ],
+      "cancellable": true,
+      "command": "netops ask '<question>'",
+      "description": "Run a deterministic question workflow over current inventory and relationship memory.",
+      "domain": "ask",
+      "examples": [
+        "netops ask \"How many APs are offline in ZONE10?\""
+      ],
+      "id": "ask-query",
+      "label": "Natural Ask",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops backup diff '<target>'",
+      "description": "Diff latest changed backups for a target.",
+      "domain": "backup",
+      "examples": [],
+      "id": "backup-diff",
+      "label": "Backup diff",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops backup history '<target>'",
+      "description": "Show backup history for a target.",
+      "domain": "backup",
+      "examples": [],
+      "id": "backup-history",
+      "label": "Backup history",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops backup run '<target>'",
+      "description": "Online-only changed-only config backup.",
+      "domain": "backup",
+      "examples": [],
+      "id": "backup-run",
+      "label": "Backup online",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops backup verify",
+      "description": "Review recorded backup checksums, paths, and statuses.",
+      "domain": "backup",
+      "examples": [],
+      "id": "backup-verify",
+      "label": "Verify backups",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops commands list",
+      "description": "List the structured command registry and safety metadata.",
+      "domain": "commands",
+      "examples": [],
+      "id": "commands-list",
+      "label": "Commands list",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Action",
+          "name": "action",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "action"
+      ],
+      "cancellable": true,
+      "command": "netops commands run '<action>' --preview",
+      "description": "Meta-action for previewing a registry command. Ask plans the selected action directly.",
+      "domain": "commands",
+      "examples": [],
+      "id": "commands-run",
+      "label": "Registry command runner",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Action",
+          "name": "action",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "action"
+      ],
+      "cancellable": true,
+      "command": "netops commands show '<action>'",
+      "description": "Show metadata for one registry action.",
+      "domain": "commands",
+      "examples": [],
+      "id": "commands-show",
+      "label": "Command details",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Key",
+          "name": "key",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "key"
+      ],
+      "cancellable": true,
+      "command": "netops config get '<key>'",
+      "description": "Read one effective non-secret setting.",
+      "domain": "config",
+      "examples": [],
+      "id": "config-get",
+      "label": "Get configuration",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops config paths",
+      "description": "Show global and profile configuration files.",
+      "domain": "config",
+      "examples": [],
+      "id": "config-paths",
+      "label": "Configuration paths",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Key",
+          "name": "key",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Value",
+          "name": "value",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "key",
+        "value"
+      ],
+      "cancellable": true,
+      "command": "netops config set '<key>' '<value>'",
+      "description": "Set one non-secret profile override.",
+      "domain": "config",
+      "examples": [],
+      "id": "config-set",
+      "label": "Set configuration",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops config show",
+      "description": "Show effective redacted profile settings.",
+      "domain": "config",
+      "examples": [],
+      "id": "config-show",
+      "label": "Show configuration",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Key",
+          "name": "key",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "key"
+      ],
+      "cancellable": true,
+      "command": "netops config unset '<key>'",
+      "description": "Remove one profile override.",
+      "domain": "config",
+      "examples": [],
+      "id": "config-unset",
+      "label": "Unset configuration",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops config validate",
+      "description": "Validate effective settings and legacy-secret state.",
+      "domain": "config",
+      "examples": [],
+      "id": "config-validate",
+      "label": "Validate configuration",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops db integrity",
+      "description": "Run SQLite integrity checks without modifying state.",
+      "domain": "db",
+      "examples": [],
+      "id": "db-integrity",
+      "label": "Database integrity",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops db migrate",
+      "description": "Apply SQLite schema migrations and reconcile derived state.",
+      "domain": "db",
+      "examples": [],
+      "id": "db-migrate",
+      "label": "Migrate database",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops db path",
+      "description": "Print the active SQLite database path.",
+      "domain": "db",
+      "examples": [],
+      "id": "db-path",
+      "label": "Database path",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops db repair",
+      "description": "Reindex and repair recoverable SQLite structures, then verify integrity.",
+      "domain": "db",
+      "examples": [],
+      "id": "db-repair",
+      "label": "Repair database",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops db status",
+      "description": "Show database paths, schema version, file sizes, and record counts.",
+      "domain": "db",
+      "examples": [],
+      "id": "db-status",
+      "label": "Database status",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops db vacuum",
+      "description": "Compact the SQLite database.",
+      "domain": "db",
+      "examples": [],
+      "id": "db-vacuum",
+      "label": "Vacuum database",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Commands",
+          "name": "commands",
+          "placeholder": "configuration commands",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target",
+        "commands"
+      ],
+      "cancellable": true,
+      "command": "netops device config '<target>' '<commands>'",
+      "description": "Preview/confirmed config command wrapper. WebUI preview only.",
+      "domain": "device",
+      "examples": [],
+      "id": "device-config",
+      "label": "Device config preview",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "config",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state",
+        "device-config"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Target2",
+          "name": "target2",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target",
+        "target2"
+      ],
+      "cancellable": true,
+      "command": "netops device identity '<target>' '<target2>'",
+      "description": "Explain confidence and conflicts between two switch identity records.",
+      "domain": "device",
+      "examples": [],
+      "id": "device-identity",
+      "label": "Device identity comparison",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops device inventory '<target>'",
+      "description": "Run the device inventory helper for one target.",
+      "domain": "device",
+      "examples": [],
+      "id": "device-inventory",
+      "label": "Device inventory",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Command",
+          "name": "command",
+          "placeholder": "show version",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target",
+        "command"
+      ],
+      "cancellable": true,
+      "command": "netops device show '<target>' '<command>'",
+      "description": "Run a policy-checked read-only show command.",
+      "domain": "device",
+      "examples": [],
+      "id": "device-show",
+      "label": "Device show",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops device ssh '<target>'",
+      "description": "Open an interactive SSH session in a terminal.",
+      "domain": "device",
+      "examples": [],
+      "id": "device-ssh",
+      "label": "Device SSH",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "interactive-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops device support '<target>'",
+      "description": "Classify a device and show driver capability maturity for Cisco, Aruba, or Ruckus.",
+      "domain": "device",
+      "examples": [],
+      "id": "device-support",
+      "label": "Device support profile",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Fingerprint",
+          "name": "fingerprint",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target",
+        "fingerprint"
+      ],
+      "cancellable": true,
+      "command": "netops device trust enroll '<target>' --fingerprint '<fingerprint>' --confirm",
+      "description": "Enroll only an out-of-band verified SSH host-key fingerprint.",
+      "domain": "device",
+      "examples": [],
+      "id": "device-trust-enroll",
+      "label": "Enroll SSH host key",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops device trust forget '<target>' --confirm",
+      "description": "Remove a target from the managed SSH trust store.",
+      "domain": "device",
+      "examples": [],
+      "id": "device-trust-forget",
+      "label": "Forget SSH host key",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops device trust scan '<target>'",
+      "description": "Retrieve SSH host keys and SHA-256 fingerprints without enrolling them.",
+      "domain": "device",
+      "examples": [],
+      "id": "device-trust-scan",
+      "label": "Scan SSH host keys",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops device trust status '<target>'",
+      "description": "Inspect managed SSH host-key fingerprints without network access.",
+      "domain": "device",
+      "examples": [],
+      "id": "device-trust-status",
+      "label": "SSH trust status",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Device",
+          "name": "device",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Interface",
+          "name": "interface",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "device",
+        "interface"
+      ],
+      "cancellable": true,
+      "command": "netops diagnose cable '<device>' on '<interface>'",
+      "description": "Read the last recorded copper cable/TDR result without starting a test.",
+      "domain": "diagnose",
+      "examples": [],
+      "id": "diagnose-cable",
+      "label": "Cable diagnostic status",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 180,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Device",
+          "name": "device",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Interface",
+          "name": "interface",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Wait",
+          "min": 1,
+          "name": "wait",
+          "required": false,
+          "type": "number"
+        }
+      ],
+      "args": [
+        "device",
+        "interface",
+        "wait"
+      ],
+      "cancellable": true,
+      "command": "netops diagnose cable '<device>' on '<interface>' --test --dry-run",
+      "description": "Preview a potentially disruptive copper TDR. Confirmed execution remains CLI-only.",
+      "domain": "diagnose",
+      "examples": [],
+      "id": "diagnose-cable-test",
+      "label": "Start cable diagnostic",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "danger",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Core",
+          "name": "core",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "label": "Count",
+          "min": 1,
+          "name": "count",
+          "required": false,
+          "type": "number"
+        }
+      ],
+      "args": [
+        "target",
+        "core",
+        "count"
+      ],
+      "cancellable": true,
+      "command": "netops diagnose core-ping '<target>'",
+      "description": "Issue ICMP from the configured/selected core switch and store parsed latency.",
+      "domain": "diagnose",
+      "examples": [
+        "netops diagnose core-ping 192.0.2.50 --count 5"
+      ],
+      "id": "diagnose-core-ping",
+      "label": "Point-of-truth core ping",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Online",
+          "name": "online",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "args": [
+        "online"
+      ],
+      "cancellable": true,
+      "command": "netops diagnose doctor",
+      "description": "Audit diagnostic dependencies, routing, host limitations, trust, and core settings.",
+      "domain": "diagnose",
+      "examples": [],
+      "id": "diagnose-doctor",
+      "label": "Diagnostic readiness",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops diagnose filtering '<target>'",
+      "description": "DNS/TLS/filtering diagnostics.",
+      "domain": "diagnose",
+      "examples": [],
+      "id": "diagnose-filtering",
+      "label": "Filtering check",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Device",
+          "name": "device",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Interface",
+          "name": "interface",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Chart",
+          "name": "chart",
+          "options": [
+            "classic",
+            "histogram"
+          ],
+          "required": false,
+          "type": "select"
+        },
+        {
+          "label": "Once",
+          "name": "once",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "args": [
+        "device",
+        "interface",
+        "chart",
+        "once"
+      ],
+      "cancellable": true,
+      "command": "netops diagnose interface '<device>' on '<interface>'",
+      "description": "Legacy interface rate monitor; command-center jobs default to one finite sample.",
+      "domain": "diagnose",
+      "examples": [],
+      "id": "diagnose-interface",
+      "label": "Interface monitor",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Count",
+          "min": 1,
+          "name": "count",
+          "required": false,
+          "type": "number"
+        }
+      ],
+      "args": [
+        "target",
+        "count"
+      ],
+      "cancellable": true,
+      "command": "netops diagnose latency '<target>'",
+      "description": "Run latency probing.",
+      "domain": "diagnose",
+      "examples": [],
+      "id": "diagnose-latency",
+      "label": "Latency probe",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Device",
+          "name": "device",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Interface",
+          "name": "interface",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Sample Seconds",
+          "max": 60,
+          "min": 0,
+          "name": "sample_seconds",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "label": "Expected Speed",
+          "min": 1,
+          "name": "expected_speed",
+          "required": false,
+          "type": "number"
+        }
+      ],
+      "args": [
+        "device",
+        "interface",
+        "sample_seconds",
+        "expected_speed"
+      ],
+      "cancellable": true,
+      "command": "netops diagnose port-health '<device>' on '<interface>'",
+      "description": "Sample link negotiation and switch error-counter deltas.",
+      "domain": "diagnose",
+      "examples": [],
+      "id": "diagnose-port-health",
+      "label": "Port health",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 240,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Profile",
+          "name": "profile",
+          "options": [
+            "balanced",
+            "quick",
+            "thorough"
+          ],
+          "required": false,
+          "type": "select"
+        },
+        {
+          "label": "Runs",
+          "min": 1,
+          "name": "runs",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "label": "Ca File",
+          "name": "ca_file",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "profile",
+        "runs",
+        "ca_file"
+      ],
+      "cancellable": true,
+      "command": "netops diagnose speed",
+      "description": "Measure this NetOps host's routed Internet path with verified profile-based testing.",
+      "domain": "diagnose",
+      "examples": [],
+      "id": "diagnose-speed",
+      "label": "Internet speed test",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 1800,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Port",
+          "max": 65535,
+          "min": 1,
+          "name": "port",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "label": "Seconds",
+          "max": 300,
+          "min": 1,
+          "name": "seconds",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "label": "Parallel",
+          "max": 16,
+          "min": 1,
+          "name": "parallel",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "label": "Direction",
+          "name": "direction",
+          "options": [
+            "both",
+            "upload",
+            "download"
+          ],
+          "required": false,
+          "type": "select"
+        },
+        {
+          "label": "Bind",
+          "name": "bind",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target",
+        "port",
+        "seconds",
+        "parallel",
+        "direction",
+        "bind"
+      ],
+      "cancellable": true,
+      "command": "netops diagnose throughput '<target>'",
+      "description": "Measure TCP receiver goodput between this client and a controlled iperf3 server.",
+      "domain": "diagnose",
+      "examples": [],
+      "id": "diagnose-throughput",
+      "label": "Controlled throughput",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 720,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops health attention",
+      "description": "Show health, topology, AP movement, and backup items needing review.",
+      "domain": "health",
+      "examples": [],
+      "id": "health-attention",
+      "label": "Health attention",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops health check '<target>'",
+      "description": "Ping known/supplied devices and APs, then refresh health state.",
+      "domain": "health",
+      "examples": [],
+      "id": "health-check",
+      "label": "Fast health check",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops health offline '<target>'",
+      "description": "List current offline entities, optionally filtered by target.",
+      "domain": "health",
+      "examples": [],
+      "id": "health-offline",
+      "label": "Offline health records",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops health status '<target>'",
+      "description": "Read current canonical health, optionally filtered by target.",
+      "domain": "health",
+      "examples": [],
+      "id": "health-status",
+      "label": "Health status",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops health timeline '<target>'",
+      "description": "Read health state changes newest first.",
+      "domain": "health",
+      "examples": [],
+      "id": "health-timeline",
+      "label": "Health timeline",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops ingest channels",
+      "description": "List declarative channels in the active profile.",
+      "domain": "ingest",
+      "examples": [],
+      "id": "ingest-channels",
+      "label": "List ingest channels",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops ingest history",
+      "description": "Show ingest runs newest first.",
+      "domain": "ingest",
+      "examples": [],
+      "id": "ingest-history",
+      "label": "Ingest history",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Channel",
+          "name": "channel",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "channel"
+      ],
+      "cancellable": true,
+      "command": "netops ingest observations '<channel>'",
+      "description": "Show append-only channel observations.",
+      "domain": "ingest",
+      "examples": [],
+      "id": "ingest-observations",
+      "label": "Ingest observations",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Run Id",
+          "name": "run_id",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "run_id"
+      ],
+      "cancellable": true,
+      "command": "netops ingest rejects '<run_id>'",
+      "description": "Show redacted quarantine metadata.",
+      "domain": "ingest",
+      "examples": [],
+      "id": "ingest-rejects",
+      "label": "Ingest rejects",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Channel",
+          "name": "channel",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "channel"
+      ],
+      "cancellable": true,
+      "command": "netops ingest run '<channel>'",
+      "description": "Run one provenance-preserving ingest channel.",
+      "domain": "ingest",
+      "examples": [],
+      "id": "ingest-run",
+      "label": "Run ingest channel",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 1800,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops ingest validate",
+      "description": "Validate channel manifests without fetching records.",
+      "domain": "ingest",
+      "examples": [],
+      "id": "ingest-validate",
+      "label": "Validate ingest channels",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops init",
+      "description": "Create neutral profile state and check host capabilities.",
+      "domain": "init",
+      "examples": [],
+      "id": "init-run",
+      "label": "Initialize profile",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops inventory activity '<target>'",
+      "description": "Ping one or more inventory targets and report current activity.",
+      "domain": "inventory",
+      "examples": [],
+      "id": "inventory-activity",
+      "label": "Inventory activity",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops inventory details '<target>'",
+      "description": "Collect detailed inventory for one target.",
+      "domain": "inventory",
+      "examples": [],
+      "id": "inventory-details",
+      "label": "Inventory details",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops inventory export-flat",
+      "description": "Export SQLite inventory back to legacy flat files.",
+      "domain": "inventory",
+      "examples": [],
+      "id": "inventory-export-flat",
+      "label": "Export flat files",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops inventory import-flat",
+      "description": "Import legacy flat caches into SQLite.",
+      "domain": "inventory",
+      "examples": [],
+      "id": "inventory-import-flat",
+      "label": "Import flat files",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops inventory list '<target>'",
+      "description": "Search current canonical device and AP inventory.",
+      "domain": "inventory",
+      "examples": [],
+      "id": "inventory-list",
+      "label": "Inventory list",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Historical Device",
+          "name": "source",
+          "placeholder": "exact hostname or IP",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Current Device",
+          "name": "target",
+          "placeholder": "exact hostname or IP",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Audit Reason",
+          "name": "reason",
+          "placeholder": "approved replacement or correction",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "source",
+        "target",
+        "reason"
+      ],
+      "cancellable": true,
+      "command": "netops inventory merge '<source>' '<target>' --reason '<reason>' --dry-run",
+      "description": "Preview retiring an old device into a current device while preserving chronological evidence. Apply explicitly in the CLI with --confirm.",
+      "domain": "inventory",
+      "examples": [],
+      "id": "inventory-merge",
+      "label": "Preview device identity merge",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "warning",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops inventory merges",
+      "description": "List active manual device merges and their chronology.",
+      "domain": "inventory",
+      "examples": [],
+      "id": "inventory-merges",
+      "label": "Manual identity merges",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops inventory scan '<target>'",
+      "description": "Refresh switch/router inventory.",
+      "domain": "inventory",
+      "examples": [],
+      "id": "inventory-scan",
+      "label": "Inventory scan",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops inventory show '<target>'",
+      "description": "Search current canonical inventory only.",
+      "domain": "inventory",
+      "examples": [],
+      "id": "inventory-show",
+      "label": "Inventory show",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Merge ID",
+          "name": "merge_id",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Revocation Reason",
+          "name": "reason",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "merge_id",
+        "reason"
+      ],
+      "cancellable": true,
+      "command": "netops inventory unmerge '<merge_id>' --reason '<reason>'",
+      "description": "Prepare restoration of a manually retired source device. Apply explicitly in the CLI with --confirm.",
+      "domain": "inventory",
+      "examples": [],
+      "id": "inventory-unmerge",
+      "label": "Plan device merge revocation",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "warning",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Job Id",
+          "name": "job_id",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "job_id"
+      ],
+      "cancellable": true,
+      "command": "netops jobs cancel '<job_id>'",
+      "description": "Cancel a live job through the process that owns it.",
+      "domain": "jobs",
+      "examples": [],
+      "id": "jobs-cancel",
+      "label": "Cancel job",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "warning",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops jobs list",
+      "description": "List recorded jobs newest first.",
+      "domain": "jobs",
+      "examples": [],
+      "id": "jobs-list",
+      "label": "Jobs list",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Job Id",
+          "name": "job_id",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "job_id"
+      ],
+      "cancellable": true,
+      "command": "netops jobs logs '<job_id>'",
+      "description": "Show logs for one recorded job.",
+      "domain": "jobs",
+      "examples": [],
+      "id": "jobs-logs",
+      "label": "Job logs",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Job Id",
+          "name": "job_id",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "job_id"
+      ],
+      "cancellable": true,
+      "command": "netops jobs show '<job_id>'",
+      "description": "Show one recorded job and its logs.",
+      "domain": "jobs",
+      "examples": [],
+      "id": "jobs-show",
+      "label": "Job details",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops lookup core '<target>'",
+      "description": "Core IP/MAC lookup cached into memory.",
+      "domain": "lookup",
+      "examples": [],
+      "id": "lookup-core",
+      "label": "Core lookup",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Mac",
+          "name": "mac",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target",
+        "mac"
+      ],
+      "cancellable": true,
+      "command": "netops lookup mac '<target>' '<mac>'",
+      "description": "MAC lookup from one target or from all current switches with target=all.",
+      "domain": "lookup",
+      "examples": [],
+      "id": "lookup-mac",
+      "label": "MAC lookup",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 120,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Mac",
+          "name": "mac",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "mac"
+      ],
+      "cancellable": true,
+      "command": "netops lookup mac history '<mac>'",
+      "description": "Show newest-first identity and switch-port events for a MAC.",
+      "domain": "lookup",
+      "examples": [],
+      "id": "lookup-mac-history",
+      "label": "MAC movement history",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Mac",
+          "name": "mac",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "mac"
+      ],
+      "cancellable": true,
+      "command": "netops lookup mac inspect '<mac>'",
+      "description": "Correlate cached MAC identity, location, IP, vendor, and history evidence.",
+      "domain": "lookup",
+      "examples": [],
+      "id": "lookup-mac-inspect",
+      "label": "MAC evidence inspection",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Mac",
+          "name": "mac",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Scope",
+          "name": "scope",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "mac",
+        "scope"
+      ],
+      "cancellable": true,
+      "command": "netops lookup mac locate '<mac>'",
+      "description": "Search switch forwarding tables without requiring an endpoint IP.",
+      "domain": "lookup",
+      "examples": [],
+      "id": "lookup-mac-locate",
+      "label": "Direct MAC location",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Mac",
+          "name": "mac",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "mac"
+      ],
+      "cancellable": true,
+      "command": "netops lookup mac online '<mac>'",
+      "description": "Resolve the longest authoritative IEEE MA-L/MA-M/MA-S assignment with cache provenance.",
+      "domain": "lookup",
+      "examples": [],
+      "id": "lookup-mac-online",
+      "label": "IEEE MAC assignment",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Mac",
+          "name": "mac",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Scope",
+          "name": "scope",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "mac",
+        "scope"
+      ],
+      "cancellable": true,
+      "command": "netops lookup mac profile '<mac>'",
+      "description": "Locate a MAC and profile likely edge ports with interface, LLDP/CDP, PoE, device-tracking, and core evidence.",
+      "domain": "lookup",
+      "examples": [],
+      "id": "lookup-mac-profile",
+      "label": "MAC edge profile",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops lookup mac registry status",
+      "description": "Show cached IEEE registry files, row counts, checksums, sources, and last refresh time.",
+      "domain": "lookup",
+      "examples": [],
+      "id": "lookup-mac-registry",
+      "label": "IEEE MAC registry status",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops lookup mac registry refresh",
+      "description": "Refresh all IEEE public MAC assignment CSV registries into the private local cache.",
+      "domain": "lookup",
+      "examples": [],
+      "id": "lookup-mac-registry-refresh",
+      "label": "Refresh IEEE MAC registry",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Mac",
+          "name": "mac",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "mac"
+      ],
+      "cancellable": true,
+      "command": "netops lookup mac vendor '<mac>'",
+      "description": "Resolve a MAC prefix from the locally installed OUI database.",
+      "domain": "lookup",
+      "examples": [],
+      "id": "lookup-mac-vendor",
+      "label": "MAC OUI vendor",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops memory device '<target>'",
+      "description": "Show current identity relationships and history for a device.",
+      "domain": "memory",
+      "examples": [],
+      "id": "memory-device",
+      "label": "Memory device",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops memory explain '<target>'",
+      "description": "Explain relationship sources, confidence, and last observations.",
+      "domain": "memory",
+      "examples": [],
+      "id": "memory-explain",
+      "label": "Explain memory sources",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops memory export --json",
+      "description": "Export all current relationships as JSON.",
+      "domain": "memory",
+      "examples": [],
+      "id": "memory-export",
+      "label": "Export memory",
+      "output_type": "json",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops memory ip '<target>'",
+      "description": "Show historical ownership and relationship events for an IP.",
+      "domain": "memory",
+      "examples": [],
+      "id": "memory-ip",
+      "label": "Memory IP",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops memory mac '<target>'",
+      "description": "Show identity and movement history for a MAC address.",
+      "domain": "memory",
+      "examples": [],
+      "id": "memory-mac",
+      "label": "Memory MAC",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Interface",
+          "name": "interface",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target",
+        "interface"
+      ],
+      "cancellable": true,
+      "command": "netops memory port '<target>' '<interface>'",
+      "description": "Show current and historical occupancy for a switch port.",
+      "domain": "memory",
+      "examples": [],
+      "id": "memory-port",
+      "label": "Memory port",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops memory prune",
+      "description": "Memory pruning is intentionally disabled because history is retained by default.",
+      "domain": "memory",
+      "examples": [],
+      "id": "memory-prune",
+      "label": "Prune memory",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "danger",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops memory refresh",
+      "description": "Recompute relationship memory from canonical state.",
+      "domain": "memory",
+      "examples": [],
+      "id": "memory-refresh",
+      "label": "Memory refresh",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops memory switch '<target>'",
+      "description": "Show APs, neighbors, relationships, and timeline for a switch/site.",
+      "domain": "memory",
+      "examples": [],
+      "id": "memory-switch",
+      "label": "Memory switch",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops memory timeline '<target>'",
+      "description": "Search all relationship events newest first.",
+      "domain": "memory",
+      "examples": [],
+      "id": "memory-timeline",
+      "label": "Memory timeline",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Endpoint",
+          "name": "endpoint",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "endpoint"
+      ],
+      "cancellable": true,
+      "command": "netops path history '<endpoint>'",
+      "description": "Show chronological path inspections.",
+      "domain": "path",
+      "examples": [],
+      "id": "path-history",
+      "label": "Path history",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Endpoint",
+          "name": "endpoint",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Vlan",
+          "max": 4094,
+          "min": 1,
+          "name": "vlan",
+          "required": true,
+          "type": "number"
+        },
+        {
+          "label": "Source",
+          "name": "source",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "label": "Destination",
+          "name": "destination",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "label": "Depth",
+          "max": 16,
+          "min": 1,
+          "name": "depth",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "label": "Max Nodes",
+          "max": 256,
+          "min": 1,
+          "name": "max_nodes",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "label": "Mode",
+          "name": "mode",
+          "options": [
+            "hybrid",
+            "cached",
+            "live"
+          ],
+          "required": false,
+          "type": "select"
+        },
+        {
+          "label": "Explain",
+          "name": "explain",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "args": [
+        "endpoint",
+        "vlan",
+        "source",
+        "destination",
+        "depth",
+        "max_nodes",
+        "mode",
+        "explain"
+      ],
+      "cancellable": true,
+      "command": "netops path inspect '<endpoint>' --vlan '<vlan>'",
+      "description": "Inspect a bounded L2/L3 endpoint path with cached and live read-only evidence.",
+      "domain": "path",
+      "examples": [],
+      "id": "path-inspect",
+      "label": "Inspect forwarding path",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 1800,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Run Id",
+          "name": "run_id",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "run_id"
+      ],
+      "cancellable": true,
+      "command": "netops path show '<run_id>'",
+      "description": "Open one persisted path result.",
+      "domain": "path",
+      "examples": [],
+      "id": "path-show",
+      "label": "Show path run",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Group",
+          "name": "group",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "group"
+      ],
+      "cancellable": true,
+      "command": "netops plugin check '<group>'",
+      "description": "Load enabled plugins and isolate failures.",
+      "domain": "plugin",
+      "examples": [],
+      "id": "plugin-check",
+      "label": "Check plugins",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Plugin Id",
+          "name": "plugin_id",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "plugin_id"
+      ],
+      "cancellable": true,
+      "command": "netops plugin disable '<plugin_id>'",
+      "description": "Disable one plugin in this profile.",
+      "domain": "plugin",
+      "examples": [],
+      "id": "plugin-disable",
+      "label": "Disable plugin",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Plugin Id",
+          "name": "plugin_id",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "plugin_id"
+      ],
+      "cancellable": true,
+      "command": "netops plugin enable '<plugin_id>'",
+      "description": "Enable one trusted entry point in this profile.",
+      "domain": "plugin",
+      "examples": [],
+      "id": "plugin-enable",
+      "label": "Enable plugin",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops plugin groups",
+      "description": "List stable entry-point groups and policy.",
+      "domain": "plugin",
+      "examples": [],
+      "id": "plugin-groups",
+      "label": "Plugin groups",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops plugin list",
+      "description": "Discover plugins without importing disabled code.",
+      "domain": "plugin",
+      "examples": [],
+      "id": "plugin-list",
+      "label": "List plugins",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Name",
+          "name": "name",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "name"
+      ],
+      "cancellable": true,
+      "command": "netops profile create '<name>'",
+      "description": "Create a neutral isolated profile.",
+      "domain": "profile",
+      "examples": [],
+      "id": "profile-create",
+      "label": "Create profile",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops profile list",
+      "description": "List isolated NetOps profiles.",
+      "domain": "profile",
+      "examples": [],
+      "id": "profile-list",
+      "label": "List profiles",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Name",
+          "name": "name",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "name"
+      ],
+      "cancellable": true,
+      "command": "netops profile migrate-legacy '<name>'",
+      "description": "Copy legacy netsnmp state without deleting the source.",
+      "domain": "profile",
+      "examples": [],
+      "id": "profile-migrate-legacy",
+      "label": "Migrate legacy profile",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops profile paths",
+      "description": "Show active profile XDG paths.",
+      "domain": "profile",
+      "examples": [],
+      "id": "profile-paths",
+      "label": "Profile paths",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Name",
+          "name": "name",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "name"
+      ],
+      "cancellable": true,
+      "command": "netops profile show '<name>'",
+      "description": "Show profile paths and non-secret settings.",
+      "domain": "profile",
+      "examples": [],
+      "id": "profile-show",
+      "label": "Show profile",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Name",
+          "name": "name",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "name"
+      ],
+      "cancellable": true,
+      "command": "netops profile use '<name>'",
+      "description": "Select the profile used by future commands.",
+      "domain": "profile",
+      "examples": [],
+      "id": "profile-use",
+      "label": "Select profile",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Name",
+          "name": "name",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "name"
+      ],
+      "cancellable": true,
+      "command": "netops secrets delete '<name>' --confirm",
+      "description": "Delete one named secret after confirmation.",
+      "domain": "secrets",
+      "examples": [],
+      "id": "secrets-delete",
+      "label": "Delete named secret",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops secrets import-ssh",
+      "description": "Import the legacy SSH vault into ssh/default/password.",
+      "domain": "secrets",
+      "examples": [],
+      "id": "secrets-import-ssh",
+      "label": "Import SSH secret",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops secrets list",
+      "description": "List named secrets without values.",
+      "domain": "secrets",
+      "examples": [],
+      "id": "secrets-list",
+      "label": "List named secrets",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Name",
+          "name": "name",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "name"
+      ],
+      "cancellable": true,
+      "command": "netops secrets set '<name>'",
+      "description": "Prompt for and encrypt one named secret.",
+      "domain": "secrets",
+      "examples": [],
+      "id": "secrets-set",
+      "label": "Set named secret",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops secrets status",
+      "description": "Show named-secret store security and lock state.",
+      "domain": "secrets",
+      "examples": [],
+      "id": "secrets-status",
+      "label": "Named secret status",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops serve",
+      "description": "Start the loopback API and WebUI server.",
+      "domain": "serve",
+      "examples": [],
+      "id": "serve-run",
+      "label": "Start API server",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "interactive-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops support bundle",
+      "description": "Create a redacted support archive without inventory, secrets, raw evidence, or backups.",
+      "domain": "support",
+      "examples": [],
+      "id": "support-bundle",
+      "label": "Create support bundle",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops topology changes",
+      "description": "Show recorded topology changes newest first.",
+      "domain": "topology",
+      "examples": [],
+      "id": "topology-changes",
+      "label": "Topology changes",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops topology neighbors '<target>'",
+      "description": "Show cached topology neighbor rows or query one target.",
+      "domain": "topology",
+      "examples": [],
+      "id": "topology-neighbors",
+      "label": "Topology neighbors",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops topology scan",
+      "description": "Refresh LLDP/CDP topology.",
+      "domain": "topology",
+      "examples": [],
+      "id": "topology-scan",
+      "label": "Topology scan",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops topology show '<target>'",
+      "description": "Show topology, optionally querying one target.",
+      "domain": "topology",
+      "examples": [],
+      "id": "topology-show",
+      "label": "Topology show",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops topology timeline '<target>'",
+      "description": "Show neighbor-link history newest first.",
+      "domain": "topology",
+      "examples": [],
+      "id": "topology-timeline",
+      "label": "Topology timeline",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops tui",
+      "description": "Open the local full-screen operator console.",
+      "domain": "tui",
+      "examples": [],
+      "id": "tui-open",
+      "label": "Operator console",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "interactive-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops vault migrate",
+      "description": "Convert a legacy passphrase GPG vault to terminal sudo-gated GPG without exposing the SSH password.",
+      "domain": "vault",
+      "examples": [],
+      "id": "vault-migrate",
+      "label": "Migrate vault",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "warning",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops vault set",
+      "description": "Store a new SSH password in the terminal sudo-gated GPG vault.",
+      "domain": "vault",
+      "examples": [],
+      "id": "vault-set",
+      "label": "Set vault password",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "warning",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops vault status",
+      "description": "Show the SSH vault format, permissions, recording time, and non-prompting lock state.",
+      "domain": "vault",
+      "examples": [],
+      "id": "vault-status",
+      "label": "Vault status",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops vault unlock",
+      "description": "Authenticate through sudo and verify the encrypted SSH vault for the current sudo timeout.",
+      "domain": "vault",
+      "examples": [],
+      "id": "vault-unlock",
+      "label": "Unlock vault",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "warning",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Vlan",
+          "max": 4094,
+          "min": 1,
+          "name": "vlan",
+          "required": true,
+          "type": "number"
+        },
+        {
+          "label": "Depth",
+          "max": 16,
+          "min": 1,
+          "name": "depth",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "label": "Max Nodes",
+          "max": 256,
+          "min": 1,
+          "name": "max_nodes",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "label": "Refresh Neighbors",
+          "name": "refresh_neighbors",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "args": [
+        "target",
+        "vlan",
+        "depth",
+        "max_nodes",
+        "refresh_neighbors"
+      ],
+      "cancellable": true,
+      "command": "netops vlan locate '<target>' '<vlan>'",
+      "description": "Locate one or many VLANs from one or many roots; optional depth traverses LLDP/CDP-confirmed switch links.",
+      "domain": "vlan",
+      "examples": [],
+      "id": "vlan-locate",
+      "label": "Locate VLAN",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Vlan",
+          "max": 4094,
+          "min": 1,
+          "name": "vlan",
+          "required": true,
+          "type": "number"
+        },
+        {
+          "label": "Depth",
+          "max": 16,
+          "min": 1,
+          "name": "depth",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "label": "Max Nodes",
+          "max": 256,
+          "min": 1,
+          "name": "max_nodes",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "label": "Refresh Neighbors",
+          "name": "refresh_neighbors",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "args": [
+        "target",
+        "vlan",
+        "depth",
+        "max_nodes",
+        "refresh_neighbors"
+      ],
+      "cancellable": true,
+      "command": "netops vlan propagation '<target>' '<vlan>'",
+      "description": "Trace a root-by-VLAN matrix with bounded breadth-first switch traversal.",
+      "domain": "vlan",
+      "examples": [],
+      "id": "vlan-propagation",
+      "label": "VLAN propagation",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Switch",
+          "name": "target",
+          "placeholder": "hostname or IP",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Interface",
+          "name": "interface",
+          "placeholder": "Gi1/0/7",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Port mode",
+          "name": "vlan_mode",
+          "options": [
+            "access",
+            "trunk"
+          ],
+          "required": true,
+          "type": "select"
+        },
+        {
+          "label": "VLAN or allowed list",
+          "name": "vlan",
+          "placeholder": "131 or 10,20,100-120",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Native VLAN",
+          "max": 4094,
+          "min": 1,
+          "name": "native_vlan",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "label": "Replace trunk allowed list",
+          "name": "replace",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "args": [
+        "target",
+        "interface",
+        "vlan_mode",
+        "vlan",
+        "native_vlan",
+        "replace"
+      ],
+      "cancellable": true,
+      "command": "netops vlan set '<target>' '<interface>' '<vlan_mode>' '<vlan>'",
+      "description": "Back up, apply, and verify one typed access or trunk VLAN change through the audited core.",
+      "domain": "vlan",
+      "examples": [],
+      "id": "vlan-set",
+      "label": "Guarded VLAN change",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "config",
+      "run_supported": true,
+      "safety_class": "config-write",
+      "state_effects": [
+        "device-config",
+        "configuration-backup",
+        "post-change-verification",
+        "audit-event"
+      ],
+      "timeout_seconds": 600,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops workflow ap-audit",
+      "description": "Refresh AP records and show AP moves.",
+      "domain": "workflow",
+      "examples": [],
+      "id": "workflow-ap-audit",
+      "label": "AP audit",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops workflow backup-online '<target>'",
+      "description": "Changed-only backups for online devices.",
+      "domain": "workflow",
+      "examples": [],
+      "id": "workflow-backup-online",
+      "label": "Backup online workflow",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops workflow morning-check",
+      "description": "Health, memory, topology, filtering, and attention summary.",
+      "domain": "workflow",
+      "examples": [],
+      "id": "workflow-morning-check",
+      "label": "Morning check",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netops workflow refresh-inventory",
+      "description": "Health, AP, topology, and memory refresh.",
+      "domain": "workflow",
+      "examples": [],
+      "id": "workflow-refresh-inventory",
+      "label": "Refresh inventory",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netops workflow site-health '<target>'",
+      "description": "Latency and filtering checks for a target/site.",
+      "domain": "workflow",
+      "examples": [],
+      "id": "workflow-site-health",
+      "label": "Site health",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    }
+  ],
+  "schema_version": 1,
+  "version": "8.5.0b2"
+}

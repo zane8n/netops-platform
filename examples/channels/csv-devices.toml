@@ -1,0 +1,28 @@
+schema_version = 1
+
+[channel]
+name = "csv-devices"
+kind = "csv"
+enabled = true
+entity_kind = "device"
+source_id_field = "asset_id"
+observed_at_field = "observed_at"
+
+[reader]
+path = "../data/devices.csv"
+encoding = "utf-8"
+completeness = "full"
+confidence = 95
+
+[fields]
+ip = "ip"
+hostname = "hostname"
+platform = "platform"
+model = "model"
+serial = "serial"
+mac = "mac"
+status = "status"
+
+[provenance]
+owner = "network-operations"
+source_system = "approved-csv-export"

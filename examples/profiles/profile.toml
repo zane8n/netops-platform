@@ -1,0 +1,27 @@
+schema_version = 1
+
+[network]
+subnets = "192.0.2.0/24 198.51.100.0/24"
+core_switch_ip = "192.0.2.10"
+core_iperf_server = "192.0.2.20"
+target_abbreviation_prefix = ""
+
+[identity]
+strip_prefixes = []
+ap_similarity_threshold = 85
+switch_similarity_threshold = 75
+
+[discovery]
+cisco_wlc_ip = ""
+cisco_wlc_ap_ip_filter = ""
+cisco_wlc_ap_name_contains = ""
+cisco_wlc_ap_name_prefix = ""
+ruckus_vsz_ip = ""
+
+[policy]
+ssh_host_key_mode = "accept-new"
+device_writes_enabled = false
+plugin_writes_enabled = false
+vault_password_ttl_hours = 72
+vault_expiry_window_minutes = 20
+vault_expiry_warning_hours = 12

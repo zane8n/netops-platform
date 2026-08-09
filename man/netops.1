@@ -1,0 +1,503 @@
+.TH NETOPS 1 "" "NetOps 8.5.0b2" "User Commands"
+.SH NAME
+netops \- local-first network operations platform
+.SH SYNOPSIS
+.B netops
+[--profile NAME] DOMAIN ACTION [ARGUMENTS] [GLOBAL FLAGS]
+.SH DESCRIPTION
+NetOps provides profile-isolated inventory, diagnostics, ingest, plugins, and bounded path inspection.
+.SH DOMAINS
+.TP
+.B tui
+Open the command-first local operator console. The `netop tui` and `netops tui` forms are equivalent.
+.TP
+.B inventory
+Switch/router inventory, flat-file migration, details, and bulk activity checks.
+.TP
+.B ap
+Wireless AP inventory, AP-on-switch lookup, AP move history, unjoined WLC records, and AP timelines.
+.TP
+.B topology
+LLDP/CDP neighbor scans, topology display, topology changes, and link timelines.
+.TP
+.B memory
+Relationship memory: AP attachments, IP/MAC ownership, switch ports, topology, and source confidence.
+.TP
+.B health
+Reachability, stale state, offline lists, attention queue, and health timeline.
+.TP
+.B backup
+Online-only, changed-only config backups plus backup history and diffs.
+.TP
+.B device
+SSH, read-only show commands, config previews/confirmed changes, and inventory enrichment.
+.TP
+.B vault
+Local SSH-password vault lifecycle with terminal sudo authentication and no graphical pinentry.
+.TP
+.B vlan
+Read-only VLAN lookup/propagation plus guarded VLAN changes.
+.TP
+.B lookup
+Core and MAC lookups. Results are cached into relationship memory.
+.TP
+.B diagnose
+Local/core latency, verified Internet speed, controlled throughput, port health, and guarded copper cable diagnostics.
+.TP
+.B workflow
+Safe multi-step operator workflows.
+.TP
+.B jobs
+Job queue, job details, logs, and server-side cancellation status.
+.TP
+.B commands
+Canonical command registry used by CLI, API, jobs, previews, workflows, and WebUI.
+.TP
+.B db
+SQLite lifecycle and flat-file compatibility shortcuts.
+.TP
+.B serve
+Start the localhost WebUI/API server.
+.TP
+.B ask
+Deterministic state retrieval and registry-backed command planning from natural language.
+.TP
+.B init
+Initialize an isolated profile and check host capabilities.
+.TP
+.B profile
+Create, select, inspect, and migrate isolated operator profiles.
+.TP
+.B config
+Inspect and change non-secret profile configuration.
+.TP
+.B secrets
+Manage named sudo-gated encrypted secrets without putting values in arguments or config.
+.TP
+.B ingest
+Validate and run declarative, provenance-preserving data channels.
+.TP
+.B plugin
+Discover and explicitly enable trusted Python entry-point plugins.
+.TP
+.B path
+Inspect a bounded endpoint path across cached topology and live read-only forwarding evidence.
+.TP
+.B support
+Create privacy-redacted diagnostics for support and bug reports.
+.SH REGISTERED COMMANDS
+.TP
+.B ap-list
+netops ap list '<target>' - Search current reconciled AP inventory.
+.TP
+.B ap-moves
+netops ap moves - Show recorded AP attachment changes newest first.
+.TP
+.B ap-on-switch
+netops ap on-switch '<target>' - Show canonical APs attached to a switch or site.
+.TP
+.B ap-scan
+netops ap scan - Refresh AP inventory.
+.TP
+.B ap-timeline
+netops ap timeline '<target>' - Show AP attachment history newest first.
+.TP
+.B ap-unjoined
+netops ap unjoined '<target>' - List AP observations that are not joined to a controller.
+.TP
+.B ask-alias-remove
+netops ask alias remove '<phrase>' - Remove a durable deterministic phrase alias.
+.TP
+.B ask-alias-set
+netops ask alias set '<phrase>' '<alias_target>' - Create or update a durable deterministic phrase alias.
+.TP
+.B ask-aliases
+netops ask aliases - List deterministic phrase aliases.
+.TP
+.B ask-chat
+netops ask - Open the stateful Natural Ask terminal session.
+.TP
+.B ask-patterns
+netops ask patterns - List supported retrieval and command-center examples.
+.TP
+.B ask-query
+netops ask '<question>' - Run a deterministic question workflow over current inventory and relationship memory.
+.TP
+.B backup-diff
+netops backup diff '<target>' - Diff latest changed backups for a target.
+.TP
+.B backup-history
+netops backup history '<target>' - Show backup history for a target.
+.TP
+.B backup-run
+netops backup run '<target>' - Online-only changed-only config backup.
+.TP
+.B backup-verify
+netops backup verify - Review recorded backup checksums, paths, and statuses.
+.TP
+.B commands-list
+netops commands list - List the structured command registry and safety metadata.
+.TP
+.B commands-run
+netops commands run '<action>' --preview - Meta-action for previewing a registry command. Ask plans the selected action directly.
+.TP
+.B commands-show
+netops commands show '<action>' - Show metadata for one registry action.
+.TP
+.B config-get
+netops config get '<key>' - Read one effective non-secret setting.
+.TP
+.B config-paths
+netops config paths - Show global and profile configuration files.
+.TP
+.B config-set
+netops config set '<key>' '<value>' - Set one non-secret profile override.
+.TP
+.B config-show
+netops config show - Show effective redacted profile settings.
+.TP
+.B config-unset
+netops config unset '<key>' - Remove one profile override.
+.TP
+.B config-validate
+netops config validate - Validate effective settings and legacy-secret state.
+.TP
+.B db-integrity
+netops db integrity - Run SQLite integrity checks without modifying state.
+.TP
+.B db-migrate
+netops db migrate - Apply SQLite schema migrations and reconcile derived state.
+.TP
+.B db-path
+netops db path - Print the active SQLite database path.
+.TP
+.B db-repair
+netops db repair - Reindex and repair recoverable SQLite structures, then verify integrity.
+.TP
+.B db-status
+netops db status - Show database paths, schema version, file sizes, and record counts.
+.TP
+.B db-vacuum
+netops db vacuum - Compact the SQLite database.
+.TP
+.B device-config
+netops device config '<target>' '<commands>' - Preview/confirmed config command wrapper. WebUI preview only.
+.TP
+.B device-identity
+netops device identity '<target>' '<target2>' - Explain confidence and conflicts between two switch identity records.
+.TP
+.B device-inventory
+netops device inventory '<target>' - Run the device inventory helper for one target.
+.TP
+.B device-show
+netops device show '<target>' '<command>' - Run a policy-checked read-only show command.
+.TP
+.B device-ssh
+netops device ssh '<target>' - Open an interactive SSH session in a terminal.
+.TP
+.B device-support
+netops device support '<target>' - Classify a device and show driver capability maturity for Cisco, Aruba, or Ruckus.
+.TP
+.B device-trust-enroll
+netops device trust enroll '<target>' --fingerprint '<fingerprint>' --confirm - Enroll only an out-of-band verified SSH host-key fingerprint.
+.TP
+.B device-trust-forget
+netops device trust forget '<target>' --confirm - Remove a target from the managed SSH trust store.
+.TP
+.B device-trust-scan
+netops device trust scan '<target>' - Retrieve SSH host keys and SHA-256 fingerprints without enrolling them.
+.TP
+.B device-trust-status
+netops device trust status '<target>' - Inspect managed SSH host-key fingerprints without network access.
+.TP
+.B diagnose-cable
+netops diagnose cable '<device>' on '<interface>' - Read the last recorded copper cable/TDR result without starting a test.
+.TP
+.B diagnose-cable-test
+netops diagnose cable '<device>' on '<interface>' --test --dry-run - Preview a potentially disruptive copper TDR. Confirmed execution remains CLI-only.
+.TP
+.B diagnose-core-ping
+netops diagnose core-ping '<target>' - Issue ICMP from the configured/selected core switch and store parsed latency.
+.TP
+.B diagnose-doctor
+netops diagnose doctor - Audit diagnostic dependencies, routing, host limitations, trust, and core settings.
+.TP
+.B diagnose-filtering
+netops diagnose filtering '<target>' - DNS/TLS/filtering diagnostics.
+.TP
+.B diagnose-interface
+netops diagnose interface '<device>' on '<interface>' - Legacy interface rate monitor; command-center jobs default to one finite sample.
+.TP
+.B diagnose-latency
+netops diagnose latency '<target>' - Run latency probing.
+.TP
+.B diagnose-port-health
+netops diagnose port-health '<device>' on '<interface>' - Sample link negotiation and switch error-counter deltas.
+.TP
+.B diagnose-speed
+netops diagnose speed - Measure this NetOps host's routed Internet path with verified profile-based testing.
+.TP
+.B diagnose-throughput
+netops diagnose throughput '<target>' - Measure TCP receiver goodput between this client and a controlled iperf3 server.
+.TP
+.B health-attention
+netops health attention - Show health, topology, AP movement, and backup items needing review.
+.TP
+.B health-check
+netops health check '<target>' - Ping known/supplied devices and APs, then refresh health state.
+.TP
+.B health-offline
+netops health offline '<target>' - List current offline entities, optionally filtered by target.
+.TP
+.B health-status
+netops health status '<target>' - Read current canonical health, optionally filtered by target.
+.TP
+.B health-timeline
+netops health timeline '<target>' - Read health state changes newest first.
+.TP
+.B ingest-channels
+netops ingest channels - List declarative channels in the active profile.
+.TP
+.B ingest-history
+netops ingest history - Show ingest runs newest first.
+.TP
+.B ingest-observations
+netops ingest observations '<channel>' - Show append-only channel observations.
+.TP
+.B ingest-rejects
+netops ingest rejects '<run_id>' - Show redacted quarantine metadata.
+.TP
+.B ingest-run
+netops ingest run '<channel>' - Run one provenance-preserving ingest channel.
+.TP
+.B ingest-validate
+netops ingest validate - Validate channel manifests without fetching records.
+.TP
+.B init-run
+netops init - Create neutral profile state and check host capabilities.
+.TP
+.B inventory-activity
+netops inventory activity '<target>' - Ping one or more inventory targets and report current activity.
+.TP
+.B inventory-details
+netops inventory details '<target>' - Collect detailed inventory for one target.
+.TP
+.B inventory-export-flat
+netops inventory export-flat - Export SQLite inventory back to legacy flat files.
+.TP
+.B inventory-import-flat
+netops inventory import-flat - Import legacy flat caches into SQLite.
+.TP
+.B inventory-list
+netops inventory list '<target>' - Search current canonical device and AP inventory.
+.TP
+.B inventory-merge
+netops inventory merge '<source>' '<target>' --reason '<reason>' --dry-run - Preview retiring an old device into a current device while preserving chronological evidence. Apply explicitly in the CLI with --confirm.
+.TP
+.B inventory-merges
+netops inventory merges - List active manual device merges and their chronology.
+.TP
+.B inventory-scan
+netops inventory scan '<target>' - Refresh switch/router inventory.
+.TP
+.B inventory-show
+netops inventory show '<target>' - Search current canonical inventory only.
+.TP
+.B inventory-unmerge
+netops inventory unmerge '<merge_id>' --reason '<reason>' - Prepare restoration of a manually retired source device. Apply explicitly in the CLI with --confirm.
+.TP
+.B jobs-cancel
+netops jobs cancel '<job_id>' - Cancel a live job through the process that owns it.
+.TP
+.B jobs-list
+netops jobs list - List recorded jobs newest first.
+.TP
+.B jobs-logs
+netops jobs logs '<job_id>' - Show logs for one recorded job.
+.TP
+.B jobs-show
+netops jobs show '<job_id>' - Show one recorded job and its logs.
+.TP
+.B lookup-core
+netops lookup core '<target>' - Core IP/MAC lookup cached into memory.
+.TP
+.B lookup-mac
+netops lookup mac '<target>' '<mac>' - MAC lookup from one target or from all current switches with target=all.
+.TP
+.B lookup-mac-history
+netops lookup mac history '<mac>' - Show newest-first identity and switch-port events for a MAC.
+.TP
+.B lookup-mac-inspect
+netops lookup mac inspect '<mac>' - Correlate cached MAC identity, location, IP, vendor, and history evidence.
+.TP
+.B lookup-mac-locate
+netops lookup mac locate '<mac>' - Search switch forwarding tables without requiring an endpoint IP.
+.TP
+.B lookup-mac-online
+netops lookup mac online '<mac>' - Resolve the longest authoritative IEEE MA-L/MA-M/MA-S assignment with cache provenance.
+.TP
+.B lookup-mac-profile
+netops lookup mac profile '<mac>' - Locate a MAC and profile likely edge ports with interface, LLDP/CDP, PoE, device-tracking, and core evidence.
+.TP
+.B lookup-mac-registry
+netops lookup mac registry status - Show cached IEEE registry files, row counts, checksums, sources, and last refresh time.
+.TP
+.B lookup-mac-registry-refresh
+netops lookup mac registry refresh - Refresh all IEEE public MAC assignment CSV registries into the private local cache.
+.TP
+.B lookup-mac-vendor
+netops lookup mac vendor '<mac>' - Resolve a MAC prefix from the locally installed OUI database.
+.TP
+.B memory-device
+netops memory device '<target>' - Show current identity relationships and history for a device.
+.TP
+.B memory-explain
+netops memory explain '<target>' - Explain relationship sources, confidence, and last observations.
+.TP
+.B memory-export
+netops memory export --json - Export all current relationships as JSON.
+.TP
+.B memory-ip
+netops memory ip '<target>' - Show historical ownership and relationship events for an IP.
+.TP
+.B memory-mac
+netops memory mac '<target>' - Show identity and movement history for a MAC address.
+.TP
+.B memory-port
+netops memory port '<target>' '<interface>' - Show current and historical occupancy for a switch port.
+.TP
+.B memory-prune
+netops memory prune - Memory pruning is intentionally disabled because history is retained by default.
+.TP
+.B memory-refresh
+netops memory refresh - Recompute relationship memory from canonical state.
+.TP
+.B memory-switch
+netops memory switch '<target>' - Show APs, neighbors, relationships, and timeline for a switch/site.
+.TP
+.B memory-timeline
+netops memory timeline '<target>' - Search all relationship events newest first.
+.TP
+.B path-history
+netops path history '<endpoint>' - Show chronological path inspections.
+.TP
+.B path-inspect
+netops path inspect '<endpoint>' --vlan '<vlan>' - Inspect a bounded L2/L3 endpoint path with cached and live read-only evidence.
+.TP
+.B path-show
+netops path show '<run_id>' - Open one persisted path result.
+.TP
+.B plugin-check
+netops plugin check '<group>' - Load enabled plugins and isolate failures.
+.TP
+.B plugin-disable
+netops plugin disable '<plugin_id>' - Disable one plugin in this profile.
+.TP
+.B plugin-enable
+netops plugin enable '<plugin_id>' - Enable one trusted entry point in this profile.
+.TP
+.B plugin-groups
+netops plugin groups - List stable entry-point groups and policy.
+.TP
+.B plugin-list
+netops plugin list - Discover plugins without importing disabled code.
+.TP
+.B profile-create
+netops profile create '<name>' - Create a neutral isolated profile.
+.TP
+.B profile-list
+netops profile list - List isolated NetOps profiles.
+.TP
+.B profile-migrate-legacy
+netops profile migrate-legacy '<name>' - Copy legacy netsnmp state without deleting the source.
+.TP
+.B profile-paths
+netops profile paths - Show active profile XDG paths.
+.TP
+.B profile-show
+netops profile show '<name>' - Show profile paths and non-secret settings.
+.TP
+.B profile-use
+netops profile use '<name>' - Select the profile used by future commands.
+.TP
+.B secrets-delete
+netops secrets delete '<name>' --confirm - Delete one named secret after confirmation.
+.TP
+.B secrets-import-ssh
+netops secrets import-ssh - Import the legacy SSH vault into ssh/default/password.
+.TP
+.B secrets-list
+netops secrets list - List named secrets without values.
+.TP
+.B secrets-set
+netops secrets set '<name>' - Prompt for and encrypt one named secret.
+.TP
+.B secrets-status
+netops secrets status - Show named-secret store security and lock state.
+.TP
+.B serve-run
+netops serve - Start the loopback API and WebUI server.
+.TP
+.B support-bundle
+netops support bundle - Create a redacted support archive without inventory, secrets, raw evidence, or backups.
+.TP
+.B topology-changes
+netops topology changes - Show recorded topology changes newest first.
+.TP
+.B topology-neighbors
+netops topology neighbors '<target>' - Show cached topology neighbor rows or query one target.
+.TP
+.B topology-scan
+netops topology scan - Refresh LLDP/CDP topology.
+.TP
+.B topology-show
+netops topology show '<target>' - Show topology, optionally querying one target.
+.TP
+.B topology-timeline
+netops topology timeline '<target>' - Show neighbor-link history newest first.
+.TP
+.B tui-open
+netops tui - Open the local full-screen operator console.
+.TP
+.B vault-migrate
+netops vault migrate - Convert a legacy passphrase GPG vault to terminal sudo-gated GPG without exposing the SSH password.
+.TP
+.B vault-set
+netops vault set - Store a new SSH password in the terminal sudo-gated GPG vault.
+.TP
+.B vault-status
+netops vault status - Show the SSH vault format, permissions, recording time, and non-prompting lock state.
+.TP
+.B vault-unlock
+netops vault unlock - Authenticate through sudo and verify the encrypted SSH vault for the current sudo timeout.
+.TP
+.B vlan-locate
+netops vlan locate '<target>' '<vlan>' - Locate one or many VLANs from one or many roots; optional depth traverses LLDP/CDP-confirmed switch links.
+.TP
+.B vlan-propagation
+netops vlan propagation '<target>' '<vlan>' - Trace a root-by-VLAN matrix with bounded breadth-first switch traversal.
+.TP
+.B vlan-set
+netops vlan set '<target>' '<interface>' '<vlan_mode>' '<vlan>' - Back up, apply, and verify one typed access or trunk VLAN change through the audited core.
+.TP
+.B workflow-ap-audit
+netops workflow ap-audit - Refresh AP records and show AP moves.
+.TP
+.B workflow-backup-online
+netops workflow backup-online '<target>' - Changed-only backups for online devices.
+.TP
+.B workflow-morning-check
+netops workflow morning-check - Health, memory, topology, filtering, and attention summary.
+.TP
+.B workflow-refresh-inventory
+netops workflow refresh-inventory - Health, AP, topology, and memory refresh.
+.TP
+.B workflow-site-health
+netops workflow site-health '<target>' - Latency and filtering checks for a target/site.
+.SH FILES
+Configuration follows XDG base directories and is isolated under profiles/PROFILE.
+.SH SECURITY
+Secret values use named encrypted storage and must not be placed in command arguments or TOML files.
+.SH SEE ALSO
+netops help, netops commands list, netops diagnose doctor
+.\" Generated by generate_reference.py; do not edit by hand.

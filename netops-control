@@ -1,0 +1,1394 @@
+#!/usr/bin/env bash
+# NetOps Autonomous C&C (Crowler Engine)
+source "$(dirname "$(realpath "$0")")/netops-lib.sh"
+set -o pipefail
+
+CONTROL_INTERRUPTED=false
+CONTROL_TMP_FILES=()
+CONTROL_CHILD_PIDS=()
+
+control_track_tmp() {
+    CONTROL_TMP_FILES+=("$1")
+}
+
+control_terminate_tree() {
+    local pid="$1" child
+    local -a children=()
+    if command -v pgrep >/dev/null 2>&1; then
+        mapfile -t children < <(pgrep -P "$pid" 2>/dev/null || true)
+        for child in "${children[@]}"; do
+            [[ -n "$child" ]] && control_terminate_tree "$child"
+        done
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+}
+
+control_cleanup() {
+    local rc=$? pid
+    trap - EXIT HUP INT TERM
+    if [[ "$CONTROL_INTERRUPTED" == true ]]; then
+        for pid in "${CONTROL_CHILD_PIDS[@]}"; do
+            [[ -n "$pid" ]] && control_terminate_tree "$pid"
+        done
+        for pid in "${CONTROL_CHILD_PIDS[@]}"; do
+            [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
+        done
+    fi
+    ((${#CONTROL_TMP_FILES[@]})) && rm -f -- "${CONTROL_TMP_FILES[@]}"
+    exit "$rc"
+}
+
+control_signal() {
+    CONTROL_INTERRUPTED=true
+    case "$1" in
+        HUP) exit 129 ;;
+        INT) exit 130 ;;
+        TERM) exit 143 ;;
+    esac
+}
+
+trap control_cleanup EXIT
+trap 'control_signal HUP' HUP
+trap 'control_signal INT' INT
+trap 'control_signal TERM' TERM
+
+log() { echo -e "\033[0;34m[CTRL]\033[0m $1"; }
+warn() { echo -e "\033[1;33m[WARN]\033[0m $1"; }
+error() { echo -e "\033[0;31m[ERR ]\033[0m $1"; }
+success() { echo -e "\033[0;32m[OK  ]\033[0m $1"; }
+
+
+control_valid_interface() {
+    [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]{0,63}$ ]]
+}
+
+control_valid_vlan_id() {
+    local value="${1:-}"
+    [[ "$value" =~ ^[0-9]{1,4}$ ]] && ((10#$value >= 1 && 10#$value <= 4094))
+}
+
+control_valid_vlan_list() {
+    local value="${1:-}" part first last
+    local -a parts=()
+    [[ -n "$value" ]] && ((${#value} <= 512)) || return 1
+    [[ "$value" =~ ^[0-9]{1,4}(-[0-9]{1,4})?(,[0-9]{1,4}(-[0-9]{1,4})?)*$ ]] || return 1
+    IFS=',' read -r -a parts <<< "$value"
+    ((${#parts[@]})) || return 1
+    for part in "${parts[@]}"; do
+        if [[ "$part" == *-* ]]; then
+            first=${part%%-*}; last=${part#*-}
+            control_valid_vlan_id "$first" && control_valid_vlan_id "$last" && ((10#$first <= 10#$last)) || return 1
+        else
+            control_valid_vlan_id "$part" || return 1
+        fi
+    done
+}
+
+control_valid_mac() {
+    local value="${1:-}"
+    [[ "$value" =~ ^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$ ]] ||
+        [[ "$value" =~ ^[0-9A-Fa-f]{4}(\.[0-9A-Fa-f]{4}){2}$ ]] ||
+        [[ "$value" =~ ^[0-9A-Fa-f]{6}-[0-9A-Fa-f]{6}$ ]] ||
+        [[ "$value" =~ ^[0-9A-Fa-f]{12}$ ]]
+}
+
+control_read_command_allowed() {
+    local raw="${1:-}" command
+    [[ -n "$raw" ]] || return 1
+    [[ "$raw" != *$'\n'* && "$raw" != *$'\r'* ]] || return 1
+    [[ "$raw" != *';'* && "$raw" != *'&&'* && "$raw" != *'||'* && "$raw" != *'`'* && "$raw" != *'$('* ]] || return 1
+    command=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ')
+    command=${command# }
+    command=${command% }
+    if [[ "$command" =~ ^(show|sh|display|get)[[:space:]]+ ]]; then
+        case "$command" in
+            *running-config*|*startup-config*|*tech-support*|*secret*|*password*|*passwd*|*community*|*credential*|*crypto*|*private-key*|*certificate*|*write*|*erase*|*delete*|*copy\ *|*reload*|*configure*|*conf\ t*) return 1 ;;
+            *) return 0 ;;
+        esac
+    fi
+    [[ "$command" =~ ^ping[[:space:]]+[A-Za-z0-9.:-]+([[:space:]]+(repeat|repetitions|timeout)[[:space:]]+[0-9]+)*$ ]] && return 0
+    [[ "$command" =~ ^test[[:space:]]+cable-diagnostics([[:space:]]+tdr[[:space:]]+interface)?[[:space:]]+[A-Za-z0-9./:_-]+$ ]] && return 0
+    [[ "$command" =~ ^diag[[:space:]]+cable-diagnostic[[:space:]]+(show|test)[[:space:]]+[A-Za-z0-9./:_-]+$ ]] && return 0
+    return 1
+}
+
+
+control_sql_quote() {
+    local value="${1:-}"
+    value=${value//\'/\'\'}
+    printf "'%s'" "$value"
+}
+
+control_sqlite_db() {
+    if [[ -n "${NETOPS_SQLITE_DB:-}" ]]; then
+        echo "$NETOPS_SQLITE_DB"
+    elif [[ -n "${NETOPS_CACHE_DIR:-}" ]]; then
+        echo "$NETOPS_CACHE_DIR/netops.sqlite3"
+    elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        echo "/var/cache/netsnmp/netops.sqlite3"
+    else
+        echo "${HOME}/.cache/netsnmp/netops.sqlite3"
+    fi
+}
+
+control_backup_db_init() {
+    local db
+    db=$(control_sqlite_db)
+    mkdir -p "$(dirname "$db")"
+    sqlite3 "$db" >/dev/null <<'SQL'
+CREATE TABLE IF NOT EXISTS backup_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at INTEGER NOT NULL,
+    device_ip TEXT NOT NULL,
+    hostname TEXT,
+    path TEXT,
+    sha256 TEXT,
+    changed INTEGER NOT NULL DEFAULT 1,
+    size_bytes INTEGER,
+    status TEXT NOT NULL,
+    message TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_backup_history_device ON backup_history(device_ip, created_at);
+SQL
+}
+
+control_backup_latest_record() {
+    local ip="$1" db
+    db=$(control_sqlite_db)
+    control_backup_db_init
+    sqlite3 -separator '|' "$db" "SELECT sha256,path FROM backup_history WHERE device_ip=$(control_sql_quote "$ip") AND status='saved' ORDER BY created_at DESC,id DESC LIMIT 1;" 2>/dev/null
+}
+
+control_safe_filename() {
+    local value="${1:-device}" cleaned
+    cleaned=$(printf '%s' "$value" | tr -c 'A-Za-z0-9._-' '_')
+    while [[ "$cleaned" == .* ]]; do
+        cleaned=${cleaned#.}
+    done
+    [[ -n "$cleaned" ]] || cleaned="device"
+    printf '%.96s' "$cleaned"
+}
+
+control_backup_record() {
+    local ip="$1" host="$2" path="$3" hash="$4" changed="$5" size="$6" status="$7" message="$8" db ts
+    db=$(control_sqlite_db); ts=$(date +%s)
+    control_backup_db_init
+    sqlite3 "$db" "INSERT INTO backup_history(created_at,device_ip,hostname,path,sha256,changed,size_bytes,status,message) VALUES($ts,$(control_sql_quote "$ip"),$(control_sql_quote "$host"),$(control_sql_quote "$path"),$(control_sql_quote "$hash"),${changed:-0},${size:-0},$(control_sql_quote "$status"),$(control_sql_quote "$message"));" >/dev/null 2>&1 || true
+}
+
+control_redact_config() {
+    sed -E \
+        -e 's/(password( 7)?|secret|key-string|community-string|snmp-server community)[[:space:]]+[^[:space:]]+/\1 <redacted>/Ig' \
+        -e 's/(pre-shared-key|wpa-psk|radius-server key)[[:space:]]+[^[:space:]]+/\1 <redacted>/Ig'
+}
+
+show_backup_history() {
+    local target="$1" json="${2:-false}" ip db
+    [[ -n "$target" ]] || { error "backup-history requires target"; return 6; }
+    ip=$(resolve_targets "$target" "DEVICES" "false") || return 1
+    db=$(control_sqlite_db); control_backup_db_init
+    if [[ "$json" == "true" ]]; then
+        sqlite3 -json "$db" "SELECT * FROM backup_history WHERE device_ip=$(control_sql_quote "$ip") ORDER BY created_at DESC,id DESC LIMIT 50;"
+    else
+        sqlite3 -separator '|' "$db" "SELECT datetime(created_at,'unixepoch'),status,changed,sha256,path,message FROM backup_history WHERE device_ip=$(control_sql_quote "$ip") ORDER BY created_at DESC,id DESC LIMIT 20;" | awk -F'|' '{printf "%-20s %-10s changed=%s %-12s %s %s\n", $1,$2,$3,substr($4,1,12),$5,$6}'
+    fi
+}
+
+show_backup_diff() {
+    local target="$1" ip db rows prev curr
+    [[ -n "$target" ]] || { error "diff requires target"; return 6; }
+    ip=$(resolve_targets "$target" "DEVICES" "false") || return 1
+    db=$(control_sqlite_db); control_backup_db_init
+    mapfile -t rows < <(sqlite3 -separator '|' "$db" "SELECT path FROM backup_history WHERE device_ip=$(control_sql_quote "$ip") AND status='saved' AND changed=1 ORDER BY created_at DESC,id DESC LIMIT 2;")
+    curr="${rows[0]:-}"; prev="${rows[1]:-}"
+    [[ -f "$curr" && -f "$prev" ]] || { warn "Need at least two changed backups for $ip."; return 1; }
+    diff -u "$prev" "$curr" || true
+}
+
+control_backup_summary() {
+    local since="$1" db
+    db=$(control_sqlite_db); control_backup_db_init
+    sqlite3 -json "$db" "SELECT status,changed,COUNT(*) AS count FROM backup_history WHERE created_at >= ${since:-0} GROUP BY status,changed ORDER BY status,changed;" | jq -r '.[]? | "backup \(.status) changed=\(.changed): \(.count)"'
+}
+
+verify_target() {
+    local ip="$1"
+    local db_entry=$(db_get_device "$ip")
+    if [[ -n "$db_entry" ]]; then
+        local plat model family
+        plat=$(echo "$db_entry" | cut -d'|' -f3)
+        model=$(echo "$db_entry" | cut -d'|' -f4)
+        family=$(netops_platform_family "$plat" "$model")
+        case "$family" in
+            cisco-ios|aruba-aos-switch|aruba-aos-cx|ruckus-fastiron) return 0 ;;
+            ruckus-smartzone|ruckus-ap) return 1 ;;
+        esac
+    fi
+    
+    local probe_out=$(echo -e "\n\n\nno page\nshow version\nexit\ny" | netops_ssh "$ip" 2>&1 | tr -d '\r')
+    local detected label
+    detected=$(netops_platform_family "$probe_out")
+    case "$detected" in
+        cisco-ios) label="Cisco IOS" ;;
+        aruba-aos-switch) label="Aruba AOS-S" ;;
+        aruba-aos-cx) label="Aruba AOS-CX" ;;
+        ruckus-fastiron) label="Ruckus FastIron" ;;
+        *) return 1 ;;
+    esac
+    db_update_device "$ip" "N/A" "$label" "N/A" "N/A" "N/A" "SSH" "ONLINE"
+    return 0
+}
+
+device_marked_offline() {
+    local ip="$1"
+    local db_entry status
+    db_entry=$(db_get_device "$ip")
+    [[ -z "$db_entry" ]] && return 1
+    status=$(echo "$db_entry" | cut -d'|' -f9 | tr '[:lower:]' '[:upper:]')
+    [[ "$status" == "OFFLINE" ]]
+}
+
+filter_backup_targets() {
+    local kept=() ip
+    for ip in "${TARGETS[@]}"; do
+        if device_marked_offline "$ip"; then
+            if [[ "${JSON_OUTPUT:-false}" == "true" ]]; then
+                echo "[WARN] Skipped $ip (marked OFFLINE in discovery DB)" >&2
+            else
+                warn "Skipped $ip (marked OFFLINE in discovery DB)"
+            fi
+            continue
+        fi
+        kept+=("$ip")
+    done
+
+    TARGETS=("${kept[@]}")
+    if [[ ${#TARGETS[@]} -eq 0 && "${DRY_RUN:-false}" != "true" ]]; then
+        warn "No online targets remain for backup."
+        exit 0
+    fi
+}
+
+refine_inventory_from_ssh() {
+    local ip="$1" raw_data="$2" plat="$3"
+    local family
+    family=$(netops_platform_family "$plat" "$raw_data")
+    
+    local prompt_host=$(echo "$raw_data" | grep -oE "^[A-Za-z0-9_-]+[#>]" | head -1 | tr -d '#>')
+    local hostname=$(echo "$raw_data" | grep -iE "^(hostname|sysname)" | awk '{print $2}' | tr -d '\r' | head -1)
+    [[ -z "$hostname" ]] && hostname="$prompt_host"
+    
+    local model="Unknown"
+    local serial="N/A"
+    local mac="N/A"
+
+    if [[ "$family" == "cisco-ios" ]]; then
+        model=$(echo "$raw_data" | grep -i "Model Number" | awk -F: '{print $2}' | tr -d ' \r' | head -1)
+        [[ -z "$model" ]] && model=$(echo "$raw_data" | grep "Model number" | awk '{print $NF}' | tr -d '\r' | head -1)
+        serial=$(echo "$raw_data" | grep -i "Motherboard Serial Number" | awk -F: '{print $2}' | tr -d ' \r' | head -1)
+        mac=$(echo "$raw_data" | grep -ioE "([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}" | head -1)
+        plat="Cisco IOS"
+    elif [[ "$family" == "aruba-aos-switch" || "$family" == "aruba-aos-cx" ]]; then
+        local sys_name=$(echo "$raw_data" | grep -i "System Name" | awk -F':' '{print $2}' | tr -d ' \r' | head -1)
+        [[ -n "$sys_name" ]] && hostname="$sys_name"
+
+        model=$(echo "$raw_data" | grep -iE "(Aruba|HP|ProCurve)" | grep -iE "(Switch|revision)" | head -1 | sed 's/.*\(Aruba[a-zA-Z0-9 -+]*Switch\).*/\1/' | tr -d '\r')
+        [[ -z "$model" ]] && model=$(echo "$raw_data" | grep -i "Aruba" | awk '{print $1" "$2" "$3}' | head -1 | tr -d '\r')
+        
+        serial=$(echo "$raw_data" | grep -i "Serial" | grep -v "Number" | awk -F':' '{print $2}' | tr -d ' \r' | head -1)
+        mac=$(echo "$raw_data" | grep -i "Base MAC" | awk -F':' '{print $2":"$3":"$4":"$5":"$6":"$7}' | tr -d ' \r' | head -1)
+        
+        # Extracted MAC via precise regex to avoid garbage output trailing
+        mac=$(echo "$raw_data" | grep -ioE "([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{6}-[0-9A-Fa-f]{6}" | head -1)
+        [[ "$family" == "aruba-aos-cx" ]] && plat="Aruba AOS-CX" || plat="Aruba AOS-S"
+    elif [[ "$family" == "ruckus-fastiron" ]]; then
+        local sys_name
+        sys_name=$(echo "$raw_data" | sed -nE 's/^[[:space:]]*(System name|Hostname)[[:space:]]*:[[:space:]]*//Ip' | head -1 | tr -d '\r')
+        [[ -n "$sys_name" ]] && hostname="$sys_name"
+        model=$(echo "$raw_data" | grep -ioE 'ICX[[:space:]-]*[0-9]{4}[A-Za-z0-9-]*' | head -1 | tr -d ' \r')
+        serial=$(echo "$raw_data" | sed -nE 's/^[[:space:]]*(Serial Number|Serial No\.?)[[:space:]]*:[[:space:]]*//Ip' | head -1 | tr -d ' \r')
+        mac=$(echo "$raw_data" | grep -ioE "([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}" | head -1)
+        plat="Ruckus FastIron"
+    fi
+    
+    db_update_device "$ip" "${hostname:-N/A}" "$plat" "${model:-Unknown}" "${serial:-N/A}" "${mac:-N/A}" "SSH"
+}
+
+format_mac_for_plat() {
+    local raw="$1" plat="$2"
+    local clean=$(echo "$raw" | tr -d '.: -' | tr '[:upper:]' '[:lower:]')
+    if [[ ${#clean} -eq 12 ]]; then
+        local family
+        family=$(netops_platform_family "$plat")
+        if [[ "$family" == "cisco-ios" ]]; then
+            echo "${clean:0:4}.${clean:4:4}.${clean:8:4}"
+        elif [[ "$family" == "aruba-aos-switch" ]]; then
+            echo "${clean:0:6}-${clean:6:6}"
+        elif [[ "$family" == "aruba-aos-cx" ]]; then
+            echo "${clean:0:2}:${clean:2:2}:${clean:4:2}:${clean:6:2}:${clean:8:2}:${clean:10:2}"
+        elif [[ "$family" == "ruckus-fastiron" ]]; then
+            echo "$clean"
+        else
+            echo "$raw"
+        fi
+    else
+        echo "$raw"
+    fi
+}
+
+generate_command_stream() {
+    local plat="$1" mode="$2" helper
+    shift 2
+    helper="${NETOPS_DEVICE_DRIVER_HELPER:-$(netops_python_helper_path netops_devices netops_devices.py)}"
+    [[ -r "$helper" ]] || { error "Device driver helper is unavailable: $helper"; return 5; }
+    python3 "$helper" stream --platform "$plat" --action "$mode" -- "$@"
+}
+
+sanitize_output() {
+    local esc=$(printf '\033')
+    echo "$1" | sed -E \
+        -e '/^terminal length/d' \
+        -e '/^no page/d' \
+        -e '/^show running-config/d' \
+        -e '/^write memory/d' \
+        -e '/^configure terminal/d' \
+        -e '/^Building configuration/d' \
+        -e '/^Current configuration :/d' \
+        -e '/Connection.*closed/d' \
+        -e '/^Press any key to continue/d' \
+        -e '/^Your previous successful login/d' \
+        -e '/^Do you want to log out/d' \
+        -e "s/${esc}\\[[0-9;]*[A-Za-z]//g" \
+        -e "s/${esc}//g" \
+        -e 's/\[?25[hl]//g' \
+        -e 's/[0-9]+;[0-9]+R//g'
+}
+
+analyze_locate_vlan() {
+    local ip="$1" vlan_id="$2" raw_data="$3" plat="$4" config_only="$5"
+    local family
+    family=$(netops_platform_family "$plat" "$raw_data")
+    local hostname=$(db_get_device "$ip" | cut -d'|' -f2)
+    [[ -z "$hostname" || "$hostname" == "N/A" ]] && hostname="$ip"
+
+    local result=""
+
+    if [[ "$family" == "cisco-ios" ]]; then
+        if [[ "$config_only" == "--config-only" ]]; then
+            result=$(echo "$raw_data" | awk -v vid="$vlan_id" '
+            BEGIN { def=1; acc=""; trk=""; curr_int=""; mode=""; acc_vlan="1"; trk_vlans="" }
+            /^interface / {
+                if (mode == "access" && acc_vlan == vid) acc = acc curr_int ", "
+                if (mode == "trunk") {
+                    split(trk_vlans, p, ",");
+                    for(i in p) {
+                        if(p[i] ~ /-/) { split(p[i], sp, "-"); if(vid >= sp[1] && vid <= sp[2]) { trk = trk curr_int ", "; break } }
+                        else if(p[i] == vid) { trk = trk curr_int ", "; break }
+                    }
+                }
+                curr_int = $2; mode = ""; acc_vlan = "1"; trk_vlans = "ALL"
+            }
+            /^[ \t]*switchport mode access/ { mode = "access" }
+            /^[ \t]*switchport mode trunk/ { mode = "trunk" }
+            /^[ \t]*switchport access vlan/ { acc_vlan = $4 }
+            /^[ \t]*switchport trunk allowed vlan/ { trk_vlans = $5 }
+            END {
+                if (mode == "access" && acc_vlan == vid) acc = acc curr_int ", "
+                if (mode == "trunk") {
+                    split(trk_vlans, p, ",");
+                    for(i in p) {
+                        if(p[i] ~ /-/) { split(p[i], sp, "-"); if(vid >= sp[1] && vid <= sp[2]) { trk = trk curr_int ", "; break } }
+                        else if(p[i] == vid) { trk = trk curr_int ", "; break }
+                    }
+                }
+                gsub(/[ ,]+/, ", ", acc); gsub(/^, /, "", acc); gsub(/, $/, "", acc);
+                gsub(/[ ,]+/, ", ", trk); gsub(/^, /, "", trk); gsub(/, $/, "", trk);
+                if(acc=="" || acc==" ") acc="None"; if(trk=="" || trk==" ") trk="None";
+                if(acc=="None" && trk=="None") print "NOT DEFINED"
+                else print "DEFINED|" acc "|" trk
+            }
+            ')
+        else
+            result=$(echo "$raw_data" | awk -v vid="$vlan_id" '
+            BEGIN { def=1; acc=""; trk=""; mode=0 }
+            /not found/ { def=0 }
+            
+            /^VLAN Name/ { mode=1; next }
+            /^----/ && mode==1 { next }
+            /^VLAN Type/ { mode=0; next } 
+            
+            mode==1 && /^[0-9]+/ {
+                def=1;
+                for(i=4; i<=NF; i++) { acc = acc $i " " }
+                next
+            }
+            mode==1 && /^[ \t]+[A-Za-z0-9]/ {
+                for(i=1; i<=NF; i++) { acc = acc $i " " }
+                next
+            }
+            
+            /^Port.*Vlans allowed on trunk/ { mode=2; next }
+            /^Port.*Vlans allowed and active/ { mode=0; next }
+            /Active VLANs/ { mode=0; next }
+            mode==2 && /^[A-Za-z0-9]/ {
+                port=$1; list=$2;
+                split(list, p, ",");
+                for(i in p) {
+                    if(p[i] ~ /-/) {
+                        split(p[i], sp, "-");
+                        if(vid >= sp[1] && vid <= sp[2]) { trk = trk port ", "; break }
+                    } else if(p[i] == vid) {
+                        trk = trk port ", "; break
+                    }
+                }
+            }
+            END {
+                gsub(/[ ,]+/, ", ", acc); gsub(/^, /, "", acc); gsub(/, $/, "", acc);
+                gsub(/[ ,]+/, ", ", trk); gsub(/^, /, "", trk); gsub(/, $/, "", trk);
+                
+                split(trk, t_arr, ", ");
+                for(i in t_arr) {
+                    if(t_arr[i] == "") continue;
+                    gsub(t_arr[i] " ", "", acc);
+                    gsub(t_arr[i] ",", "", acc);
+                }
+                gsub(/, $/, "", acc);
+                
+                if(acc=="" || acc==" ") acc="None"; if(trk=="" || trk==" ") trk="None";
+                if(def==0) print "NOT DEFINED"
+                else print "DEFINED|" acc "|" trk
+            }
+            ')
+        fi
+    elif [[ "$family" == "aruba-aos-switch" || "$family" == "ruckus-fastiron" ]]; then
+        result=$(echo "$raw_data" | awk -v vid="$vlan_id" '
+        BEGIN { def=0; acc=""; trk=""; in_vlan=0; vlan_found=0 }
+        $0 ~ "^vlan " vid "([ \t]|$)" { in_vlan=1; vlan_found=1; next }
+        /^vlan / && in_vlan { in_vlan=0 }
+        in_vlan && /^[ \t]*exit/ { in_vlan=0 }
+        in_vlan && /^[ \t]*untagged / {
+            list = $0; sub(/^[ \t]*untagged[ \t]+/, "", list); gsub(/[ \t]+$/, "", list)
+            sub(/^ethernet[ \t]+/, "", list)
+            if (acc != "") acc = acc ","
+            acc = acc list
+        }
+        in_vlan && /^[ \t]*tagged / {
+            list = $0; sub(/^[ \t]*tagged[ \t]+/, "", list); gsub(/[ \t]+$/, "", list)
+            sub(/^ethernet[ \t]+/, "", list)
+            if (trk != "") trk = trk ","
+            trk = trk list
+        }
+        END {
+            gsub(/,+/, ", ", acc); gsub(/^, /, "", acc); gsub(/, $/, "", acc)
+            gsub(/,+/, ", ", trk); gsub(/^, /, "", trk); gsub(/, $/, "", trk)
+            if (vlan_found == 0) print "NOT DEFINED"
+            else {
+                if (acc == "") acc = "None"
+                if (trk == "") trk = "None"
+                print "DEFINED|" acc "|" trk
+            }
+        }')
+    elif [[ "$family" == "aruba-aos-cx" ]]; then
+        result=$(echo "$raw_data" | awk -v vid="$vlan_id" '
+        function carries(list, wanted, parts, i, range) {
+            gsub(/[ \t]/, "", list)
+            if (tolower(list) == "all") return 1
+            split(list, parts, ",")
+            for (i in parts) {
+                if (parts[i] ~ /-/) { split(parts[i], range, "-"); if (wanted >= range[1] && wanted <= range[2]) return 1 }
+                else if (parts[i] == wanted) return 1
+            }
+            return 0
+        }
+        function commit() {
+            if (iface == "") return
+            if (access == vid || native == vid) acc = acc (acc ? "," : "") iface
+            if (carries(allowed, vid)) trk = trk (trk ? "," : "") iface
+        }
+        BEGIN { def=0; iface=""; access=""; native=""; allowed="" }
+        $0 ~ "^vlan " vid "([ \t]|$)" { def=1 }
+        /^interface / { commit(); iface=$2; access=""; native=""; allowed=""; next }
+        iface != "" && /^[ \t]*vlan access / { access=$3; if (access == vid) def=1 }
+        iface != "" && /^[ \t]*vlan trunk native / { native=$4; if (native == vid) def=1 }
+        iface != "" && /^[ \t]*vlan trunk allowed / { allowed=$4; if (carries(allowed, vid)) def=1 }
+        END {
+            commit()
+            if (!def) print "NOT DEFINED"
+            else { if (!acc) acc="None"; if (!trk) trk="None"; print "DEFINED|" acc "|" trk }
+        }')
+    fi
+
+    [[ -n "$result" ]] || result="NOT DEFINED"
+
+    if [[ "$result" == "NOT DEFINED" ]]; then
+        echo -e "[\033[0;36m$ip\033[0m] \033[1m$hostname\033[0m -> \033[0;31mNOT DEFINED\033[0m"
+    else
+        local acc=$(echo "$result" | cut -d'|' -f2)
+        local trk=$(echo "$result" | cut -d'|' -f3)
+        local out="[\033[0;36m$ip\033[0m] \033[1m$hostname\033[0m -> \033[0;32mDEFINED\033[0m\n"
+        out+="  ├── \033[0;36mAccess Ports:\033[0m $acc\n"
+        out+="  └── \033[0;36mTrunk Ports:\033[0m  $trk"
+        echo -e "$out"
+    fi
+}
+
+analyze_propagation() {
+    local ip="$1" vlan_id="$2" raw_data="$3" is_deep="$4" plat="$5"
+    local family
+    family=$(netops_platform_family "$plat" "$raw_data")
+    local hostname=$(db_get_device "$ip" | cut -d'|' -f2)
+    [[ -z "$hostname" || "$hostname" == "N/A" ]] && hostname="$ip"
+
+    local vlan_status="\033[0;31mNOT DEFINED\033[0m"
+    if ! echo "$raw_data" | grep -qiE "(VLAN( id)?[[:space:]]*$vlan_id.*(not found|not configured|does not exist)|not configured)"; then
+        vlan_status="\033[0;32mDEFINED\033[0m"
+    fi
+
+    local out="\nPropagation Map for: \033[1m$hostname\033[0m ($ip)\n"
+    out+="  Target VLAN: $vlan_id | Status: $vlan_status\n"
+    out+="  \033[0;36mDetected Uplinks:\033[0m\n"
+
+    local trunk_report=""
+
+    if [[ "$family" == "cisco-ios" ]]; then
+        trunk_report=$(echo "$raw_data" | awk -v target="$vlan_id" '
+        BEGIN { section=0; }
+        function check_list(list_str, required_vlan,    parts, i, subparts, start, end, count, has_req, has_tgt) {
+            count = 0; has_req = 0; has_tgt = 0;
+            split(list_str, parts, ",");
+            for (i in parts) {
+                if (parts[i] ~ /-/) {
+                    split(parts[i], subparts, "-"); start = subparts[1]; end = subparts[2]; count += (end - start + 1);
+                    if (required_vlan >= start && required_vlan <= end) has_req = 1;
+                    if (target >= start && target <= end) has_tgt = 1;
+                } else {
+                    count++;
+                    if (parts[i] == required_vlan) has_req = 1;
+                    if (parts[i] == target) has_tgt = 1;
+                }
+            }
+            if (count > 5 && has_req == 1) { return (has_tgt == 1) ? "YES" : "NO"; }
+            return "SKIP";
+        }
+        /Vlans allowed on trunk/ { section=1; next }
+        /Vlans allowed and active/ { section=0; next }
+        /Active VLANs/ { section=0; next }
+        section == 1 && /^[A-Za-z0-9]/ {
+            port = $1; list = $2;
+            result = check_list(list, 4);
+            if (result != "SKIP") print port "|" result
+        }
+        ')
+    elif [[ "$family" == "aruba-aos-switch" || "$family" == "ruckus-fastiron" ]]; then
+        trunk_report=$(echo "$raw_data" | awk -v target="$vlan_id" '
+        function add_port(port, tagged, range, p) {
+            gsub(/^[ \t]+|[ \t]+$/, "", port)
+            if (port == "" || tolower(port) == "ethernet" || tolower(port) == "to") return
+            if (port ~ /^[0-9]+-[0-9]+$/) {
+                split(port, range, "-")
+                for (p = range[1]; p <= range[2]; p++) add_port(p, tagged)
+                return
+            }
+            if_vlans[port] = if_vlans[port] "," vlan_id
+            if (vlan_id == 4) vlan4_ifs[port] = 1
+            if (vlan_id == target) if_has_target[port] = 1
+        }
+        BEGIN { in_vlan = 0; vlan_id = "" }
+        /^vlan / {
+            in_vlan = 1
+            vlan_id = $2
+            gsub(/[^0-9]/, "", vlan_id)
+            next
+        }
+        /^vlan / && in_vlan { in_vlan = 0 }
+        in_vlan && /^[ \t]*exit/ { in_vlan = 0; vlan_id = ""; next }
+        in_vlan && /^[ \t]*(un)?tagged / {
+            list = $0; sub(/^[ \t]*(un)?tagged[ \t]+/, "", list)
+            split(list, ports, /[ ,]+/)
+            for (i in ports) if (ports[i] ~ /[0-9]/) add_port(ports[i])
+        }
+        END {
+            for (iface in vlan4_ifs) {
+                split(if_vlans[iface], vlans, ",")
+                count = 0
+                for (v in vlans) if (vlans[v] != "") count++
+                if (count > 5) {
+                    status = (if_has_target[iface] ? "YES" : "NO")
+                    print iface "|" status
+                }
+            }
+        }')
+    elif [[ "$family" == "aruba-aos-cx" ]]; then
+        trunk_report=$(echo "$raw_data" | awk -v target="$vlan_id" '
+        function carries(list, wanted, parts, i, range) {
+            gsub(/[ \t]/, "", list)
+            if (tolower(list) == "all") return 1
+            split(list, parts, ",")
+            for (i in parts) {
+                if (parts[i] ~ /-/) { split(parts[i], range, "-"); if (wanted >= range[1] && wanted <= range[2]) return 1 }
+                else if (parts[i] == wanted) return 1
+            }
+            return 0
+        }
+        function commit() {
+            if (iface != "" && allowed != "") print iface "|" (carries(allowed, target) ? "YES" : "NO")
+        }
+        /^interface / { commit(); iface=$2; allowed=""; next }
+        iface != "" && /^[ \t]*vlan trunk allowed / { allowed=$4 }
+        END { commit() }')
+    fi
+
+    if [[ -z "$trunk_report" ]]; then
+        out+="    \033[1;33mNo valid uplinks found.\033[0m"
+    else
+        while IFS='|' read -r port status; do
+            if [[ "$status" == "YES" ]]; then
+                out+="    - $port: \033[0;32mPROPAGATED\033[0m\n"
+            else
+                out+="    - $port: \033[0;31mMISSING\033[0m"
+                if [[ "$is_deep" == "true" && -f "$NEIGHBOR_DB" ]]; then
+                    local n_entry=$(grep -i "^$ip|.*|${port}|" "$NEIGHBOR_DB" | head -1)
+                    if [[ -n "$n_entry" ]]; then
+                        local n_ip=$(echo "$n_entry" | cut -d'|' -f6)
+                        local n_name=$(echo "$n_entry" | cut -d'|' -f4)
+                        [[ "$n_ip" != "?.?.?.?" ]] && out+=" -> \033[1;33mAdj Switch: $n_name ($n_ip)\033[0m\n" || out+=" -> Adj Switch: $n_name\n"
+                    else out+="\n"; fi
+                else out+="\n"; fi
+            fi
+        done <<< "$trunk_report"
+    fi
+    echo -e "${out%\\n}"
+}
+
+perform_task() {
+    local ip="$1" mode="$2" output_path="$3" is_detailed="$4"; shift 4; local cmds=("$@")
+    
+    if [[ "$mode" == "core-lookup" ]]; then
+        # Keep the compatibility command, but delegate to the public structured
+        # workflow so Cisco, Aruba, and Ruckus use one driver-selected path.
+        local public_netops
+        public_netops="$(dirname "$(realpath "$0")")/netops"
+        "$public_netops" lookup core "${cmds[0]}" --plain
+        return $?
+    fi
+
+    local db_entry plat model family
+    db_entry=$(db_get_device "$ip")
+    plat=$(echo "$db_entry" | cut -d'|' -f3)
+    model=$(echo "$db_entry" | cut -d'|' -f4)
+    family=$(netops_platform_family "$plat" "$model")
+    case "$family" in
+        cisco-ios) plat="Cisco IOS" ;;
+        aruba-aos-switch) plat="Aruba AOS-S" ;;
+        aruba-aos-cx) plat="Aruba AOS-CX" ;;
+        ruckus-fastiron) plat="Ruckus FastIron" ;;
+        *) error "[$ip] No registered switch driver matched platform '$plat' model '$model'."; return 5 ;;
+    esac
+
+    local raw_output transport_rc
+    if [[ "$mode" == "show" ]]; then
+        raw_output=$(generate_command_stream "$plat" "$mode" "${cmds[@]}" | netops_ssh_prompted "$ip" 2>&1 | tr -d '\r')
+        transport_rc=$?
+    else
+        raw_output=$(generate_command_stream "$plat" "$mode" "${cmds[@]}" | netops_ssh "$ip" 2>&1 | tr -d '\r')
+        transport_rc=$?
+    fi
+    if ((transport_rc != 0)); then
+        error "[$ip] SSH transport failed (exit $transport_rc)."
+        [[ -n "$raw_output" ]] && sanitize_output "$raw_output" >&2
+        return 1
+    fi
+
+    if [[ "$mode" == "show" && "$is_detailed" == "true" ]]; then
+        echo -e "\n\033[1;36m=== Detailed Output for $ip ($plat) ===\033[0m"
+        echo "$raw_output"
+        return
+    elif [[ "$mode" == "show" ]]; then
+        echo -e "\n\033[1;36m=== $ip ===\033[0m"
+        sanitize_output "$raw_output"
+        return
+    # elif [[ "$mode" == "mac-lookup" ]]; then
+    #     local fmac=$(format_mac_for_plat "${cmds[0]}" "$plat")
+    #     [[ -z "$fmac" ]] && return
+        
+    #     local hostname=$(db_get_device "$ip" | cut -d'|' -f2)
+    #     [[ -z "$hostname" || "$hostname" == "N/A" ]] && hostname="$ip"
+        
+    #     # Platform-specific parsing
+    #     if [[ "$plat" == "Cisco" ]]; then
+    #         local clean_match=$(echo "$raw_output" | grep -i "$fmac" | grep -vE "(show mac|#|>)")
+    #         if [[ -n "$clean_match" ]]; then
+    #             local out="[\033[0;36m$ip\033[0m] \033[1m$hostname\033[0m -> \033[0;32mMAC FOUND\033[0m\n"
+    #             while IFS= read -r line; do
+    #                 line=$(echo "$line" | sed 's/^[ \t]*//;s/[ \t]*$//')
+    #                 [[ -n "$line" ]] && out+="  └── $line\n"
+    #             done <<< "$clean_match"
+    #             echo -e "${out%\\n}"
+    #         fi
+    #     elif [[ "$plat" == "Aruba" ]]; then
+    #         # Extract MAC line using grep and clean aggressively
+    #         local match_line=$(echo "$raw_output" | tr -d '\r\000-\037\177-\377' | grep -oE "[0-9a-f]{6}-[0-9a-f]{6}[[:space:]]+[0-9]+[[:space:]]+[0-9]+" | head -1)
+            
+    #         if [[ -n "$match_line" ]]; then
+    #             local vlan=$(echo "$match_line" | awk '{print $2}')
+    #             local mac=$(echo "$match_line" | awk '{print $1}')
+    #             local port=$(echo "$match_line" | awk '{print $3}')
+    #             echo -e "[\033[0;36m$ip\033[0m] \033[1m$hostname\033[0m -> \033[0;32mMAC FOUND\033[0m\n  └── $vlan    $mac    $port"
+    #         fi
+    #     fi
+    #     return
+
+    # fi
+    elif [[ "$mode" == "mac-lookup" ]]; then
+        local wanted hostname clean_match line token normalized
+        wanted=$(echo "${cmds[0]}" | tr -d '.: -' | tr '[:upper:]' '[:lower:]')
+        [[ ${#wanted} -eq 12 ]] || return 1
+        hostname=$(db_get_device "$ip" | cut -d'|' -f2)
+        [[ -z "$hostname" || "$hostname" == "N/A" ]] && hostname="$ip"
+        clean_match=""
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*(show|skip-page-display|no[[:space:]]+page) ]] && continue
+            token=$(grep -ioE '([0-9a-f]{2}[:-]){5}[0-9a-f]{2}|[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}|[0-9a-f]{6}-[0-9a-f]{6}|[0-9a-f]{12}' <<< "$line" | head -1)
+            normalized=$(echo "$token" | tr -d '.: -' | tr '[:upper:]' '[:lower:]')
+            [[ "$normalized" == "$wanted" ]] && clean_match+="${line}"$'\n'
+        done <<< "$raw_output"
+        if [[ -n "$clean_match" ]]; then
+            echo -e "[\033[0;36m$ip\033[0m] \033[1m$hostname\033[0m -> \033[0;32mMAC FOUND\033[0m"
+            while IFS= read -r line; do
+                line=$(echo "$line" | sed 's/^[ \t]*//;s/[ \t]*$//')
+                [[ -n "$line" ]] && printf '  - %s\n' "$line"
+            done <<< "$clean_match"
+        else
+            echo -e "[\033[0;36m$ip\033[0m] \033[1m$hostname\033[0m -> \033[0;33mMAC NOT FOUND\033[0m"
+        fi
+        return
+    fi
+    refine_inventory_from_ssh "$ip" "$raw_output" "$plat"
+
+    if [[ "$mode" == "propagated" ]]; then
+        analyze_propagation "$ip" "${cmds[0]}" "$raw_output" "$DEEP_MODE" "$plat"
+    elif [[ "$mode" == "locate-vlan" ]]; then
+        analyze_locate_vlan "$ip" "${cmds[0]}" "$raw_output" "$plat" "${cmds[1]}"
+    elif [[ "$mode" == "inventory" ]]; then
+        success "[$ip] Inventory synchronized ($plat)."
+    elif [[ "$mode" == "backup" ]]; then
+        local base_dir="${output_path:-${CONFIG[default_backup_dir]}}"
+        local t_dir="$base_dir/$(date +%Y-%m-%d)"
+        mkdir -p "$t_dir"
+        local host=$(db_get_device "$ip" | cut -d'|' -f2); [[ -z "$host" || "$host" == "N/A" ]] && host="device_$ip"
+        local clean=$(sanitize_output "$raw_output")
+        if [[ "${REDACT_SECRETS:-false}" == "true" ]]; then
+            clean=$(printf '%s\n' "$clean" | control_redact_config)
+        fi
+        local hash latest_record latest_hash latest_path out_file size safe_host staged
+        hash=$(printf '%s\n' "$clean" | sha256sum | awk '{print $1}')
+        latest_record=$(control_backup_latest_record "$ip")
+        latest_hash=${latest_record%%|*}
+        latest_path=${latest_record#*|}
+        [[ "$latest_record" == *"|"* ]] || latest_path=""
+        safe_host=$(control_safe_filename "$host")
+        out_file="$t_dir/${safe_host}.conf"
+        if [[ "${CHANGED_ONLY:-false}" == "true" && -n "$latest_hash" && "$latest_hash" == "$hash" ]]; then
+            control_backup_record "$ip" "$host" "${latest_path:-$out_file}" "$hash" 0 0 "unchanged" "same as latest backup"
+            success "[$ip] Backup unchanged; skipped write."
+            return 0
+        fi
+        staged=$(mktemp "$t_dir/.${safe_host}.XXXXXX") || { error "[$ip] Could not create private backup staging file."; return 1; }
+        if ! printf '%s\n' "$clean" > "$staged"; then
+            rm -f -- "$staged"
+            error "[$ip] Could not write backup staging file."
+            return 1
+        fi
+        chmod 600 "$staged"
+        if ! mv -f "$staged" "$out_file"; then
+            rm -f -- "$staged"
+            error "[$ip] Could not publish backup file."
+            return 1
+        fi
+        size=$(wc -c < "$out_file" 2>/dev/null || echo 0)
+        ln -sfn "$out_file" "$base_dir/${safe_host}.latest.conf" 2>/dev/null || true
+        control_backup_record "$ip" "$host" "$out_file" "$hash" 1 "$size" "saved" "running-config captured"
+        success "[$ip] Backup saved to $out_file"
+    elif [[ "$mode" == "config" ]]; then
+        local chk=$(echo "$raw_output" | grep -vE "term len|no page|configure terminal|configure|write memory")
+        if echo "$chk" | grep -qE "(Invalid input|Incomplete command|Unknown command|% Bad parameter|Error:)"; then
+            error "[$ip] Config failed."
+            echo "$chk" | grep -B 1 -A 1 "\^" | head -n 6 | sed "s/^/    /"
+            return 1
+        else
+            success "[$ip] Config applied."
+            return 0
+        fi
+    fi
+}
+
+resolve_commands() {
+    local raw_inputs=("$@"); local final_cmds=()
+    for item in "${raw_inputs[@]}"; do
+        if [[ "$item" =~ ^@(.*) ]]; then
+            local snip="${BASH_REMATCH[1]}"; local s_file="${HOME}/.config/netops/snippets/$snip"
+            if [[ -f "$s_file" ]]; then
+                while IFS= read -r line; do [[ -n "$line" && ! "$line" =~ ^# ]] && final_cmds+=("$line"); done < "$s_file"
+            else error "Snippet $snip not found." >&2; return 1; fi
+        else final_cmds+=("$item"); fi
+    done
+    printf "%s\n" "${final_cmds[@]}"
+}
+
+
+show_help() {
+    cat <<EOF
+${CYAN}${BOLD}NetOps Internal Device Control Adapter${NC}
+Version: ${NETOPS_VERSION} | Integrated with NetOps Unified Platform
+
+${BOLD}DESCRIPTION:${NC}
+  Internal Cisco/Aruba/Ruckus transport adapter. Normal operators should use the
+  guarded public 'netops' CLI; direct config/vlan execution is blocked.
+
+${BOLD}USAGE:${NC}
+  netops-control <command> [target] [options] [arguments]
+
+${BOLD}COMMANDS:${NC}
+
+  ${GREEN}shell${NC} <target>
+      Open interactive SSH session to a device.
+      Example: netops-control shell 192.0.2.5
+
+  ${GREEN}backup${NC} <target> [-o <dir>]
+      Backup running-config from online devices to local files.
+      Devices marked OFFLINE in discovery DB are skipped.
+      Supports --changed-only, --summary, and --redact-secrets.
+  ${GREEN}backup-history${NC} <target>
+      Show previous backup metadata for a device.
+  ${GREEN}diff${NC} <target> --last
+      Diff the last two changed backups for a device.
+      Options:
+        -o, --output <dir>   Specify backup directory (default: ~/network_backups)
+      Example: netops-control backup "198.51.100." -o /backups
+
+  ${GREEN}inventory${NC} [--view | <target>]
+      Synchronize device inventory via SSH or view current inventory.
+      Subcommands:
+        --view                Display current inventory database
+        <target>              Scan targets and update inventory via SSH
+      Example: netops-control inventory "192.0.2."
+      Example: netops-control inventory --view
+
+  ${GREEN}propagated${NC} <target> <vlan_id> [--deep]
+      Check VLAN propagation across the network.
+      Analyzes trunk ports and identifies uplinks carrying the VLAN.
+      Options:
+        --deep                Show adjacent switches on missing uplinks
+      Example: netops-control propagated "192.0.2." 50 --deep
+
+  ${GREEN}locate-vlan${NC} <target> <vlan_id> [--config-only]
+      Locate where a specific VLAN is defined and which ports carry it.
+      Options:
+        --config-only         Parse from running-config (faster for large networks)
+      Example: netops-control locate-vlan "192.0.2." 50
+      Example: netops-control locate-vlan "core-switch" 100 --config-only
+
+  ${GREEN}config${NC} <target> [commands...] [@snippet]
+      Internal write adapter. Direct execution is denied; the public core must
+      supply its audited-confirmation capability after policy validation.
+      Public preview: netops device config <target> <commands...> --dry-run
+
+  ${GREEN}vlan${NC} <target> <interface> [options]
+      Internal guarded-VLAN adapter. Direct execution is denied; use the public
+      VLAN action so preflight, backup, verification, and audit are retained.
+      Options:
+        --access <vlan>       Set access mode with VLAN ID
+        --trunk <vlan_list>   Set trunk mode with allowed VLANs
+        --native <vlan>       Set native VLAN for trunk
+        --replace             Replace allowed list instead of adding
+      Public preview: netops vlan set switch1 gi1/0/48 --trunk 10,20,30 --native 99 --dry-run
+
+  ${GREEN}show${NC} <target> <command> [--detail]
+      Execute a validated read-only show, ping, or cable-diagnostic command.
+      Options:
+        --detail              Show full raw output without sanitization
+      Example: netops-control show "192.0.2." "show version"
+      Example: netops-control show "core-switch" "show interfaces status" --detail
+
+  ${GREEN}core-lookup${NC} <ip_address | mac_address>
+      Look up an IP or MAC address on the core switch.
+      Uses configured core_switch_ip from config file.
+      Example: netops-control core-lookup 192.0.2.50
+      Example: netops-control core-lookup 02:00:00:00:00:25
+
+  ${GREEN}mac-lookup${NC} <target>  <mac_address>
+      Look up a MAC address from any device in the inventory.
+      Example: netops-control mac-lookup access-switch 02:00:00:00:00:25
+
+${BOLD}TARGET SPECIFICATIONS:${NC}
+  Single IP:       198.51.100.10
+  Subnet:          198.51.100.            (scans 1-254)
+  Range:           198.51.100.10-50
+  Hostname:        "core-switch"         (searches inventory database)
+  File:            targets.txt           (one IP/hostname per line)
+  Pattern:         "198.51.100.112"          (matches any device with that pattern)
+
+${BOLD}GLOBAL OPTIONS:${NC}
+  -t, --threads <N>    Maximum concurrent operations (default: 20)
+  -o, --output <dir>   Output directory for backups (backup command only)
+  --deep               Show adjacent switches (propagated command only)
+  --config-only        Parse from running-config (locate-vlan command only)
+  --detail             Show full raw output (show command only)
+  --dry-run            Resolve and validate without opening a transport
+  --json               Emit structured output where supported
+  -h, --help           Show this help message
+  --help <command>     Show detailed help for a specific command
+
+${BOLD}COMMAND-SPECIFIC HELP:${NC}
+  To get detailed help for any command:
+    netops-control <command> --help
+  
+  Available commands:
+    shell, backup, backup-history, diff, inventory, propagated, locate-vlan,
+    config, vlan, show, core-lookup, mac-lookup
+
+${BOLD}EXAMPLES:${NC}
+  # Interactive shell to a device
+  netops-control shell 192.0.2.5
+
+  # Backup all devices in a subnet
+  netops-control backup "192.0.2." -o /backups
+
+  # View current inventory
+  netops-control inventory --view
+
+  # Update inventory for a range of IPs
+  netops-control inventory 192.0.2.10-50
+
+  # Check VLAN 50 propagation across network with deep analysis
+  netops-control propagated "192.0.2." 50 --deep
+
+  # Locate where VLAN 50 is configured
+  netops-control locate-vlan "192.0.2." 50
+
+  # Locate VLAN using running-config (faster for many devices)
+  netops-control locate-vlan "192.0.2." 100 --config-only
+
+  # Preview configuration through the public policy boundary
+  netops device config "core-switch" "interface Gi1/0/1" --dry-run
+
+  # Preview a guarded VLAN change through the public policy boundary
+  netops vlan set "distribution-sw" Gi1/0/24 --trunk 10,20,30,40 --native 99 --dry-run
+
+  # Execute show command on devices
+  netops-control show "192.0.2." "show version"
+
+  # Look up IP address on core switch
+  netops-control core-lookup 192.0.2.50
+
+  # Get help for config command
+  netops-control config --help
+
+${BOLD}NOTES:${NC}
+  • Devices are classified as Cisco IOS, Aruba AOS-S/AOS-CX, or Ruckus FastIron
+  • Inventory database stores device info from both SNMP and SSH sources
+  • Propagation analysis identifies VLAN 4 as uplink indicator (heuristic)
+  • SSH credentials are set locally with 'netops-connect --set-password'
+  • Legacy SSH mode enables only algorithms still present in the local OpenSSH build
+  • Vendor command streams come from the device-driver registry
+  • core-lookup requires core_switch_ip configured in netops config
+
+${BOLD}SEE ALSO:${NC}
+  netops --help          General NetOps help
+  netops inventory scan  Network discovery
+  netops diagnose        Network diagnostics
+  netops-connect --help  Local SSH credential maintenance
+EOF
+}
+# --- Main execution with help handling ---
+# Check for help flags before any other processing
+if [[ $# -eq 0 ]]; then
+    show_help
+    exit 0
+fi
+
+# Handle --help or -h as first argument (general help)
+if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+    show_help
+    exit 0
+fi
+
+MODE="$1"
+shift
+
+case "$MODE" in
+    shell|backup|backup-history|diff|inventory|propagated|locate-vlan|show|core-lookup|mac-lookup|config|vlan) ;;
+    *)
+        error "Unknown control command: $MODE"
+        echo "Run 'netops-control --help' for available commands." >&2
+        exit 2
+        ;;
+esac
+
+# Handle command-specific help
+if [[ $# -ge 1 ]] && ([[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]); then
+    case "$MODE" in
+        shell)
+            echo -e "${CYAN}${BOLD}Shell Command${NC}"
+            echo "Open interactive SSH session to a device."
+            echo "Usage: netops-control shell <target>"
+            echo "Example: netops-control shell 192.0.2.5"
+            ;;
+        backup)
+            echo -e "${CYAN}${BOLD}Backup Command${NC}"
+            echo "Backup running-config from online devices."
+            echo "Devices marked OFFLINE in discovery DB are skipped."
+            echo "Usage: netops-control backup <target> [-o <dir>] [--changed-only] [--summary]"
+            echo "Options:"
+            echo "  -o, --output <dir>   Backup directory (default: ~/network_backups)"
+            echo "  --online-only        Explicitly skip devices marked OFFLINE (default behavior)"
+            echo "  --changed-only       Do not rewrite configs whose hash matches latest saved backup"
+            echo "  --summary            Print saved/unchanged counts at the end"
+            echo "  --redact-secrets     Redact common secret lines before writing"
+            echo "Example: netops-control backup 192.0.2. -o /backups --changed-only --summary"
+            ;;
+        backup-history)
+            echo -e "${CYAN}${BOLD}Backup History Command${NC}"
+            echo "Show newest-first backup metadata for one device."
+            echo "Usage: netops-control backup-history <target> [--json]"
+            echo "Example: netops-control backup-history 192.0.2.5"
+            ;;
+        diff)
+            echo -e "${CYAN}${BOLD}Backup Diff Command${NC}"
+            echo "Compare the two most recent changed backups for one device."
+            echo "Usage: netops-control diff <target> [--last]"
+            echo "Example: netops-control diff 192.0.2.5 --last"
+            ;;
+        locate-vlan)
+            echo -e "${CYAN}${BOLD}Locate VLAN Command${NC}"
+            echo "Locate where a specific VLAN is defined and which ports carry it."
+            echo "Usage: netops-control locate-vlan <target> <vlan_id> [--config-only]"
+            echo "Options:"
+            echo "  --config-only         Parse from running-config instead of show commands"
+            echo "Example: netops-control locate-vlan 192.0.2. 50"
+            echo "Example: netops-control locate-vlan core-switch 100 --config-only"
+            ;;
+        show)
+            echo -e "${CYAN}${BOLD}Show Command${NC}"
+            echo "Execute a validated read-only show, ping, or cable-diagnostic command."
+            echo "Usage: netops-control show <target> <quoted-command> [--detail]"
+            echo "Options:"
+            echo "  --detail              Show full raw output without sanitization"
+            echo "Example: netops-control show '192.0.2.' 'show version'"
+            echo "Example: netops-control show 'core-switch' 'show interfaces status' --detail"
+            ;;
+        core-lookup)
+            echo -e "${CYAN}${BOLD}Core Lookup Command${NC}"
+            echo "Look up an IP or MAC address on the core switch."
+            echo "Usage: netops-control core-lookup <ip_address | mac_address>"
+            echo "Note: Uses core_switch_ip from netops configuration"
+            echo "Example: netops-control core-lookup 192.0.2.50"
+            echo "Example: netops-control core-lookup 02:00:00:00:00:25"
+            ;;
+        mac-lookup)
+            echo -e "${CYAN}${BOLD}MAC Lookup Command${NC}"
+            echo "Search one device forwarding table for a normalized MAC address."
+            echo "Usage: netops-control mac-lookup <target> <mac_address>"
+            echo "Example: netops-control mac-lookup access-switch 02:00:00:00:00:25"
+            ;;
+        inventory)
+            echo -e "${CYAN}${BOLD}Inventory Command${NC}"
+            echo "Manage device inventory database."
+            echo "Usage: netops-control inventory [--view | <target>]"
+            echo "  --view               Display current inventory"
+            echo "  <target>             Scan and update inventory via SSH"
+            echo "Example: netops-control inventory --view"
+            echo "Example: netops-control inventory 192.0.2."
+            ;;
+        propagated)
+            echo -e "${CYAN}${BOLD}Propagated Command${NC}"
+            echo "Check VLAN propagation across network."
+            echo "Usage: netops-control propagated <target> <vlan_id> [--deep]"
+            echo "Options:"
+            echo "  --deep               Show adjacent switches on missing uplinks"
+            echo "Example: netops-control propagated 192.0.2. 50 --deep"
+            ;;
+        config)
+            echo -e "${CYAN}${BOLD}Config Command${NC}"
+            echo "Internal write adapter; direct execution is denied."
+            echo "Usage: netops-control config <target> <commands...>"
+            echo "Public preview: netops device config <target> <commands...> --dry-run"
+            echo "Public confirmed execution requires the netops core policy boundary."
+            ;;
+        vlan)
+            echo -e "${CYAN}${BOLD}VLAN Command${NC}"
+            echo "Internal guarded-VLAN adapter; direct execution is denied."
+            echo "Usage: netops-control vlan <target> <interface> [options]"
+            echo "Public usage: netops vlan set <target> <interface> [options] --dry-run|--confirm"
+            echo "Options:"
+            echo "  --access <vlan>      Set access mode with VLAN ID"
+            echo "  --trunk <list>       Set trunk mode with allowed VLANs (comma-separated)"
+            echo "  --native <vlan>      Set native VLAN for trunk"
+            echo "  --replace            Replace allowed list instead of adding"
+            echo "Preview: netops vlan set switch1 Gi1/0/48 --trunk 10,20,30 --native 99 --dry-run"
+            ;;
+        *)
+            echo -e "${CYAN}${BOLD}Unknown Command: $MODE${NC}"
+            echo "Run 'netops-control --help' for available commands."
+            exit 1
+            ;;
+    esac
+    exit 0
+fi
+
+
+
+if [[ "$MODE" == "inventory" && "$1" == "--view" ]]; then
+    if [[ "${2:-}" == "--json" ]]; then
+        cat "$DEVICES_DB" 2>/dev/null | jq -R -s '
+            split("\n")[:-1]
+            | map(split("|") | select(length >= 9) | {
+                ip: .[0], hostname: .[1], platform: .[2], model: .[3], serial: .[4], mac: .[5], source: .[6], last_seen: (.[7] | tonumber? // 0), status: .[8]
+            })'
+    else
+        inventory_tmp=$(mktemp /tmp/netops-inventory.XXXXXX) || { error "Could not create inventory view state."; exit 1; }
+        control_track_tmp "$inventory_tmp"
+        echo -e "\033[0;36mIP|HOSTNAME|PLATFORM|MODEL|SERIAL|MAC|SOURCE|STATUS\033[0m" > "$inventory_tmp"
+        awk -F'|' -v OFS='|' '{print $1,$2,$3,$4,$5,$6,$7,$9}' "$DEVICES_DB" >> "$inventory_tmp"
+        column -t -s '|' "$inventory_tmp"
+    fi
+    exit 0
+fi
+
+if [[ "$MODE" == "backup-history" || "$MODE" == "diff" ]]; then
+    TARGET_INPUT="${1:-}"
+    shift || true
+    JSON_OUTPUT="false"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) JSON_OUTPUT="true" ;;
+            --last) ;;
+        esac
+        shift
+    done
+    if [[ "$MODE" == "backup-history" ]]; then
+        show_backup_history "$TARGET_INPUT" "$JSON_OUTPUT"
+    else
+        show_backup_diff "$TARGET_INPUT"
+    fi
+    exit $?
+fi
+
+CMD_ARGS=(); RAW_INPUT=(); VLAN_ARGS=(); BACKUP_OUT=""; DEEP_MODE="false"; CONFIG_ONLY="false"; DETAIL_MODE="false"; DRY_RUN="false"; JSON_OUTPUT="false"; CHANGED_ONLY="false"; SUMMARY_MODE="false"; REDACT_SECRETS="false"; RUN_STARTED=$(date +%s)
+
+if [[ "$MODE" == "core-lookup" ]]; then
+    TARGET_INPUT="${CONFIG[core_switch_ip]}"
+    [[ -z "$TARGET_INPUT" ]] && { error "Core Switch IP not set in config."; exit 1; }
+    
+    tgt=""
+    if [[ "$1" == "--mac" ]]; then
+        tgt="$2"
+        shift 2
+    else
+        tgt="$1"
+        shift
+    fi
+    
+    if [[ "$tgt" =~ ^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$ || "$tgt" =~ ^[0-9a-fA-F]{6}-[0-9a-fA-F]{6}$ || "$tgt" =~ ^[0-9a-fA-F]{12}$ ]]; then
+        formatted_mac=$(echo "$tgt" | tr -d '.:-' | tr '[:upper:]' '[:lower:]')
+        tgt="${formatted_mac:0:4}.${formatted_mac:4:4}.${formatted_mac:8:4}"
+    fi
+    
+    CMD_ARGS=("$tgt")
+    TARGETS=("$TARGET_INPUT")
+else
+[[ $# -lt 1 ]] && { error "Missing target. Use 'netops-control --help' for usage."; exit 1; }
+TARGET_INPUT="$1"; shift
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -t|--threads)
+                [[ -n "${2:-}" ]] || { error "$1 requires a worker count."; exit 2; }
+                CONFIG[scan_workers]="$2"; shift ;;
+            -o|--output)
+                [[ -n "${2:-}" ]] || { error "$1 requires a directory."; exit 2; }
+                BACKUP_OUT="$2"; shift ;;
+            --deep) DEEP_MODE="true" ;;
+            --config-only) CONFIG_ONLY="true" ;;
+            --detail) DETAIL_MODE="true" ;;
+            --dry-run) DRY_RUN="true" ;;
+            --json) JSON_OUTPUT="true" ;;
+            --online-only) ;;
+            --changed-only) CHANGED_ONLY="true" ;;
+            --summary) SUMMARY_MODE="true" ;;
+            --redact-secrets) REDACT_SECRETS="true" ;;
+            *) [[ "$MODE" == "vlan" ]] && VLAN_ARGS+=("$1") || RAW_INPUT+=("$1") ;;
+        esac
+        shift
+    done
+
+    if [[ ! "${CONFIG[scan_workers]}" =~ ^[0-9]+$ ]] || ((CONFIG[scan_workers] < 1 || CONFIG[scan_workers] > 200)); then
+        error "Worker count must be an integer from 1 to 200."
+        exit 2
+    fi
+
+    resolved_targets=""
+    if [[ "$MODE" == "show" && "$DETAIL_MODE" == "true" ]]; then
+        resolved_targets=$(resolve_targets "$TARGET_INPUT" "DEVICES" "false") || exit $?
+    else
+        resolved_targets=$(resolve_targets "$TARGET_INPUT" "DEVICES" "true") || exit $?
+    fi
+    mapfile -t TARGETS <<< "$resolved_targets"
+    mapfile -t TARGETS < <(printf '%s\n' "${TARGETS[@]}" | sed '/^[[:space:]]*$/d')
+    [[ ${#TARGETS[@]} -eq 0 ]] && { error "No targets resolved."; exit 1; }
+fi
+
+[[ "$MODE" == "backup" ]] && filter_backup_targets
+
+if [[ "$MODE" == "vlan" ]]; then
+    intf="${VLAN_ARGS[0]:-}"
+    [[ -n "$intf" ]] || { error "vlan requires an interface."; exit 2; }
+    control_valid_interface "$intf" || { error "Invalid interface: $intf"; exit 2; }
+    vmode=""; vids=""; nat=""; act="add"; mode_count=0; args=("${VLAN_ARGS[@]:1}")
+    for ((i=0; i<${#args[@]}; i++)); do
+        case "${args[$i]}" in
+            --access)
+                [[ -n "${args[$((i+1))]:-}" ]] || { error "--access requires a VLAN ID."; exit 2; }
+                vmode="access"; vids="${args[$((i+1))]}"; ((mode_count++)); ((i++)) ;;
+            --trunk)
+                [[ -n "${args[$((i+1))]:-}" ]] || { error "--trunk requires a VLAN list."; exit 2; }
+                vmode="trunk"; vids="${args[$((i+1))]}"; ((mode_count++)); ((i++)) ;;
+            --native)
+                [[ -n "${args[$((i+1))]:-}" ]] || { error "--native requires a VLAN ID."; exit 2; }
+                nat="${args[$((i+1))]}"; ((i++)) ;;
+            --replace) act="replace" ;;
+            *) error "Unknown VLAN option: ${args[$i]}"; exit 2 ;;
+        esac
+    done
+    ((mode_count == 1)) || { error "Specify exactly one of --access <vlan> or --trunk <list>."; exit 2; }
+    if [[ "$vmode" == "access" ]]; then
+        control_valid_vlan_id "$vids" || { error "Access VLAN must be an integer from 1 to 4094."; exit 2; }
+        [[ -z "$nat" ]] || { error "--native is valid only with --trunk."; exit 2; }
+        [[ "$act" == "add" ]] || { error "--replace is valid only with --trunk."; exit 2; }
+    else
+        control_valid_vlan_list "$vids" || { error "Trunk VLANs must be IDs or ascending ranges from 1 to 4094."; exit 2; }
+        [[ -z "$nat" ]] || control_valid_vlan_id "$nat" || { error "Native VLAN must be an integer from 1 to 4094."; exit 2; }
+    fi
+    CMD_ARGS+=("interface $intf")
+    if [[ "$vmode" == "access" ]]; then CMD_ARGS+=("switchport mode access" "switchport access vlan $vids")
+    else
+        CMD_ARGS+=("switchport mode trunk")
+        [[ -n "$nat" ]] && CMD_ARGS+=("switchport trunk native vlan $nat")
+        [[ "$act" == "replace" ]] && CMD_ARGS+=("switchport trunk allowed vlan $vids") || CMD_ARGS+=("switchport trunk allowed vlan add $vids")
+    fi
+    CMD_ARGS+=("no shutdown")
+    MODE="config"
+elif [[ "$MODE" == "propagated" || "$MODE" == "locate-vlan" || "$MODE" == "show" || "$MODE" == "mac-lookup" ]]; then
+    ((${#RAW_INPUT[@]} == 1)) || {
+        error "$MODE requires exactly one ${MODE/show/quoted command} argument after the target."
+        exit 2
+    }
+    if [[ "$MODE" == "show" ]]; then
+        control_read_command_allowed "${RAW_INPUT[0]}" || {
+            error "Rejected command: only bounded read-only show, ping, and cable-diagnostic commands are allowed."
+            exit 2
+        }
+    elif [[ "$MODE" == "propagated" || "$MODE" == "locate-vlan" ]]; then
+        control_valid_vlan_id "${RAW_INPUT[0]}" || { error "VLAN ID must be an integer from 1 to 4094."; exit 2; }
+    elif [[ "$MODE" == "mac-lookup" ]]; then
+        control_valid_mac "${RAW_INPUT[0]}" || { error "MAC address format is invalid."; exit 2; }
+    fi
+    CMD_ARGS+=("${RAW_INPUT[0]}")
+    [[ "$CONFIG_ONLY" == "true" ]] && CMD_ARGS+=("--config-only")
+elif [[ "$MODE" != "core-lookup" ]]; then
+    if [[ ! -t 0 && "$MODE" == "config" ]]; then
+        while IFS= read -r line; do [[ -n "$line" ]] && RAW_INPUT+=("$line"); done
+    fi
+    if [[ "$MODE" == "config" && ${#RAW_INPUT[@]} -eq 0 ]]; then
+        tf=$(mktemp /tmp/netops-config.XXXXXX) || { error "Could not create editor state."; exit 1; }
+        control_track_tmp "$tf"
+        read -r -a editor_command <<< "${EDITOR:-vim}"
+        ((${#editor_command[@]})) || { error "EDITOR is empty."; exit 1; }
+        "${editor_command[@]}" "$tf" || { error "Configuration editor exited with an error."; exit 1; }
+        mapfile -t RAW_INPUT < "$tf"
+    fi
+    if [[ "$MODE" == "config" ]]; then
+        resolved_commands=$(resolve_commands "${RAW_INPUT[@]}") || exit $?
+        mapfile -t CMD_ARGS <<< "$resolved_commands"
+    fi
+fi
+
+if [[ "$DRY_RUN" == "true" ]]; then
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        targets_json=$(printf '%s\n' "${TARGETS[@]}" | jq -R -s 'split("\n")[:-1]')
+        commands_json=$(printf '%s\n' "${CMD_ARGS[@]}" | jq -R -s 'split("\n")[:-1]')
+        jq -n --arg mode "$MODE" --arg target "$TARGET_INPUT"             --argjson targets "$targets_json" --argjson commands "$commands_json"             '{mode:$mode,target:$target,targets:$targets,commands:$commands,dry_run:true}'
+    else
+        echo "Dry run: $MODE"
+        echo "Targets: ${TARGETS[*]}"
+        printf '  %s
+' "${CMD_ARGS[@]}"
+    fi
+    exit 0
+fi
+
+if [[ "$MODE" == "config" && "${NETOPS_CORE_WRITE_REQUEST:-}" != "audited-confirmation" ]]; then
+    error "Direct configuration execution is blocked. Use 'netops device config ... --confirm' or 'netops vlan set ... --confirm' so preview, confirmation, and audit policy are applied."
+    exit 7
+fi
+
+if [[ "$MODE" == "config" && ${#TARGETS[@]} -gt 1 ]]; then
+    warn "Applying config to multiple targets. Continue? [y/N]"
+    tty_fd=""
+    if { exec {tty_fd}<>/dev/tty; } 2>/dev/null; then
+        read -r resp <&"$tty_fd"
+        exec {tty_fd}>&-
+    elif [[ -t 0 ]]; then
+        read -r resp
+    else
+        error "Interactive confirmation requires a terminal. Use --dry-run first, then run from a terminal."
+        exit 7
+    fi
+    [[ ! "$resp" =~ ^[yY]$ ]] && { error "Aborted."; exit 0; }
+fi
+
+get_password_from_store || exit $?
+
+if [[ "$MODE" == "shell" ]]; then
+    tty_fd=""
+    if { exec {tty_fd}<>/dev/tty; } 2>/dev/null; then
+        exec netops_ssh "${TARGETS[0]}" <&"$tty_fd"
+    elif [[ -t 0 ]]; then
+        exec netops_ssh "${TARGETS[0]}"
+    else
+        error "Interactive SSH requires a terminal."
+        exit 2
+    fi
+fi
+
+run=0
+overall_rc=0
+for ip in "${TARGETS[@]}"; do
+    if [[ "$MODE" == "core-lookup" ]] || verify_target "$ip"; then
+        ( perform_task "$ip" "$MODE" "$BACKUP_OUT" "$DETAIL_MODE" "${CMD_ARGS[@]}" ) &
+        CONTROL_CHILD_PIDS+=("$!")
+        ((run++))
+        if [[ $run -ge ${CONFIG[scan_workers]} ]]; then
+            wait -n || overall_rc=1
+            ((run--))
+        fi
+    else
+        error "Skipped $ip (Platform unknown/unsupported)"
+        overall_rc=1
+    fi
+done
+while (( run > 0 )); do
+    wait -n || overall_rc=1
+    ((run--))
+done
+if [[ "$MODE" == "backup" && "$SUMMARY_MODE" == "true" ]]; then
+    control_backup_summary "$RUN_STARTED"
+fi
+if [[ "$MODE" == "config" || "$MODE" == "inventory" || "$MODE" == "backup" || "$MODE" == "vlan" || "$MODE" == "mac-lookup" ]]; then
+    if ((overall_rc == 0)); then
+        success "Operation completed."
+    else
+        error "Operation completed with one or more failures."
+    fi
+fi
+exit "$overall_rc"

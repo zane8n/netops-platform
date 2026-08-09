@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+import importlib.util
+import os
+from pathlib import Path
+import runpy
+import sys
+launcher = Path(__file__).resolve()
+
+
+def tui_requested() -> bool:
+    arguments = sys.argv[1:]
+    explicit = "tui" in arguments
+    interactive_default = (
+        not arguments
+        and os.environ.get("NETOPS_TUI", "1").strip().lower() not in {"0", "false", "no", "off"}
+        and os.environ.get("TERM", "").strip().lower() != "dumb"
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+    )
+    return explicit or interactive_default
+
+
+def handoff_tui_runtime() -> None:
+    if not tui_requested() or importlib.util.find_spec("textual") is not None:
+        return
+    relative_python = Path("Scripts/python.exe") if os.name == "nt" else Path("bin/python")
+    managed_environment = launcher.parent / ".venv"
+    managed_python = managed_environment / relative_python
+    try:
+        already_managed = Path(sys.prefix).resolve() == managed_environment.resolve()
+    except OSError:
+        already_managed = False
+    if managed_python.is_file() and not already_managed:
+        os.execve(
+            str(managed_python),
+            [str(managed_python), str(launcher), *sys.argv[1:]],
+            dict(os.environ),
+        )
+
+
+handoff_tui_runtime()
+ai_args = sys.argv[2:] if sys.argv[1:2] == ["ai"] else (["--help"] if sys.argv[1:3] == ["help", "ai"] else None)
+if ai_args is not None:
+    assistant = launcher.parent / "ai" / "bin" / "netops_ai_chat.py"
+    if not assistant.exists():
+        print(f"Missing NetOps AI assistant: {assistant}", file=sys.stderr)
+        raise SystemExit(10)
+    os.execv(sys.executable, [sys.executable, str(assistant), *ai_args])
+core = launcher.with_name("netops_core.py")
+if not core.exists():
+    print(f"Missing NetOps core: {core}", file=sys.stderr)
+    raise SystemExit(10)
+sys.argv[0] = str(launcher)
+runpy.run_path(str(core), run_name="__main__")

@@ -1,0 +1,34 @@
+schema_version = 1
+
+[driver]
+family = "example-switch"
+vendor = "Example Networks"
+operating_system = "ExampleOS"
+device_kind = "switch"
+pager_commands = ["terminal length 0"]
+logout_commands = ["exit"]
+
+[match]
+platform = ["ExampleOS"]
+model = ["^EX-[0-9]{4}$"]
+confidence = 85
+
+[commands]
+inventory = ["show system"]
+vlan_inspect = ["show vlan {vlan}"]
+mac_lookup = ["show mac address-table address {mac_dotted}"]
+neighbors = ["show lldp neighbors detail"]
+interface_health = ["show interfaces {interface}"]
+
+[capabilities]
+inventory = "local-fixture"
+vlan_read = "local-fixture"
+mac_table = "local-fixture"
+lldp = "local-fixture"
+interface_health = "local-fixture"
+
+[parsers]
+inventory = "exampleos.inventory.v1"
+vlan_membership = "exampleos.vlan.v1"
+fdb = "exampleos.fdb.v1"
+neighbors = "exampleos.lldp.v1"

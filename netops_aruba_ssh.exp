@@ -1,0 +1,208 @@
+#!/usr/bin/env expect
+set timeout 60
+if {[info exists env(NETOPS_SSH_COMMAND_TIMEOUT)] && [string is integer -strict $env(NETOPS_SSH_COMMAND_TIMEOUT)]} {
+    if {$env(NETOPS_SSH_COMMAND_TIMEOUT) >= 1 && $env(NETOPS_SSH_COMMAND_TIMEOUT) <= 600} {
+        set timeout $env(NETOPS_SSH_COMMAND_TIMEOUT)
+    }
+}
+
+if {[llength $argv] < 1 || [string trim [lindex $argv 0]] eq ""} {
+    puts stderr "ERROR: Missing SSH target"
+    exit 2
+}
+set ip [lindex $argv 0]
+
+# If arguments are provided after IP, use them as commands.
+# Otherwise, read commands from stdin (one per line).
+if {[llength $argv] > 1} {
+    set commands [lrange $argv 1 end]
+} else {
+    set commands {}
+    while {[gets stdin line] >= 0} {
+        set normalized [string tolower [string trim $line]]
+        # The wrapper owns logout. Generic command streams append these for
+        # plain ssh, but sending them here would interrupt prompt capture.
+        if {$normalized ne "" && $normalized ne "exit" && $normalized ne "y"} {
+            lappend commands $line
+        }
+    }
+}
+
+# Environment checks
+if {![info exists env(CREDS_ssh_user)] || [string trim $env(CREDS_ssh_user)] eq ""} {
+    puts stderr "ERROR: CREDS_ssh_user environment variable not set"
+    exit 1
+}
+if {![info exists env(SSHPASS)] || $env(SSHPASS) eq ""} {
+    puts stderr "ERROR: SSHPASS environment variable not set"
+    exit 1
+}
+set user $env(CREDS_ssh_user)
+set strict_host_key "accept-new"
+if {[info exists env(NETOPS_SSH_STRICT_HOST_KEY_CHECKING)]} {
+    set strict_host_key $env(NETOPS_SSH_STRICT_HOST_KEY_CHECKING)
+}
+set known_hosts [file join $env(HOME) .ssh known_hosts]
+if {[info exists env(NETOPS_SSH_KNOWN_HOSTS_FILE)]} {
+    set known_hosts $env(NETOPS_SSH_KNOWN_HOSTS_FILE)
+}
+
+proc child_exit_code {fallback} {
+    set code $fallback
+    if {![catch {wait} result] && [llength $result] >= 4} {
+        if {[lindex $result 2] == 0} {
+            set child_code [lindex $result 3]
+            if {[string is integer -strict $child_code] && $child_code >= 0 && $child_code <= 255} {
+                set code $child_code
+            }
+        }
+    }
+    return $code
+}
+
+proc terminate_child {} {
+    if {[info exists ::spawn_id]} {
+        catch {send -i $::spawn_id "\003"}
+        set pid ""
+        catch {set pid [exp_pid -i $::spawn_id]}
+        if {$pid ne ""} {
+            catch {exec kill -TERM -- $pid}
+            after 100
+            catch {exec kill -KILL -- $pid}
+        }
+        catch {close -i $::spawn_id}
+        catch {wait -i $::spawn_id}
+    }
+}
+
+proc emit_ssh_diagnostic {buffer} {
+    foreach line [split [string map [list "\r" ""] $buffer] "\n"] {
+        set clean [string trim $line]
+        if {[regexp -nocase {unable to negotiate|no matching (key exchange|host key|cipher|mac)|their offer:|permission denied|authentication failed|access denied|remote host identification has changed|host key verification failed|connection (refused|timed out)|no route to host|protocol major versions differ} $clean]} {
+            puts stderr "SSH: $clean"
+        }
+    }
+}
+
+trap {terminate_child; exit 130} SIGINT
+trap {terminate_child; exit 143} SIGTERM
+trap {terminate_child; exit 129} SIGHUP
+
+# Set dumb terminal to reduce ANSI codes
+set env(TERM) dumb
+log_user 0
+
+# Spawn sshpass with ssh. The pseudo-terminal is required for long output.
+# Legacy additions are filtered against this OpenSSH client by netops-lib.sh;
+# appending with '+' preserves the client's modern defaults.
+set ssh_command [list sshpass -e ssh -tt -o StrictHostKeyChecking=$strict_host_key -o UserKnownHostsFile=$known_hosts -o LogLevel=ERROR]
+foreach {variable option} {
+    NETOPS_SSH_KEX_ALGORITHMS KexAlgorithms
+    NETOPS_SSH_HOST_KEY_ALGORITHMS HostKeyAlgorithms
+    NETOPS_SSH_CIPHERS Ciphers
+    NETOPS_SSH_MACS MACs
+} {
+    if {[info exists env($variable)] && [string trim $env($variable)] ne ""} {
+        lappend ssh_command -o "$option=+$env($variable)"
+    }
+}
+lappend ssh_command -l $user $ip
+spawn {*}$ssh_command
+
+# Give the remote side a moment. The login prompt arrives without an extra
+# carriage return; sending one here queued a duplicate prompt and shifted every
+# command result by one prompt.
+sleep 1
+
+# Match a complete prompt line at the end of the receive buffer. Restricting
+# prompt characters prevents comparison signs in command output from ending a
+# command early while allowing common Cisco and Aruba config-mode prompts.
+set prompt_pattern {(?:^|[\r\n])[[:alnum:]_.:/()@~-]{1,160}[>#][ \t]*$}
+expect {
+    "Press any key to continue" {
+        send "\r"
+        exp_continue
+    }
+    -re $prompt_pattern {}
+    eof {
+        emit_ssh_diagnostic $expect_out(buffer)
+        set code [child_exit_code 1]
+        puts stderr "ERROR: SSH session ended before the initial device prompt (exit $code)"
+        exit [expr {$code == 0 ? 1 : $code}]
+    }
+    timeout {
+        emit_ssh_diagnostic $expect_out(buffer)
+        puts stderr "ERROR: Timeout waiting for initial prompt"
+        terminate_child
+        exit 9
+    }
+}
+
+# Send each command, capturing output until the next prompt
+set command_number 0
+foreach cmd $commands {
+    if {[string trim $cmd] eq ""} { continue }
+    incr command_number
+    set captured ""
+    send "$cmd\r"
+    expect {
+        -re {--[ ]*MORE[ ]*--|More:|Press[ ]+any[ ]+key[ ]+to[ ]+continue} {
+            append captured $expect_out(buffer)
+            send " "
+            exp_continue -continue_timer
+        }
+        -re $prompt_pattern {
+            append captured $expect_out(buffer)
+        }
+        eof {
+            append captured $expect_out(buffer)
+            emit_ssh_diagnostic $captured
+            set code [child_exit_code 1]
+            puts stderr "ERROR: SSH session ended while waiting for command $command_number (exit $code)"
+            exit [expr {$code == 0 ? 1 : $code}]
+        }
+        timeout {
+            emit_ssh_diagnostic $expect_out(buffer)
+            puts stderr "ERROR: Timeout waiting for command $command_number to finish"
+            terminate_child
+            exit 9
+        }
+    }
+    # The output is everything up to the prompt
+    set output $captured
+    # Clean ANSI escape sequences and cursor reports
+    regsub -all {\x1b\[[0-9;?]*[A-Za-z]} $output "" output
+    regsub -all {[0-9]+;[0-9]+R} $output "" output
+    regsub -all {\x1b} $output "" output
+    regsub -all {.\x08} $output "" output
+    # Filter only whole echo/prompt lines. The former greedy prompt regex
+    # crossed newlines and could delete the command result.
+    set cleaned_lines {}
+    foreach line [split $output "\n"] {
+        set normalized [string trim [string map [list "\r" ""] $line]]
+        if {$normalized eq [string trim $cmd]} { continue }
+        if {[regexp {^[^[:space:]]+[>#]$} $normalized]} { continue }
+        lappend cleaned_lines [string map [list "\r" ""] $line]
+    }
+    set cleaned [string trim [join $cleaned_lines "\n"]]
+    if {$cleaned ne ""} { puts $cleaned }
+}
+
+# Exit sequence
+send "exit\r"
+set timeout 5
+expect {
+    -re $prompt_pattern { send "exit\r"; exp_continue }
+    "Do you want to log out" {
+        send "y\r"
+        exp_continue
+    }
+    eof {
+        set code [child_exit_code 0]
+        exit $code
+    }
+    timeout {
+        terminate_child
+        exit 0
+    }
+}

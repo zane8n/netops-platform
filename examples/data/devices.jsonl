@@ -1,0 +1,2 @@
+{"id":"switch-001","ip":"192.0.2.11","hostname":"SITE-A-ACCESS-01","platform":"Cisco IOS-XE 17.9","status":"ONLINE","observed_at":"2026-01-15T09:30:00Z"}
+{"id":"switch-002","ip":"192.0.2.12","hostname":"SITE-A-ACCESS-02","platform":"Aruba AOS-CX","status":"ONLINE","observed_at":"2026-01-15T09:30:00Z"}

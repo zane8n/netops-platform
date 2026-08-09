@@ -1,0 +1,1689 @@
+#!/usr/bin/env bash
+# NetOps Discovery Engine
+source "$(dirname "$(realpath "$0")")/netops-lib.sh"
+# shellcheck disable=SC2001,SC2207,SC2162,SC2086
+set -o pipefail
+
+discovery_log() {
+    local level="$1" color="$2" message="$3" stamp
+    stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if [[ -n "${NO_COLOR:-}" || ! -t 2 ]]; then
+        printf '[%s] [%s] %s\n' "$stamp" "$level" "$message" >&2
+    else
+        printf '[%s] \033[%sm[%s]\033[0m %s\n' "$stamp" "$color" "$level" "$message" >&2
+    fi
+}
+log() { discovery_log "DISC" "0;34" "$1"; }
+log_error() { discovery_log "ERROR" "0;31" "$1"; }
+log_success() { discovery_log "SUCCESS" "0;32" "$1"; }
+
+PROGRESS_PID=""
+DISCOVERY_TMP=()
+DISCOVERY_RUNTIME=""
+
+track_tmp() { DISCOVERY_TMP+=("$1"); }
+
+discovery_runtime_init() {
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    DISCOVERY_RUNTIME=$(mktemp -d "${TMPDIR:-/tmp}/netops-discovery.XXXXXX") || {
+        umask "$old_umask"
+        log_error "Could not create a private discovery runtime directory."
+        exit 10
+    }
+    umask "$old_umask"
+}
+
+discovery_mktemp() {
+    local label="${1:-state}"
+    mktemp "${DISCOVERY_RUNTIME}/${label}.XXXXXX"
+}
+
+discovery_db_tmp() {
+    local db="$1"
+    mktemp "${db}.tmp.XXXXXX"
+}
+
+progress_enabled() { [[ -t 2 && "${NETOPS_PROGRESS:-1}" != "0" ]]; }
+
+progress_clear() {
+    progress_enabled || return 0
+    printf "\r\033[2K" >&2
+}
+
+progress_note() {
+    progress_enabled || return 0
+    local msg="${1:-working}"
+    printf "\r\033[2K[STATUS] discovery | %s | Ctrl+C cancels" "$msg" >&2
+}
+
+progress_start() {
+    progress_enabled || return 0
+    local label="$1" total="${2:-0}" file="${3:-}" mode="${4:-lines}"
+    progress_stop >/dev/null 2>&1 || true
+    (
+        while :; do
+            local done_count=0
+            if [[ -n "$file" && -f "$file" ]]; then
+                if [[ "$mode" == "chars" ]]; then
+                    done_count=$(wc -c < "$file" 2>/dev/null || echo 0)
+                else
+                    done_count=$(wc -l < "$file" 2>/dev/null || echo 0)
+                fi
+            fi
+            if [[ "$total" =~ ^[0-9]+$ && "$total" -gt 0 ]]; then
+                printf "\r\033[2K[STATUS] discovery | %s | %s/%s | Ctrl+C cancels" "$label" "$done_count" "$total" >&2
+            else
+                printf "\r\033[2K[STATUS] discovery | %s | %s done | Ctrl+C cancels" "$label" "$done_count" >&2
+            fi
+            sleep 1
+        done
+    ) &
+    PROGRESS_PID=$!
+}
+
+progress_stop() {
+    if [[ -n "${PROGRESS_PID:-}" ]]; then
+        kill "$PROGRESS_PID" 2>/dev/null || true
+        wait "$PROGRESS_PID" 2>/dev/null || true
+        PROGRESS_PID=""
+    fi
+    progress_clear
+}
+
+discovery_cleanup_files() {
+    progress_stop >/dev/null 2>&1 || true
+    if (( ${#DISCOVERY_TMP[@]} )); then rm -f "${DISCOVERY_TMP[@]}" 2>/dev/null || true; fi
+    if [[ -n "${DISCOVERY_RUNTIME:-}" && -d "$DISCOVERY_RUNTIME" ]]; then
+        rm -rf -- "$DISCOVERY_RUNTIME" 2>/dev/null || true
+    fi
+}
+
+discovery_cleanup() {
+    local code="${1:-130}" child_pids=()
+    trap - INT TERM EXIT
+    progress_stop >/dev/null 2>&1 || true
+    mapfile -t child_pids < <(jobs -pr)
+    if (( ${#child_pids[@]} )); then
+        kill -TERM "${child_pids[@]}" 2>/dev/null || true
+        wait "${child_pids[@]}" 2>/dev/null || true
+    fi
+    pkill -TERM -P $$ 2>/dev/null || true
+    discovery_cleanup_files
+    exit "$code"
+}
+
+discovery_runtime_init
+trap discovery_cleanup_files EXIT
+trap 'discovery_cleanup 130' INT
+trap 'discovery_cleanup 143' TERM
+
+sanitize_string() { echo "$1" | tr -d '\r\n"' | tr -dc '[:print:]'; }
+
+compact_switch_name() {
+    local name max_len
+    name=$(sanitize_string "${1:-N/A}")
+    [[ -z "$name" ]] && { echo "N/A"; return; }
+    name="${name%%.*}"
+    max_len="${NETOPS_SWITCH_NAME_MAX:-32}"
+    [[ ! "$max_len" =~ ^[0-9]+$ || "$max_len" -lt 8 ]] && max_len=32
+    if (( ${#name} > max_len )); then
+        echo "${name:0:max_len}"
+    else
+        echo "$name"
+    fi
+}
+
+generate_ip_list() {
+    local target="$1" max_hosts="${NETOPS_SCAN_MAX_HOSTS:-${CONFIG[scan_max_hosts]:-4096}}"
+    [[ "$max_hosts" =~ ^[0-9]+$ && "$max_hosts" -ge 1 && "$max_hosts" -le 1048576 ]] || max_hosts=4096
+    python3 - "$target" "$max_hosts" <<'PY_TARGETS'
+import ipaddress
+import sys
+
+raw = sys.argv[1].strip()
+limit = int(sys.argv[2])
+
+try:
+    if raw.endswith("."):
+        raw = raw + "1-254"
+    if "-" in raw:
+        first, last = raw.split("-", 1)
+        start = ipaddress.ip_address(first)
+        if start.version != 4:
+            raise ValueError("only IPv4 targets are supported")
+        end = ipaddress.ip_address(last if "." in last else f"{str(start).rsplit('.', 1)[0]}.{last}")
+        count = int(end) - int(start) + 1
+        if count <= 0:
+            raise ValueError("range end precedes range start")
+        if count > limit:
+            raise ValueError(f"range expands to {count} hosts; limit is {limit}")
+        for value in range(int(start), int(end) + 1):
+            print(ipaddress.ip_address(value))
+    elif "/" in raw:
+        network = ipaddress.ip_network(raw, strict=False)
+        if network.version != 4:
+            raise ValueError("only IPv4 targets are supported")
+        count = network.num_addresses if network.prefixlen >= 31 else network.num_addresses - 2
+        if count > limit:
+            raise ValueError(f"network expands to {count} hosts; limit is {limit}")
+        for address in network.hosts():
+            print(address)
+    else:
+        address = ipaddress.ip_address(raw)
+        if address.version != 4:
+            raise ValueError("only IPv4 targets are supported")
+        print(address)
+except ValueError as exc:
+    print(f"Invalid discovery target '{sys.argv[1]}': {exc}", file=sys.stderr)
+    raise SystemExit(6)
+PY_TARGETS
+}
+
+discovery_workers() {
+    local value="${1:-30}" default="${2:-30}" maximum="${3:-200}"
+    [[ "$value" =~ ^[0-9]+$ && "$value" -ge 1 && "$value" -le "$maximum" ]] || value="$default"
+    printf '%s\n' "$value"
+}
+
+filter_stale_targets() {
+    local minutes="${1:-0}" cutoff now
+    now=$(date +%s)
+    cutoff=$((now - (minutes * 60)))
+    awk -F'|' -v cutoff="$cutoff" '
+        NR==FNR { targets[$1]=1; order[++n]=$1; next }
+        ($1 in targets) && ($9=="OFFLINE" || $8=="" || $8 < cutoff) { stale[$1]=1 }
+        END { for(i=1;i<=n;i++) if(order[i] in stale || !(order[i] in seen_db)) print order[i] }
+        { seen_db[$1]=1 }
+    ' - "$DEVICES_DB"
+}
+
+prioritize_scan_targets() {
+    awk -F'|' '
+        NR==FNR { order[++n]=$1; wanted[$1]=1; next }
+        ($1 in wanted) && $9=="OFFLINE" { offline[$1]=1 }
+        END {
+            for(i=1;i<=n;i++) if(order[i] in offline) print order[i]
+            for(i=1;i<=n;i++) if(!(order[i] in offline)) print order[i]
+        }
+    ' - "$DEVICES_DB"
+}
+
+fast_health_update() {
+    local target_input="${1:-}" targets_file results_file stale_file ordered_file now timeout_val workers
+    targets_file=$(discovery_mktemp targets); results_file=$(discovery_mktemp results); now=$(date +%s)
+    timeout_val="${CONFIG[ping_timeout]:-1}"
+    workers=$(discovery_workers "${CONFIG[scan_workers]:-30}" 30 200)
+
+    if [[ -n "$target_input" ]]; then
+        for network in $target_input; do generate_ip_list "$network" || return $?; done > "$targets_file"
+    else
+        awk -F'|' '{print $1}' "$DEVICES_DB" "$AP_DB" 2>/dev/null | awk 'NF && !seen[$1]++' > "$targets_file"
+    fi
+    if [[ -n "${STALE_BEFORE:-}" && "${FORCE_SCAN:-false}" != "true" ]]; then
+        stale_file=$(discovery_mktemp stale)
+        filter_stale_targets "$STALE_BEFORE" < "$targets_file" > "$stale_file" && mv "$stale_file" "$targets_file"
+    fi
+    ordered_file=$(discovery_mktemp ordered)
+    prioritize_scan_targets < "$targets_file" > "$ordered_file" && mv "$ordered_file" "$targets_file"
+
+    if [[ ! -s "$targets_file" ]]; then
+        log "No stale targets selected for fast health scan. Use --force to scan everything."
+        rm -f "$targets_file" "$results_file"
+        return 0
+    fi
+
+    local total_targets
+    total_targets=$(wc -l < "$targets_file" 2>/dev/null || echo 0)
+    if [[ "$DRY_RUN" == true ]]; then
+        printf 'Would run fast health against %s target(s) with %s worker(s).\n' "$total_targets" "$workers"
+        sed -n '1,20p' "$targets_file"
+        [[ "$total_targets" -gt 20 ]] && printf '... %s additional target(s)\n' "$((total_targets - 20))"
+        return 0
+    fi
+    progress_start "fast health" "$total_targets" "$results_file" "lines"
+    xargs -r -a "$targets_file" -P "$workers" -I {} bash -c '
+        ip="$1"; timeout_val="$2"; now="$3"
+        if ping -c1 -W"$timeout_val" "$ip" >/dev/null 2>&1; then
+            printf "%s|ONLINE|%s\n" "$ip" "$now"
+        else
+            printf "%s|OFFLINE|%s\n" "$ip" "$now"
+        fi
+    ' _ {} "$timeout_val" "$now" > "$results_file" || { progress_stop; log_error "Fast health workers failed."; return 10; }
+    progress_stop
+
+    local db_tmp
+    for db in "$DEVICES_DB" "$AP_DB"; do
+        [[ -f "$db" ]] || continue
+        db_tmp=$(discovery_db_tmp "$db") || return 10
+        track_tmp "$db_tmp"
+        (
+            flock -x 210 || exit 1
+            awk -F'|' -v OFS='|' '
+                FILENAME==ARGV[1] { status[$1]=$2; checked[$1]=$3; next }
+                ($1 in status) { $8=checked[$1]; $9=status[$1] }
+                { print $0 }
+            ' "$results_file" "$db" > "$db_tmp" && mv "$db_tmp" "$db"
+        ) 210> "${db}.lock" || { log_error "Could not update $db safely."; return 10; }
+    done
+    local checked_count
+    checked_count=$(wc -l < "$results_file" 2>/dev/null || echo 0)
+    rm -f "$targets_file" "$results_file"
+    log_success "Fast health scan complete. Checked $checked_count target(s)."
+    if [[ "${NETOPS_CORE_MANAGED:-0}" != "1" ]]; then
+        "$(dirname "$(realpath "$0")")/netops" db import >/dev/null 2>&1 || true
+    fi
+}
+
+deep_discovery() {
+    local networks="${1:-${CONFIG[subnets]}}"
+    local rc=0 step_rc
+    update_cache "$networks" || { step_rc=$?; [[ "$rc" -eq 0 ]] && rc=$step_rc; }
+    discover_aps || { step_rc=$?; [[ "$rc" -eq 0 ]] && rc=$step_rc; }
+    discover_neighbors || { step_rc=$?; [[ "$rc" -eq 0 ]] && rc=$step_rc; }
+    [[ "$DRY_RUN" == true ]] && return "$rc"
+    "$(dirname "$(realpath "$0")")/netops" db import >/dev/null 2>&1 || true
+    return "$rc"
+}
+
+show_topology_changes() {
+    local json="${1:-false}"
+    local netops_path="$(dirname "$(realpath "$0")")/netops"
+    "$netops_path" db import >/dev/null 2>&1 || true
+    if [[ "$json" == "true" ]]; then
+        "$netops_path" topology changes --json
+    else
+        "$netops_path" topology changes
+    fi
+}
+
+scan_host() {
+    local ip="$1"
+    if ping -c1 -W"${CONFIG[ping_timeout]}" "$ip" &>/dev/null; then
+        local hostname sysdesc serial model mac clean_mac family platform
+        hostname=$(netops_snmp_get "$ip" "sysName.0")
+        if [[ -n "$hostname" ]]; then
+            hostname=$(sanitize_string "$hostname")
+            serial=$(netops_snmp_get "$ip" "1.3.6.1.2.1.47.1.1.1.1.11.1")
+            [[ -z "$serial" ]] && serial=$(netops_snmp_get "$ip" "1.3.6.1.4.1.9.3.6.3.0")
+            serial=$(sanitize_string "${serial:-N/A}")
+
+            sysdesc=$(netops_snmp_get "$ip" "sysDescr.0")
+            sysdesc=$(sanitize_string "$sysdesc")
+            model=$(grep -ioE 'WS-C[0-9A-Z-]+|C[0-9]{4}[A-Z0-9-]*|N[0-9]K-[A-Z0-9-]+|J[A-Z0-9]{5,}|ICX[[:space:]-]*[0-9]{4}[A-Z0-9-]*' <<< "$sysdesc" | head -1 | tr -d ' \r')
+            [[ -z "$model" ]] && model="N/A"
+            mac=$(netops_snmp_get "$ip" "1.3.6.1.2.1.17.1.1.0")
+            clean_mac=$(grep -ioE '([0-9a-f]{2}[:-]){5}[0-9a-f]{2}|[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}|[0-9a-f]{12}' <<< "$mac" | head -1)
+            [[ -z "$clean_mac" ]] && clean_mac="N/A"
+            family=$(netops_platform_family "$sysdesc" "$model" "$hostname")
+            case "$family" in
+                cisco-ios) platform="Cisco IOS" ;;
+                aruba-aos-switch) platform="Aruba AOS-S" ;;
+                aruba-aos-cx) platform="Aruba AOS-CX" ;;
+                ruckus-fastiron) platform="Ruckus FastIron" ;;
+                ruckus-smartzone) platform="Ruckus SmartZone" ;;
+                ruckus-ap) platform="Ruckus AP" ;;
+                *) platform="Unknown" ;;
+            esac
+
+            echo "${ip}|${hostname}|${platform}|${model}|${serial}|${clean_mac}|SNMP|$(date +%s)|ONLINE"
+            return 0
+        fi
+        # Reachability is still current evidence when SNMP is unavailable.
+        # The normalized ingest layer treats these placeholders as absent, so
+        # existing identity and hardware data are retained while status/source
+        # are refreshed accurately.
+        echo "${ip}|N/A|Unknown|N/A|N/A|N/A|ICMP|$(date +%s)|ONLINE"
+        return 0
+    fi
+    return 1
+}
+
+update_cache() {
+    local custom_networks="${1:-${CONFIG[subnets]}}"
+    if [[ -z "$custom_networks" ]]; then log_error "No networks configured."; return 1; fi
+    log "Starting network scan for switches/routers on: $custom_networks"
+
+    local all_ips network
+    all_ips=$(for network in $custom_networks; do generate_ip_list "$network" || exit $?; done) || return $?
+    if [[ -z "$all_ips" ]]; then return 1; fi
+    if [[ -n "${STALE_BEFORE:-}" && "${FORCE_SCAN:-false}" != "true" ]]; then
+        all_ips=$(filter_stale_targets "$STALE_BEFORE" <<< "$all_ips")
+        if [[ -z "$all_ips" ]]; then log "No stale targets selected. Use --force to scan everything."; return 0; fi
+    fi
+    all_ips=$(prioritize_scan_targets <<< "$all_ips")
+
+    local total_targets workers
+    total_targets=$(wc -l <<< "$all_ips")
+    workers=$(discovery_workers "${CONFIG[scan_workers]:-30}" 30 200)
+    if [[ "$DRY_RUN" == true ]]; then
+        printf 'Would scan %s target(s) with %s worker(s).\n' "$total_targets" "$workers"
+        sed -n '1,20p' <<< "$all_ips"
+        [[ "$total_targets" -gt 20 ]] && printf '... %s additional target(s)\n' "$((total_targets - 20))"
+        return 0
+    fi
+
+    local temp_results all_ips_file progress_file summary_file scan_started
+    temp_results=$(discovery_mktemp scan-results)
+    all_ips_file=$(discovery_mktemp targets)
+    progress_file=$(discovery_mktemp progress)
+    summary_file=$(discovery_mktemp ingest-summary)
+    scan_started=$(date +%s)
+    echo "$all_ips" > "$all_ips_file"
+
+    local lib_path="$(dirname "$(realpath "$0")")/netops-lib.sh"
+    local funcs=$(declare -f scan_host sanitize_string)
+    local host_timeout="${CONFIG[scan_host_timeout]:-20}"
+    [[ ! "$host_timeout" =~ ^[0-9]+$ ]] && host_timeout=20
+    progress_start "switch scan" "$total_targets" "$progress_file" "chars"
+    xargs -r -a "$all_ips_file" -P "$workers" -I {} bash -c '
+        lib_path="$1"; funcs="$2"; timeout_val="$3"; ip="$4"; progress_file="$5"
+        timeout "$timeout_val" bash -c "source \"\$1\" >/dev/null 2>&1; eval \"\$2\"; scan_host \"\$3\"" _ "$lib_path" "$funcs" "$ip"
+        printf . >> "$progress_file"
+    ' _ "$lib_path" "$funcs" "$host_timeout" {} "$progress_file" > "$temp_results" || { progress_stop; log_error "Switch scan workers failed."; return 10; }
+    progress_stop
+
+    local db_tmp ingest_helper
+    db_tmp=$(discovery_db_tmp "$DEVICES_DB") || return 10
+    track_tmp "$db_tmp"
+    ingest_helper="${NETOPS_INGEST_HELPER:-$(netops_python_helper_path netops_ingest netops_ingest.py)}"
+    [[ -r "$ingest_helper" ]] || { log_error "Inventory ingest helper is unavailable: $ingest_helper"; return 10; }
+    (
+        flock -x 210 || exit 1
+        python3 "$ingest_helper" merge-device-scan \
+            --inventory "$DEVICES_DB" \
+            --targets "$all_ips_file" \
+            --observations "$temp_results" \
+            --output "$db_tmp" \
+            --observed-at "$scan_started" \
+            --summary "$summary_file" && mv "$db_tmp" "$DEVICES_DB"
+    ) 210> "${DEVICES_DB}.lock" || { log_error "Could not commit the device scan safely."; return 10; }
+    
+    local changed_devices=0
+    if command -v jq >/dev/null 2>&1 && [[ -s "$summary_file" ]]; then
+        changed_devices=$(jq -r '.changed_devices // 0' "$summary_file" 2>/dev/null || echo 0)
+    fi
+    rm -f "$temp_results" "$all_ips_file" "$progress_file" "$summary_file"
+    log_success "Scan complete. DB holds $(wc -l < "$DEVICES_DB") devices; $changed_devices record(s) changed data or status."
+    "$(dirname "$(realpath "$0")")/netops" db import >/dev/null 2>&1 || true
+}
+
+# --- CRUD Management ---
+upsert_db_record() {
+    local db="$1" ip="$2" entry="$3" db_tmp
+    db_tmp=$(discovery_db_tmp "$db") || return 10
+    track_tmp "$db_tmp"
+    (
+        flock -x 210 || exit 1
+        awk -F'|' -v ip="$ip" -v entry="$entry" '
+            $1 == ip { if (!found) print entry; found=1; next }
+            { print }
+            END { if (!found) print entry }
+        ' "$db" > "$db_tmp" && mv "$db_tmp" "$db"
+    ) 210> "${db}.lock"
+}
+
+delete_db_ip() {
+    local db="$1" ip="$2" db_tmp
+    [[ -f "$db" ]] || return 3
+    db_tmp=$(discovery_db_tmp "$db") || return 10
+    track_tmp "$db_tmp"
+    (
+        flock -x 210 || exit 1
+        awk -F'|' -v ip="$ip" '
+            $1 == ip { found=1; next }
+            { print }
+            END { if (!found) exit 3 }
+        ' "$db" > "$db_tmp" || exit $?
+        mv "$db_tmp" "$db"
+    ) 210> "${db}.lock"
+}
+
+edit_db_field() {
+    local db="$1" ip="$2" field_number="$3" new_value="$4" db_tmp
+    [[ -f "$db" ]] || return 3
+    db_tmp=$(discovery_db_tmp "$db") || return 10
+    track_tmp "$db_tmp"
+    (
+        flock -x 210 || exit 1
+        awk -F'|' -v OFS='|' -v ip="$ip" -v f="$field_number" -v v="$new_value" '
+            $1 == ip { $f=v; found=1 }
+            { print }
+            END { if (!found) exit 3 }
+        ' "$db" > "$db_tmp" || exit $?
+        mv "$db_tmp" "$db"
+    ) 210> "${db}.lock"
+}
+
+add_db_record() {
+    local ip="$1" host="${2:-N/A}" plat="${3:-Unknown}" model="${4:-N/A}" ser="${5:-N/A}" mac="${6:-N/A}" type="${7^^}"
+    valid_ipv4 "$ip" || { log_error "Invalid IPv4 address: $ip"; return 6; }
+    [[ "$type" == "AP" || "$type" == "DEVICE" ]] || { log_error "TYPE must be DEVICE or AP."; return 6; }
+    [[ "$host$plat$model$ser$mac" != *"|"* && "$host$plat$model$ser$mac" != *$'\n'* ]] || { log_error "Database fields cannot contain pipes or newlines."; return 6; }
+    local ts entry db label
+    ts=$(date +%s)
+    if [[ "$type" == "AP" ]]; then
+        entry="${ip}|${host}|${plat}|N/A|N/A|N/A|${mac}|${ts}|ONLINE"
+        db="$AP_DB"; label="AP"
+    else
+        entry="${ip}|${host}|${plat}|${model}|${ser}|${mac}|MANUAL|${ts}|ONLINE"
+        db="$DEVICES_DB"; label="device"
+    fi
+    upsert_db_record "$db" "$ip" "$entry" || { log_error "Could not update $db safely."; return 10; }
+    log_success "Added or updated $label: $ip"
+}
+
+delete_db_record() {
+    local ip="$1" found=false rc
+    valid_ipv4 "$ip" || { log_error "Invalid IPv4 address: $ip"; return 6; }
+    for db in "$DEVICES_DB" "$AP_DB"; do
+        delete_db_ip "$db" "$ip"; rc=$?
+        [[ "$rc" -eq 0 ]] && found=true
+        [[ "$rc" -ne 0 && "$rc" -ne 3 ]] && { log_error "Could not update $db safely."; return 10; }
+    done
+    [[ "$found" == true ]] || { log_error "No record found for: $ip"; return 6; }
+    log_success "Deleted record for: $ip"
+}
+
+edit_db_record() {
+    local ip="$1" field="$2" val="$3"
+    local fnum=0
+    valid_ipv4 "$ip" || { log_error "Invalid IPv4 address: $ip"; return 6; }
+    [[ "$val" != *"|"* && "$val" != *$'\n'* ]] || { log_error "Field values cannot contain pipes or newlines."; return 6; }
+    case "${field,,}" in
+        host|hostname) fnum=2 ;;
+        plat|platform) fnum=3 ;;
+        model) fnum=4 ;;
+        serial) fnum=5 ;;
+        mac) fnum=6 ;;
+        *) log_error "Invalid field. Use: host, plat, model, serial, mac"; return 1 ;;
+    esac
+
+    if edit_db_field "$DEVICES_DB" "$ip" "$fnum" "$val"; then
+        log_success "Updated $ip in Devices DB."
+    elif edit_db_field "$AP_DB" "$ip" "$fnum" "$val"; then
+        log_success "Updated $ip in AP DB."
+    else
+        log_error "No record found for: $ip"
+        return 6
+    fi
+}
+
+add_manual_device() {
+    local ip="$1"
+    if ! valid_ipv4 "$ip"; then
+        log_error "Invalid IP address."
+        return 1
+    fi
+    log "Adding $ip manually via SSH verification..."
+    db_update_device "$ip" "N/A" "Unknown" "N/A" "N/A" "N/A" "SSH" "ONLINE"
+    
+    local ctl_path="$(dirname "$(realpath "$0")")/netops-control"
+    "$ctl_path" inventory "$ip" >/dev/null 2>&1
+    
+    local host=$(db_get_device "$ip" | cut -d'|' -f2)
+    local plat=$(db_get_device "$ip" | cut -d'|' -f3)
+    if [[ "$plat" != "Unknown" && "$plat" != "N/A" ]]; then
+        log_success "Added manually: $ip -> ${host} (${plat})"
+    else
+        log_error "Failed to classify device at $ip via SSH."
+    fi
+}
+
+# --- AP Discovery ---
+controller_reachable() {
+    local ip="$1" comm="$2"
+    [[ -z "$ip" ]] && return 1
+    ping -c1 -W2 "$ip" &>/dev/null || return 1
+    local check=$(netops_snmp_get "$ip" "sysName.0" "$comm")
+    [[ -n "$check" ]] && return 0 || return 1
+}
+
+valid_ipv4() {
+    local candidate="${1:-}" octet octets=()
+    [[ "$candidate" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ && "$candidate" != "0.0.0.0" ]] || return 1
+    IFS='.' read -r -a octets <<< "$candidate"
+    for octet in "${octets[@]}"; do
+        ((10#$octet >= 0 && 10#$octet <= 255)) || return 1
+    done
+}
+
+normalize_mac() {
+    local mac="${1:-}"
+    mac=$(echo "$mac" | tr '[:upper:]' '[:lower:]' | sed 's/[^0-9a-f]//g')
+    [[ ${#mac} -eq 12 ]] && printf "%s:%s:%s:%s:%s:%s\n" "${mac:0:2}" "${mac:2:2}" "${mac:4:2}" "${mac:6:2}" "${mac:8:2}" "${mac:10:2}" || echo "N/A"
+}
+
+cisco_wlc_ap_name_allowed() {
+    local name_upper token matched_prefix="false"
+    name_upper="$(sanitize_string "${1:-}" | tr '[:lower:]' '[:upper:]')"
+    [[ -z "$name_upper" ]] && return 1
+
+    for token in ${CONFIG[cisco_wlc_ap_name_contains]:-}; do
+        token="$(echo "$token" | tr '[:lower:]' '[:upper:]')"
+        [[ -n "$token" && "$name_upper" != *"$token"* ]] && return 1
+    done
+
+    if [[ -n "${CONFIG[cisco_wlc_ap_name_prefix]:-}" ]]; then
+        for token in ${CONFIG[cisco_wlc_ap_name_prefix]}; do
+            token="$(echo "$token" | tr '[:lower:]' '[:upper:]')"
+            [[ -n "$token" && "$name_upper" == "$token"* ]] && matched_prefix="true"
+        done
+        [[ "$matched_prefix" == "true" ]] || return 1
+    fi
+    return 0
+}
+
+cisco_wlc_ap_allowed() {
+    local ip="$1" name="$2" ip_filter="${CONFIG[cisco_wlc_ap_ip_filter]:-}"
+    if valid_ipv4 "$ip" && [[ -n "$ip_filter" && "$ip" != "$ip_filter"* ]]; then return 1; fi
+    cisco_wlc_ap_name_allowed "$name"
+}
+
+cisco_wlc_join_status() {
+    local upper
+    upper="$(echo "${1:-}" | tr '[:lower:]' '[:upper:]')"
+    if [[ "$upper" =~ NOT[[:space:]_-]*JOIN|NOT[[:space:]_-]*CONNECTED|DISJOIN|DISASSOC|FAILED|FAILURE|TIMEOUT|TIMED[[:space:]_-]*OUT|UNABLE|NEVER|DOWN ]]; then
+        echo "OFFLINE"
+    elif [[ "$upper" =~ JOINED|REGISTERED|CONNECTED|UP ]]; then
+        echo "ONLINE"
+    else
+        echo "UNKNOWN"
+    fi
+}
+
+discover_cisco_wlc_join_stats_aps() {
+    local ctrl_ip="${CONFIG[cisco_wlc_ip]}"
+    [[ -z "$ctrl_ip" || "${CONFIG[cisco_wlc_join_stats]:-true}" != "true" ]] && return 0
+    command -v sshpass >/dev/null 2>&1 || { log "Skipping Cisco WLC join-stat lookup: sshpass missing."; return 0; }
+    [[ -f "$PASSWORD_FILE" ]] || { log "Skipping Cisco WLC join-stat lookup: SSH password vault not initialized."; return 0; }
+
+    local lib_path join_cmd timeout_val output ts
+    lib_path="$(dirname "$(realpath "$0")")/netops-lib.sh"
+    join_cmd="${CONFIG[cisco_wlc_join_stats_cmd]:-show ap join stats summary all}"
+    timeout_val="${CONFIG[cisco_wlc_join_stats_timeout]:-45}"
+    [[ ! "$timeout_val" =~ ^[0-9]+$ ]] && timeout_val=45
+
+    output=$(timeout "$timeout_val" bash -c 'source "$1" >/dev/null 2>&1; netops_ssh "$2" "$3"' _ "$lib_path" "$ctrl_ip" "$join_cmd" 2>/dev/null | tr -d '\r')
+    [[ -z "$output" ]] && return 0
+    ts=$(date +%s)
+
+    while IFS= read -r line; do
+        local clean name token ip mac mac_compact status row_id
+        clean=$(sanitize_string "$line")
+        [[ -z "$clean" || "$clean" =~ ^[-=[:space:]]+$ ]] && continue
+        [[ "$clean" =~ ^(AP[[:space:]]+Name|Name[[:space:]]+|Base[[:space:]]+Mac|Ethernet|Number[[:space:]]+of|[-[:space:]]*\*) ]] && continue
+
+        name=""
+        for token in $clean; do
+            token="${token//,/}"
+            token="${token//;/}"
+            token="${token//\(/}"
+            token="${token//\)/}"
+            if cisco_wlc_ap_name_allowed "$token"; then name="$token"; break; fi
+        done
+        [[ -z "$name" ]] && continue
+
+        ip=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' <<< "$clean" | grep -v '^0\.0\.0\.0$' | head -1)
+        mac=$(grep -Eio '([0-9a-f]{2}[:-]){5}[0-9a-f]{2}|[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}|[0-9a-f]{12}' <<< "$clean" | head -1)
+        mac=$(normalize_mac "$mac")
+        status=$(cisco_wlc_join_status "$clean")
+        if [[ "$status" == "ONLINE" ]]; then continue; fi
+        if [[ "$status" == "UNKNOWN" ]] && ! valid_ipv4 "$ip"; then status="OFFLINE"; fi
+        cisco_wlc_ap_allowed "${ip:-N/A}" "$name" || continue
+
+        if valid_ipv4 "$ip"; then
+            row_id="$ip"
+        else
+            mac_compact=$(echo "$mac" | sed 's/[^0-9a-f]//g')
+            if [[ -n "$mac_compact" && "$mac" != "N/A" ]]; then row_id="wlc:${mac_compact}"; else row_id="wlc:${name}"; fi
+        fi
+        echo "${row_id}|${name}|Cisco-AP|${ctrl_ip}|Cisco-WLC|not-joined|${mac}|${ts}|${status}"
+    done <<< "$output"
+}
+
+discover_cisco_wlc_aps() {
+    local ctrl_ip="${CONFIG[cisco_wlc_ip]}"
+    local ctrl_comm="${CREDS[cisco_wlc_comm]}"
+    if ! controller_reachable "$ctrl_ip" "$ctrl_comm"; then log_error "Cisco WLC $ctrl_ip unreachable via SNMP."; discover_cisco_wlc_join_stats_aps; return; fi
+    
+    local base_oid=".1.3.6.1.4.1.14179.2.2.1.1.28"
+    local ip_data=$(netops_snmp_walk "$ctrl_ip" "$base_oid" "-On" "$ctrl_comm")
+    [[ -z "$ip_data" ]] && { discover_cisco_wlc_join_stats_aps; return; }
+
+    while IFS= read -r line; do
+        local oid_part="${line%% =*}"
+        local val_part="${line#*= }"
+        local ip=$(echo "${val_part#IpAddress: }" | tr -d '[:space:]')
+        if ! valid_ipv4 "$ip"; then continue; fi
+
+        local idx="${oid_part#$base_oid}"
+        local name=$(netops_snmp_get "$ctrl_ip" ".1.3.6.1.4.1.9.9.513.1.1.1.1.5${idx}" "$ctrl_comm" | tr -d '"')
+        [[ -z "$name" ]] && name="Cisco-AP"
+        cisco_wlc_ap_allowed "$ip" "$name" || continue
+        
+        local mac_raw=$(netops_snmp_get "$ctrl_ip" ".1.3.6.1.4.1.14179.2.2.1.1.1${idx}" "$ctrl_comm")
+        local mac="N/A"
+        if [[ "$mac_raw" =~ Hex-STRING:\ (.*) ]]; then mac=$(normalize_mac "${BASH_REMATCH[1]}"); fi
+
+        echo "${ip}|${name}|Cisco-AP|${ctrl_ip}|Cisco-WLC|wireless|${mac}|$(date +%s)|ONLINE"
+    done <<< "$ip_data"
+
+    discover_cisco_wlc_join_stats_aps
+}
+
+ruckus_model_from_text() {
+    local text model
+    text=$(sanitize_string "${1:-}" | tr '[:lower:]' '[:upper:]')
+    [[ -z "$text" ]] && return 1
+    if [[ "$text" =~ (^|[^A-Z0-9])((R|T|H|M|E|P)[0-9]{3,4}[A-Z0-9-]*)($|[^A-Z0-9]) ]]; then
+        model="${BASH_REMATCH[2]}"
+        echo "$model"
+        return 0
+    fi
+    return 1
+}
+
+ruckus_platform_for_ap() {
+    local ip="$1" idx="$2" ctrl_ip="$3" ctrl_comm="$4" val model oid_base
+    for oid_base in ${CONFIG[ruckus_vsz_model_oids]:-}; do
+        [[ -z "$oid_base" ]] && continue
+        val=$(netops_snmp_get "$ctrl_ip" "${oid_base}${idx}" "$ctrl_comm" | tr -d '"')
+        model=$(ruckus_model_from_text "$val") && { echo "Ruckus $model"; return 0; }
+    done
+    if [[ "${CONFIG[ruckus_ap_model_snmp]:-false}" == "true" && -n "$ip" && "$ip" != "0.0.0.0" ]]; then
+        val=$(netops_snmp_get "$ip" "sysDescr.0" | tr -d '"')
+        model=$(ruckus_model_from_text "$val") && { echo "Ruckus $model"; return 0; }
+    fi
+    echo "Ruckus-AP"
+}
+
+refresh_pingable_ap_status() {
+    local timeout_val="${CONFIG[ping_timeout]:-1}" now targets results checked_count workers db_tmp
+    [[ -s "$AP_DB" ]] || return 0
+    now=$(date +%s)
+    targets=$(discovery_mktemp ap-ping-targets); results=$(discovery_mktemp ap-ping-results)
+    workers=$(discovery_workers "${CONFIG[scan_workers]:-30}" 30 200)
+    awk -F'|' '$9=="OFFLINE" && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && (tolower($3) ~ /cisco/ || tolower($5) ~ /wlc|wireless/) {print $1}' "$AP_DB" | sort -u > "$targets"
+    if [[ ! -s "$targets" ]]; then rm -f "$targets" "$results"; return 0; fi
+    xargs -r -a "$targets" -P "$workers" -I {} bash -c '
+        ip="$1"; timeout_val="$2"; now="$3"
+        if ping -c1 -W"$timeout_val" "$ip" >/dev/null 2>&1; then printf "%s|ONLINE|%s\n" "$ip" "$now"; fi
+    ' _ {} "$timeout_val" "$now" > "$results" || return 10
+    if [[ -s "$results" ]]; then
+        db_tmp=$(discovery_db_tmp "$AP_DB") || return 10
+        track_tmp "$db_tmp"
+        (
+            flock -x 210 || exit 1
+            awk -F'|' -v OFS='|' '
+                FILENAME==ARGV[1] { status[$1]=$2; checked[$1]=$3; next }
+                ($1 in status) { $8=checked[$1]; $9=status[$1] }
+                { print $0 }
+            ' "$results" "$AP_DB" > "$db_tmp" && mv "$db_tmp" "$AP_DB"
+        ) 210> "${AP_DB}.lock" || return 10
+    fi
+    checked_count=$(wc -l < "$results" 2>/dev/null || echo 0)
+    rm -f "$targets" "$results"
+    [[ "$checked_count" -gt 0 ]] && log_success "AP reachability correction: marked $checked_count pingable AP(s) ONLINE."
+}
+
+discover_ruckus_vsz_aps() {
+    local ctrl_ip="${CONFIG[ruckus_vsz_ip]}"
+    local ctrl_comm="${CREDS[ruckus_vsz_comm]}"
+    if ! controller_reachable "$ctrl_ip" "$ctrl_comm"; then log_error "Ruckus vSZ $ctrl_ip unreachable via SNMP."; return; fi
+
+    local base_oid=".1.3.6.1.4.1.25053.1.4.2.1.1.2.2.1.10"
+    local ip_data=$(netops_snmp_walk "$ctrl_ip" "$base_oid" "-On" "$ctrl_comm")
+    [[ -z "$ip_data" ]] && return
+
+    while IFS= read -r line; do
+        local oid_part="${line%% =*}"
+        local val_part="${line#*= }"
+        local ip=$(echo "${val_part#IpAddress: }" | tr -d '[:space:]')
+        [[ -z "$ip" || "$ip" == "0.0.0.0" ]] && continue
+
+        local idx="${oid_part#$base_oid}"
+        local name=$(netops_snmp_get "$ctrl_ip" ".1.3.6.1.4.1.25053.1.4.2.1.1.2.2.1.5${idx}" "$ctrl_comm" | tr -d '"')
+        [[ -z "$name" ]] && name="Ruckus-AP"
+
+        local mac_raw=$(netops_snmp_get "$ctrl_ip" ".1.3.6.1.4.1.25053.1.4.2.1.1.2.2.1.1${idx}" "$ctrl_comm")
+        local mac="N/A"
+        if [[ "$mac_raw" =~ Hex-STRING:\ (.*) ]]; then mac=$(echo "${BASH_REMATCH[1]}" | tr ' ' ':'); fi
+
+        local platform
+        platform=$(ruckus_platform_for_ap "$ip" "$idx" "$ctrl_ip" "$ctrl_comm")
+        echo "${ip}|${name}|${platform}|${ctrl_ip}|Ruckus-vSZ|wireless|${mac}|$(date +%s)|ONLINE"
+    done <<< "$ip_data"
+}
+
+discover_controller_aps() {
+    discover_cisco_wlc_aps
+    discover_ruckus_vsz_aps
+}
+
+is_ap_device() {
+    local hostname="$1" platform="$2" lldp_caps="$3"
+    local search_string="${hostname^^} ${platform^^}"
+    local ap_patterns=("AP" "AIR-" "WLAN" "WIRELESS" "CISCO.*AIRONET" "ARUBA" "RUCKUS" "MERAKI" "UBNT")
+    if [[ "$lldp_caps" =~ W ]]; then return 0; fi
+    for pattern in "${ap_patterns[@]}"; do
+        if [[ "$search_string" =~ $pattern ]]; then return 0; fi
+    done
+    return 1
+}
+
+get_mac_for_ip() {
+    local ip="$1"
+    if [[ "$ip" == "N/A" ]]; then echo "N/A"; return; fi
+    ping -c 1 -W 1 "$ip" &>/dev/null
+    local mac=$(ip neighbor show "$ip" 2>/dev/null | awk '/lladdr/ {print $5}')
+    echo "${mac:-N/A}"
+}
+
+get_port_name_from_index() {
+    local switch_ip="$1" if_index="$2"
+    local port_name=$(netops_snmp_get "$switch_ip" "IF-MIB::ifName.$if_index")
+    if [[ -n "$port_name" ]]; then echo "$port_name"; else echo "ifIndex-$if_index"; fi
+}
+
+get_aps_from_switch_lldp() {
+    local switch_ip="$1" switch_hostname="$2"
+    switch_hostname=$(compact_switch_name "$switch_hostname")
+    local lldp_data=$(netops_snmp_walk "$switch_ip" "1.0.8802.1.1.2.1.4" "-Oq")
+    [[ -z "$lldp_data" ]] && return 1
+
+    declare -A neighbors
+    while read -r line; do
+        if [[ "$line" =~ \.1\.1\.([0-9]+)\.([0-9\.]+)\s+\"?(.*)\"?$ ]]; then
+            local attr="${BASH_REMATCH[1]}" oid_suffix="${BASH_REMATCH[2]}" val="${BASH_REMATCH[3]}"
+            local if_index=$(echo "$oid_suffix" | cut -d. -f2)
+            local key="$if_index"
+            case "$attr" in
+                5) neighbors["$key.port_id"]="$val" ;;
+                9) neighbors["$key.hostname"]="$val" ;;
+                10) neighbors["$key.platform"]="$val" ;;
+                12) if [[ "$val" =~ (4|W) ]]; then neighbors["$key.caps"]="${neighbors[$key.caps]}W"; fi ;;
+            esac
+        fi
+    done <<< "$lldp_data"
+
+    for key in "${!neighbors[@]}"; do
+        if [[ "$key" == *".hostname" ]]; then
+            local base_key="${key%.hostname}"
+            local hostname="${neighbors[$base_key.hostname]}"
+            local platform="${neighbors[$base_key.platform]:-N/A}"
+            local caps="${neighbors[$base_key.caps]}"
+            if is_ap_device "$hostname" "$platform" "$caps"; then
+                local ip=$(getent hosts "$hostname" | awk '{ print $1 ; exit }')
+                [[ -z "$ip" ]] && ip="N/A"
+                local switch_port=$(get_port_name_from_index "$switch_ip" "$base_key")
+                local mac=$(get_mac_for_ip "$ip")
+                echo "${ip}|${hostname}|${platform}|${switch_ip}|${switch_hostname}|${switch_port}|${mac}|$(date +%s)|ONLINE"
+            fi
+        fi
+    done
+}
+
+get_aps_from_switch_cdp() {
+    local switch_ip="$1" switch_hostname="$2"
+    switch_hostname=$(compact_switch_name "$switch_hostname")
+    local cdp_data=$(netops_snmp_walk "$switch_ip" "1.3.6.1.4.1.9.9.23.1.2.1.1" "-Oq")
+    [[ -z "$cdp_data" ]] && return 1
+
+    declare -A neighbors
+    while read -r line; do
+        if [[ "$line" =~ \.([0-9]+)\.([0-9]+)\.([0-9]+)[[:space:]]+(.*) ]]; then
+            local attr="${BASH_REMATCH[1]}" if_idx="${BASH_REMATCH[2]}" entry="${BASH_REMATCH[3]}" val="${BASH_REMATCH[4]}"
+            val=$(echo "$val" | sed 's/^"//;s/"$//')
+            local key="$if_idx.$entry"
+            case "$attr" in
+                4)  local hex_ip="${val// /}"
+                    if [[ ${#hex_ip} -eq 8 ]]; then
+                        neighbors["$key.ip"]=$(printf "%d.%d.%d.%d" 0x${hex_ip:0:2} 0x${hex_ip:2:2} 0x${hex_ip:4:2} 0x${hex_ip:6:2})
+                    fi ;;
+                6) neighbors["$key.hostname"]="$val" ;;
+                8) neighbors["$key.platform"]="$val" ;;
+            esac
+        fi
+    done <<< "$cdp_data"
+
+    for key in "${!neighbors[@]}"; do
+        if [[ "$key" == *".hostname" ]]; then
+            local base_key="${key%.hostname}"
+            local ip="${neighbors[$base_key.ip]}"
+            local hostname="${neighbors[$base_key.hostname]}"
+            local platform="${neighbors[$base_key.platform]}"
+            if [[ -n "$ip" ]] && [[ -n "$hostname" ]] && is_ap_device "$hostname" "$platform"; then
+                local if_index="${base_key%.*}"
+                local switch_port=$(get_port_name_from_index "$switch_ip" "$if_index")
+                local mac=$(get_mac_for_ip "$ip")
+                echo "${ip}|${hostname}|${platform}|${switch_ip}|${switch_hostname}|${switch_port}|${mac}|$(date +%s)|ONLINE"
+            fi
+        fi
+    done
+}
+
+discover_aps_for_single_switch() {
+    local switch_ip="$1" switch_hostname="$2"
+    switch_hostname=$(compact_switch_name "$switch_hostname")
+    get_aps_from_switch_cdp "$switch_ip" "$switch_hostname"
+    get_aps_from_switch_lldp "$switch_ip" "$switch_hostname"
+    return 0
+}
+
+discover_aps() {
+    if [[ ! -s "$DEVICES_DB" ]]; then log_error "DB is empty. Run update first."; return 1; fi
+    local switch_count
+    switch_count=$(wc -l < "$DEVICES_DB" 2>/dev/null || echo 0)
+    if [[ "$DRY_RUN" == true ]]; then
+        printf 'Would discover controller APs and inspect %s switch(es).\n' "$switch_count"
+        return 0
+    fi
+    log "Starting AP discovery..."
+    local ctrl_file sw_file switch_targets progress_file workers db_tmp
+    ctrl_file=$(discovery_mktemp controller-aps)
+    sw_file=$(discovery_mktemp switch-aps)
+    switch_targets=$(discovery_mktemp switch-targets)
+    progress_file=$(discovery_mktemp progress)
+    workers=$(discovery_workers "${CONFIG[ap_scan_workers]:-10}" 10 100)
+
+    progress_note "controller AP scan"
+    discover_controller_aps > "$ctrl_file"
+    progress_clear
+    log_success "Controller Scan: Found $(wc -l < "$ctrl_file") AP(s)."
+
+    local funcs=$(declare -f sanitize_string compact_switch_name is_ap_device get_mac_for_ip get_port_name_from_index get_aps_from_switch_lldp get_aps_from_switch_cdp discover_aps_for_single_switch)
+    local lib_path="$(dirname "$(realpath "$0")")/netops-lib.sh"
+    local switch_timeout="${CONFIG[ap_switch_timeout]:-45}"
+    [[ ! "$switch_timeout" =~ ^[0-9]+$ ]] && switch_timeout=45
+    awk -F '|' '{print $1, $2}' "$DEVICES_DB" > "$switch_targets"
+    switch_count=$(wc -l < "$switch_targets" 2>/dev/null || echo 0)
+
+    progress_start "AP switch scan" "$switch_count" "$progress_file" "chars"
+    xargs -r -a "$switch_targets" -L 1 -P "$workers" bash -c '
+        lib_path="$1"; funcs="$2"; timeout_val="$3"; progress_file="$4"; switch_ip="$5"; switch_hostname="$6"
+        timeout "$timeout_val" bash -c "source \"\$1\" >/dev/null 2>&1; eval \"\$2\"; discover_aps_for_single_switch \"\$3\" \"\$4\"" _ "$lib_path" "$funcs" "$switch_ip" "$switch_hostname"
+        printf . >> "$progress_file"
+    ' _ "$lib_path" "$funcs" "$switch_timeout" "$progress_file" > "$sw_file" || { progress_stop; log_error "AP switch workers failed."; return 10; }
+    progress_stop
+    
+    log_success "Switch Scan: Found $(wc -l < "$sw_file") AP connections."
+
+    db_tmp=$(discovery_db_tmp "$AP_DB") || return 10
+    track_tmp "$db_tmp"
+    (
+        flock -x 210 || exit 1
+        awk -F '|' -v OFS='|' '
+        function valid_ip(ip) { return ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && ip != "0.0.0.0" }
+        function valid_mac(mac) { return mac != "" && mac != "N/A" }
+        function norm_name(name,    n) { n = tolower(name); gsub(/^[[:space:]]+|[[:space:]]+$/, "", n); return n }
+        function good_name(name,    n) { n = norm_name(name); return n != "" && n != "n/a" && n != "cisco-ap" && n != "ruckus-ap" }
+        function ap_key(ip, name, switch_ip, switch_port, mac) {
+            if (valid_mac(mac)) return "mac:" tolower(mac)
+            if (good_name(name)) return "name:" norm_name(name)
+            if (valid_ip(ip)) return "ip:" ip
+            return "switch:" switch_ip "|port:" switch_port
+        }
+        function pick(primary, fallback) {
+            return (primary != "" && primary != "N/A") ? primary : fallback
+        }
+        function short_switch_name(name) {
+            gsub(/\r|\n|"/, "", name)
+            if (name == "" || name == "N/A") return name
+            sub(/\..*$/, "", name)
+            if (length(name) > 32) name = substr(name, 1, 32)
+            return name
+        }
+        function print_ap_line(line, forced_status,    a) {
+            split(line, a, "|")
+            a[5] = short_switch_name(a[5])
+            if (forced_status != "") a[9] = forced_status
+            print a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9]
+        }
+        function emit_ap(key,    c, s, swname) {
+            if (key in emitted) return
+            if (key in sw_data && key in ctrl_data) {
+                split(ctrl_data[key], c, "|"); split(sw_data[key], s, "|")
+                swname = short_switch_name(pick(s[5], c[5]))
+                print pick(s[1], c[1]), pick(s[2], c[2]), pick(s[3], c[3]), pick(s[4], c[4]), swname, pick(s[6], c[6]), pick(s[7], c[7]), pick(s[8], c[8]), "ONLINE"
+            } else if (key in sw_data) {
+                print_ap_line(sw_data[key], "")
+            } else if (key in ctrl_data) {
+                print_ap_line(ctrl_data[key], "")
+            }
+            emitted[key]=1
+        }
+        FILENAME == ARGV[1] { key = ap_key($1, $2, $4, $6, $7); ctrl_data[key] = $0; in_new[key]=1; next }
+        FILENAME == ARGV[2] { key = ap_key($1, $2, $4, $6, $7); sw_data[key] = $0; in_new[key]=1; next }
+        FILENAME == ARGV[3] {
+            key = ap_key($1, $2, $4, $6, $7)
+            if (key in emitted) next
+            if (in_new[key]) {
+                emit_ap(key)
+                delete in_new[key]
+            } else {
+                $5 = short_switch_name($5); $9 = "OFFLINE"; print $0; emitted[key]=1
+            }
+        }
+        END {
+            for(key in in_new) emit_ap(key)
+        }
+        ' "$ctrl_file" "$sw_file" "$AP_DB" > "$db_tmp" && mv "$db_tmp" "$AP_DB"
+    ) 210> "${AP_DB}.lock" || { log_error "Could not commit AP discovery safely."; return 10; }
+
+    rm -f "$ctrl_file" "$sw_file" "$switch_targets" "$progress_file"
+    refresh_pingable_ap_status
+    log_success "AP Discovery complete. Total APs: $(wc -l < "$AP_DB")."
+    "$(dirname "$(realpath "$0")")/netops" db import >/dev/null 2>&1 || true
+}
+
+# --- Neighbors Discovery ---
+is_switch_device() {
+    local platform="$1" caps="$2"
+    local search_string="${platform^^}"
+    if [[ "$caps" =~ (B|R) ]]; then return 0; fi
+    local switch_patterns=("CISCO" "C3" "C9" "N9K" "NEXUS" "ARISTA" "JUNIPER" "EXTREME" "ARUBA" "RUCKUS")
+    for pattern in "${switch_patterns[@]}"; do
+        if [[ "$search_string" =~ $pattern ]]; then return 0; fi
+    done
+    return 1
+}
+
+get_switch_neighbors_from_lldp() {
+    local switch_ip="$1" switch_hostname="$2"
+    local lldp_data=$(netops_snmp_walk "$switch_ip" "1.0.8802.1.1.2.1.4" "-Oq")
+    [[ -z "$lldp_data" ]] && return 1
+
+    declare -A neighbors
+    while read -r line; do
+        if [[ "$line" =~ \.1\.1\.([0-9]+)\.(.*)[[:space:]]+\"?(.*)\"?$ ]]; then
+            local attr="${BASH_REMATCH[1]}"; local key="${BASH_REMATCH[2]}"; local val="${BASH_REMATCH[3]}"
+            case "$attr" in
+                5) neighbors["$key.remote_name"]="$val" ;;
+                7) neighbors["$key.remote_port"]="$val" ;;
+                9) neighbors["$key.remote_platform"]="$val" ;;
+                11) [[ "$val" =~ Bridge ]] && neighbors["$key.caps"]+="B"; [[ "$val" =~ Router ]] && neighbors["$key.caps"]+="R" ;;
+            esac
+        fi
+    done <<< "$lldp_data"
+
+    for key in "${!neighbors[@]}"; do
+        if [[ "$key" == *".remote_name" ]]; then
+            local base_key="${key%.remote_name}"
+            local if_index=$(echo "$base_key" | cut -d. -f2)
+            local platform="${neighbors[$base_key.remote_platform]:-N/A}"
+            local caps="${neighbors[$base_key.caps]}"
+
+            if [[ -n "$if_index" ]] && is_switch_device "$platform" "$caps"; then
+                local local_port=$(get_port_name_from_index "$switch_ip" "$if_index")
+                local remote_name="${neighbors[$base_key.remote_name]}"
+                local remote_port="${neighbors[$base_key.remote_port]:-?}"
+                if [[ ! "$remote_name" =~ ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$ ]]; then
+                    echo "${switch_ip}|${switch_hostname}|${local_port}|${remote_name}|${remote_port}"
+                fi
+            fi
+        fi
+    done
+}
+
+get_switch_neighbors_from_cdp() {
+    local switch_ip="$1" switch_hostname="$2"
+    local cdp_data=$(netops_snmp_walk "$switch_ip" "1.3.6.1.4.1.9.9.23.1.2.1.1" "-Oq")
+    [[ -z "$cdp_data" ]] && return 1
+
+    declare -A neighbors
+    while read -r line; do
+        if [[ "$line" =~ \.([0-9]+)\.([0-9]+)\.([0-9]+)[[:space:]]+(.*) ]]; then
+            local attr="${BASH_REMATCH[1]}" if_idx="${BASH_REMATCH[2]}" entry="${BASH_REMATCH[3]}" val="${BASH_REMATCH[4]}"
+            val=$(echo "$val" | sed 's/^"//;s/"$//')
+            local key="$if_idx.$entry"
+            case "$attr" in
+                6) neighbors["$key.remote_name"]="$val" ;;
+                7) neighbors["$key.remote_port"]="$val" ;;
+                8) neighbors["$key.platform"]="$val" ;;
+            esac
+        fi
+    done <<< "$cdp_data"
+
+    for key in "${!neighbors[@]}"; do
+        if [[ "$key" == *".remote_name" ]]; then
+            local base_key="${key%.remote_name}"
+            local platform="${neighbors[$base_key.platform]:-N/A}"
+            if is_switch_device "$platform"; then
+                local if_index="${base_key%.*}"
+                local local_port=$(get_port_name_from_index "$switch_ip" "$if_index")
+                local remote_name="${neighbors[$base_key.remote_name]}"
+                local remote_port="${neighbors[$base_key.remote_port]:-?}"
+                echo "${switch_ip}|${switch_hostname}|${local_port}|${remote_name}|${remote_port}"
+            fi
+        fi
+    done
+}
+
+discover_neighbors_for_single() {
+    local switch_ip="$1" switch_hostname="$2"
+    get_switch_neighbors_from_cdp "$switch_ip" "$switch_hostname"
+    get_switch_neighbors_from_lldp "$switch_ip" "$switch_hostname"
+    return 0
+}
+
+discover_neighbors() {
+    if [[ ! -s "$DEVICES_DB" ]]; then log_error "DB empty."; return 1; fi
+    local switch_count
+    switch_count=$(wc -l < "$DEVICES_DB" 2>/dev/null || echo 0)
+    if [[ "$DRY_RUN" == true ]]; then
+        printf 'Would discover LLDP/CDP neighbors on %s switch(es).\n' "$switch_count"
+        return 0
+    fi
+    log "Starting neighbor discovery (Optimized DB lookup)..."
+    local temp_file neighbor_output workers
+    temp_file=$(discovery_mktemp neighbor-raw)
+    neighbor_output=$(discovery_db_tmp "$NEIGHBOR_DB") || return 10
+    track_tmp "$neighbor_output"
+    workers=$(discovery_workers "${CONFIG[scan_workers]:-30}" 30 200)
+
+    local funcs=$(declare -f is_switch_device get_port_name_from_index get_switch_neighbors_from_cdp get_switch_neighbors_from_lldp discover_neighbors_for_single)
+    local lib_path="$(dirname "$(realpath "$0")")/netops-lib.sh"
+    
+    awk -F '|' '{print $1, $2}' "$DEVICES_DB" | xargs -r -L 1 -P "$workers" bash -c "
+        source '$lib_path'
+        $funcs
+        discover_neighbors_for_single \"\$1\" \"\$2\"
+    " _ > "$temp_file" || { log_error "Neighbor discovery workers failed."; return 10; }
+
+    awk -F '|' -v dev_db="$DEVICES_DB" -v OFS='|' '
+        BEGIN {
+            while ((getline < dev_db) > 0) {
+                split($2, name_parts, ".")
+                ip_map[tolower(name_parts[1])] = $1
+            }
+            close(dev_db)
+        }
+        {
+            clean_name = $4
+            sub(/[\(\.].*/, "", clean_name) 
+            remote_ip = ip_map[tolower(clean_name)]
+            if (!remote_ip) remote_ip = "?.?.?.?"
+            print $1, $2, $3, $4, $5, remote_ip
+        }
+    ' "$temp_file" | sort -u > "$neighbor_output" || return 10
+    (
+        flock -x 210 || exit 1
+        mv "$neighbor_output" "$NEIGHBOR_DB"
+    ) 210> "${NEIGHBOR_DB}.lock" || { log_error "Could not commit neighbor discovery safely."; return 10; }
+    
+    rm -f "$temp_file"
+    log_success "Neighbor discovery complete. Links: $(wc -l < "$NEIGHBOR_DB")."
+    "$(dirname "$(realpath "$0")")/netops" db import >/dev/null 2>&1 || true
+}
+
+# --- Topology Diagram (BFS Hop-based) ---
+show_neighbor_diagram() {
+    local target_input="$1"
+    if [[ -z "$target_input" ]]; then echo "Usage: netops discover --topology <target>"; return 1; fi
+    if [[ ! -s "$NEIGHBOR_DB" ]]; then echo "Neighbor DB empty. Run --discover-neighbors first."; return 1; fi
+
+    local target_ip=$(resolve_targets "$target_input" "DEVICES" "false")
+    [[ -z "$target_ip" ]] && return 1
+    local target_host=$(db_get_device "$target_ip" | cut -d'|' -f2)
+    local core_ip="${CONFIG[core_switch_ip]}"
+    [[ -z "$core_ip" ]] && core_ip="$target_ip"
+
+    echo -e "\n\033[0;36m--- Topology Diagram for: \033[1m${target_host:-$target_ip} ($target_ip)\033[0;36m ---\033[0m\n"
+
+    awk -F '|' -v core="$core_ip" -v tgt="$target_ip" -v tgt_host="$target_host" '
+        BEGIN {
+            while ((getline < "'"$NEIGHBOR_DB"'") > 0) {
+                if ($6 == "?.?.?.?") continue
+                adj[$1][$6] = 1; adj[$6][$1] = 1;
+                name_map[$1] = $2; name_map[$6] = $4;
+                if ($1 == tgt) { port_local[$6] = $3; port_remote[$6] = $5; }
+                else if ($6 == tgt) { port_local[$1] = $5; port_remote[$1] = $3; }
+            }
+            head = 1; tail = 1;
+            q[tail++] = core; depth[core] = 0; visited[core] = 1;
+            while(head < tail) {
+                curr = q[head++];
+                for(nxt in adj[curr]) {
+                    if(!visited[nxt]) {
+                        visited[nxt] = 1; depth[nxt] = depth[curr] + 1; q[tail++] = nxt;
+                    }
+                }
+            }
+            tgt_depth = depth[tgt]; if (!visited[tgt]) tgt_depth = 999;
+            
+            print "\033[1;32m▲ Upstream (Towards Core)\033[0m"
+            u_found = 0
+            for(n in adj[tgt]) {
+                if (depth[n] < tgt_depth) {
+                    printf "  \033[1m[%-33s]\033[0m %-15s <---> %-15s [%s]\n", name_map[n], port_remote[n], port_local[n], tgt_host; u_found = 1
+                }
+            }
+            if (!u_found) print "  (No upstream neighbors found)"
+            
+            print "\n\033[1;36m▶ Peers (Same Tier)\033[0m"
+            p_found = 0
+            for(n in adj[tgt]) {
+                if (depth[n] == tgt_depth && n != core) {
+                    printf "  [%-33s] %-15s <---> %-15s [%s]\n", tgt_host, port_local[n], port_remote[n], name_map[n]; p_found = 1
+                }
+            }
+            if (!p_found) print "  (No peer neighbors found)"
+
+            print "\n\033[1;33m▼ Downstream (Away from Core)\033[0m"
+            d_found = 0
+            for(n in adj[tgt]) {
+                if (depth[n] > tgt_depth) {
+                    printf "  %-35s %-15s <---> %-15s \033[1m[%s]\033[0m (%s)\n", "["tgt_host"]", port_local[n], port_remote[n], name_map[n], n; d_found = 1
+                }
+            }
+            if (!d_found) print "  (No downstream neighbors found)"
+        }
+    '
+    echo ""
+}
+
+# --- Display Functions ---
+show_aps() {
+    if [[ ! -s "$AP_DB" ]]; then echo "AP DB empty."; return 1; fi
+    printf "\033[0;36m%-15s %-25s %-15s %-25s %-15s %-20s\033[0m\n" "AP IP" "AP Name" "Switch IP" "Switch Name" "Port" "MAC"
+    echo "-------------------------------------------------------------------------------------------------------------------"
+    awk -F '|' -v pat="${1:-}" '
+        tolower($0) ~ tolower(pat) {
+            col = ($9 == "OFFLINE") ? "\033[0;31m" : "\033[0;32m"
+            printf "%s%-15s %-25.25s %-15s %-25.25s %-15s %-20s\033[0m\n", col, $1, $2, $4, $5, $6, $7
+        }
+    ' "$AP_DB"
+}
+
+show_info() {
+    echo "--- Database Information ---"
+    [[ -f "$DEVICES_DB" ]] && echo "Hosts: $(wc -l < "$DEVICES_DB")" || echo "Hosts: 0"
+    [[ -f "$AP_DB" ]] && echo "APs:   $(wc -l < "$AP_DB")" || echo "APs: 0"
+    [[ -f "$NEIGHBOR_DB" ]] && echo "Links: $(wc -l < "$NEIGHBOR_DB")" || echo "Links: 0"
+}
+
+is_detail_flag() {
+    case "${1:-}" in
+        --detail|--details|detail|details) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+search_cache() {
+    local pattern="$1" detail="$2"
+    if is_detail_flag "$detail"; then
+        [[ -z "$pattern" ]] && { log_error "Usage: netops discover <target> --detail OR netops discover --details <target>"; return 2; }
+        local ip=$(resolve_targets "$pattern" "DEVICES" "false")
+        [[ -z "$ip" ]] && return 1
+        
+        local entry=$(db_get_device "$ip")
+        local mac=$(echo "$entry" | cut -d'|' -f6)
+        local plat=$(echo "$entry" | cut -d'|' -f3)
+        if [[ ("$mac" == "N/A" || -z "$mac") && "$plat" != "Unknown" ]]; then
+            log "Missing detailed L2 data. Autonomously enriching via SSH..."
+            "$(dirname "$(realpath "$0")")/netops-control" inventory "$ip" >/dev/null 2>&1
+            entry=$(db_get_device "$ip")
+        fi
+
+        echo -e "\n\033[1;36m=== Detailed Device View ===\033[0m"
+        awk -F '|' '
+        {
+            col = ($9 == "OFFLINE") ? "\033[0;31m" : "\033[0;32m"
+            cmd = "date -d @" $8 " \"+%Y-%m-%d %H:%M:%S\" 2>/dev/null || date -r " $8 " \"+%Y-%m-%d %H:%M:%S\""
+            cmd | getline dt; close(cmd)
+            
+            printf "  \033[1mIP Address:\033[0m   %s\n", $1
+            printf "  \033[1mHostname:\033[0m     %s\n", $2
+            printf "  \033[1mPlatform:\033[0m     %s\n", $3
+            printf "  \033[1mModel:\033[0m        %s\n", $4
+            printf "  \033[1mSerial:\033[0m       %s\n", $5
+            printf "  \033[1mMAC Address:\033[0m  %s\n", $6
+            printf "  \033[1mData Source:\033[0m  %s\n", $7
+            printf "  \033[1mLast Seen:\033[0m    %s\n", dt
+            printf "  \033[1mStatus:\033[0m       %s%s\033[0m\n\n", col, $9
+        }' <<< "$entry"
+    else
+        awk -F '|' -v pat="$pattern" '
+            tolower($0) ~ tolower(pat) {
+                col = ($9 == "OFFLINE") ? "\033[0;31m" : "\033[0;32m"
+                printf "→ %s%-8s %-15s %-30.30s %-15s %-8s %s\033[0m\n", col, "[SW]", $1, $2, $3, $9, $5
+            }
+        ' "$DEVICES_DB"
+        awk -F '|' -v pat="$pattern" '
+            tolower($0) ~ tolower(pat) {
+                col = ($9 == "OFFLINE") ? "\033[0;31m" : "\033[0;32m"
+                uplink = ($5 != "" && $6 != "") ? $5 "/" $6 : $4
+                printf "→ %s%-8s %-15s %-30.30s %-15s %-8s %s\033[0m\n", col, "[AP]", $1, $2, $3, $9, uplink
+            }
+        ' "$AP_DB"
+    fi
+}
+
+show_offline() {
+    echo -e "\033[1;31m--- Offline Devices ---\033[0m"
+    awk -F'|' '$9=="OFFLINE" { printf " %-15s %-30.30s %s\n", $1, $2, $3 }' "$DEVICES_DB"
+    echo -e "\n\033[1;31m--- Offline APs ---\033[0m"
+    awk -F'|' '$9=="OFFLINE" { printf " %-15s %-30.30s %s\n", $1, $2, $4 }' "$AP_DB"
+}
+
+normalize_activity_target() {
+    local line="$1"
+    line="${line%%#*}"
+    line="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<< "$line")"
+    [[ -z "$line" ]] && return 1
+
+    if [[ "$line" == *"|"* ]]; then
+        line="${line%%|*}"
+    elif [[ "$line" == *","* ]]; then
+        line="${line%%,*}"
+    else
+        line="${line%%[[:space:]]*}"
+    fi
+
+    line="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<< "$line")"
+    [[ -n "$line" ]] && printf '%s\n' "$line"
+}
+
+lookup_activity_target() {
+    local target="$1"
+    local lower_target="${target,,}"
+    local match
+
+    match=$(awk -F'|' -v t="$lower_target" '
+        tolower($1) == t || tolower($2) == t { print; exit }
+    ' "$AP_DB" 2>/dev/null)
+    if [[ -n "$match" ]]; then
+        awk -F'|' -v target="$target" '{ printf "AP|%s|%s|%s|%s|aps\n", target, $1, $2, $3 }' <<< "$match"
+        return 0
+    fi
+
+    match=$(awk -F'|' -v t="$lower_target" '
+        tolower($1) == t || tolower($2) == t { print; exit }
+    ' "$DEVICES_DB" 2>/dev/null)
+    if [[ -n "$match" ]]; then
+        awk -F'|' -v target="$target" '{ printf "SWITCH|%s|%s|%s|%s|devices\n", target, $1, $2, $3 }' <<< "$match"
+        return 0
+    fi
+
+    printf "UNKNOWN|%s|%s|N/A|Unknown|input\n" "$target" "$target"
+}
+
+check_activity_list() {
+    local list_file="$1"
+    [[ -z "$list_file" ]] && { log_error "Usage: netops discover --ping-list <file.txt>"; return 2; }
+    [[ ! -f "$list_file" ]] && { log_error "List file not found: $list_file"; return 2; }
+
+    local raw_line target type ip name platform source status checked_at timeout ping_target
+    timeout="${CONFIG[ping_timeout]:-1}"
+    checked_at="$(date +%s)"
+
+    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+        target="$(normalize_activity_target "$raw_line")" || continue
+        IFS='|' read -r type target ip name platform source < <(lookup_activity_target "$target")
+        ping_target="$ip"
+        [[ -z "$ping_target" || "$ping_target" == "N/A" ]] && ping_target="$target"
+
+        if ping -c1 -W"$timeout" "$ping_target" >/dev/null 2>&1; then
+            status="ONLINE"
+        else
+            status="OFFLINE"
+        fi
+        printf "%s|%s|%s|%s|%s|%s|%s|%s\n" "$type" "$target" "$ip" "$name" "$platform" "$status" "$source" "$checked_at"
+    done < "$list_file"
+}
+
+order_activity_results() {
+    awk -F'|' '
+        $6 == "OFFLINE" { offline[++offline_count] = $0; next }
+        { online[++online_count] = $0 }
+        END {
+            for (i = 1; i <= offline_count; i++) print offline[i]
+            for (i = 1; i <= online_count; i++) print online[i]
+        }
+    '
+}
+
+show_activity_list() {
+    local list_file="$1"
+    local results cyan green red reset
+    results="$(check_activity_list "$list_file")" || return $?
+    results="$(order_activity_results <<< "$results")"
+
+    if [[ -n "${NO_COLOR:-}" ]]; then
+        cyan=""; green=""; red=""; reset=""
+    else
+        cyan="\033[0;36m"; green="\033[0;32m"; red="\033[0;31m"; reset="\033[0m"
+    fi
+
+    printf "%b%-8s %-18s %-18s %-32s %-16s %-8s %s%b\n" "$cyan" "TYPE" "TARGET" "IP" "NAME" "PLATFORM" "STATUS" "SOURCE" "$reset"
+    echo "--------------------------------------------------------------------------------------------------------------------------"
+    awk -F'|' -v green="$green" -v red="$red" -v reset="$reset" '
+        {
+            col = ($6 == "ONLINE") ? green : red
+            printf "%s%-8s %-18s %-18s %-32.32s %-16.16s %-8s %s%s\n", col, $1, $2, $3, $4, $5, $6, $7, reset
+        }
+    ' <<< "$results"
+}
+
+show_help() {
+    cat <<EOF
+${CYAN}${BOLD}NetOps Discovery Engine${NC}
+Network Discovery and Management Tool with SNMP/SSH device detection
+
+${BOLD}USAGE:${NC}
+  netops discover [COMMAND] [OPTIONS]
+
+${BOLD}COMMANDS:${NC}
+
+  ${GREEN}-u, --update [NETWORKS]${NC}    Scan networks and update device database
+                                 (uses configured subnets if no networks specified)
+  ${GREEN}--fast-health [TARGETS]${NC}      Ping known or supplied devices/APs without deep enrichment
+  ${GREEN}--deep [NETWORKS]${NC}            Run switch, AP, and neighbor discovery in one pass
+  ${GREEN}--stale-before <MIN>${NC}         With --update/--fast-health, skip recently checked online devices
+  ${GREEN}--force${NC}                      Ignore stale filtering and scan all selected targets
+  ${GREEN}--dry-run${NC}                    Validate and list a scan plan without contacting targets or changing cache data
+  ${GREEN}--add <IP>${NC}                  Manually add a device via SSH verification
+  ${GREEN}--db-add${NC} <IP> <HOSTNAME> <PLATFORM> <MODEL> <SERIAL> <MAC> <TYPE>
+                                 Manually add record to database (TYPE: DEVICE|AP)
+  ${GREEN}--db-edit${NC} <IP> <FIELD> <VALUE>
+                                 Edit a field in device database
+                                 Fields: host, plat, model, serial, mac
+  ${GREEN}--db-delete${NC} <IP>          Delete a device from database
+  ${GREEN}--discover-aps${NC}              Discover Access Points from controllers/switches
+  ${GREEN}--discover-neighbors${NC}        Discover neighboring switches via LLDP/CDP
+  ${GREEN}--topology <TARGET>${NC}         Display network topology diagram
+  ${GREEN}--topology-changes${NC}           Show topology changes detected from neighbor snapshots
+  ${GREEN}--aps [PATTERN]${NC}             Display discovered Access Points (filter by pattern)
+  ${GREEN}--ping-list <FILE>${NC}           Ping switches/APs from a text file and show activity
+  ${GREEN}--offline${NC}                   Show offline devices and APs
+  ${GREEN}-i, --info${NC}                  Show cache statistics (hosts, APs, links)
+  ${GREEN}-c, --clear${NC}                 Clear all cached databases
+  ${GREEN}<pattern> [--detail|--details]${NC}
+                                 Search switches and APs matching pattern
+                                 Add --detail/--details for enriched switch L2 data via SSH
+  ${GREEN}--detail|--details <TARGET>${NC}    Detailed switch view, legacy order compatible
+
+${BOLD}EXAMPLES:${NC}
+  ${CYAN}# Network Discovery${NC}
+  netops discover --update                     # Scan configured subnets
+  netops discover --fast-health                # Fast ping status for known switches/APs
+  netops discover --deep                       # Full switch/AP/topology refresh
+  netops discover -u "198.51.100.0/24"          # Scan specific network
+  netops discover -u "192.0.2.1-100"            # Scan IP range
+
+  ${CYAN}# AP Discovery${NC}
+  netops discover --discover-aps               # Discover all access points
+  netops discover --aps "Cisco"                # Show Cisco APs only
+  netops discover --aps "Ruckus"               # Show Ruckus APs only
+  netops discover --ping-list devices.txt      # Ping listed switches/APs
+  netops discover --json --ping-list devices.txt # JSON activity status
+
+  ${CYAN}# Neighbor Discovery & Topology${NC}
+  netops discover --discover-neighbors         # Build network topology
+  netops discover --topology core-switch       # Display topology diagram
+
+  ${CYAN}# Database Management${NC}
+  netops discover --db-add 192.0.2.1 core-sw Cisco 2960 ABC123 02:00:00:00:00:25 DEVICE
+  netops discover --db-edit 192.0.2.1 host new-core-switch
+  netops discover --db-delete 192.0.2.1
+  netops discover --add 192.0.2.1               # Auto-detect via SSH
+
+  ${CYAN}# Search & Info${NC}
+  netops discover "switch1"                    # Search switches and APs
+  netops discover "198.51.100.112" --detail        # Detailed switch view with enrichment
+  netops discover --details "198.51.100.112"       # Same detail view, legacy spelling/order
+  netops discover --offline                    # Show offline devices
+  netops discover -i                           # Show cache statistics
+  netops discover -c                           # Clear all caches
+
+${BOLD}FEATURES:${NC}
+  • ${GREEN}Multi-protocol Discovery${NC} - SNMP (v2c/v3) + SSH fallback
+  • ${GREEN}Intelligent Device Classification${NC} - Cisco, Aruba, Ruckus, Juniper
+  • ${GREEN}LLDP/CDP Parsing${NC} - Automatic neighbor relationship detection
+  • ${GREEN}Controller AP Discovery${NC} - Cisco WLC & Ruckus vSZ support
+  • ${GREEN}Automatic Enrichment${NC} - Fills missing MAC/Serial via SSH
+  • ${GREEN}Parallel Scanning${NC} - Configurable thread pools for speed
+  • ${GREEN}Topology Visualization${NC} - Hierarchical network diagrams
+  • ${GREEN}Offline Tracking${NC} - Monitors device availability status
+
+${BOLD}DATABASE FILES:${NC}
+  ${YELLOW}$DEVICES_DB${NC}          - Discovered network devices (switches/routers)
+  ${YELLOW}$AP_DB${NC}               - Access Point inventory
+  ${YELLOW}$NEIGHBOR_DB${NC}         - Switch/router neighbor relationships
+
+${BOLD}DATABASE SCHEMA:${NC}
+  ${YELLOW}Devices/APs:${NC} IP|HOSTNAME|PLATFORM|MODEL|SERIAL|MAC|SOURCE|TIMESTAMP|STATUS
+  ${YELLOW}Neighbors:${NC}   LOCAL_IP|LOCAL_NAME|LOCAL_PORT|REMOTE_NAME|REMOTE_PORT|REMOTE_IP
+
+${BOLD}CONFIGURATION:${NC}
+  Edit config file: ${YELLOW}$CONFIG_FILE${NC}
+  
+  ${GREEN}Required Settings:${NC}
+  • subnets="${CONFIG[subnets]:-(not set)}"           # Networks to scan
+  • communities="${CONFIG[communities]:-public}"       # SNMP community strings
+  
+  ${GREEN}Optional Settings:${NC}
+  • snmpv3_user="${CONFIG[snmpv3_user]:-(disabled)}"  # SNMPv3 username
+  • cisco_wlc_ip="${CONFIG[cisco_wlc_ip]:-(not set)}" # Cisco WLC for AP discovery
+  • ruckus_vsz_ip="${CONFIG[ruckus_vsz_ip]:-(not set)}" # Ruckus vSZ for AP discovery
+  • core_switch_ip="${CONFIG[core_switch_ip]:-(not set)}" # Core switch for topology
+  • scan_workers="${CONFIG[scan_workers]:-20}"        # Parallel threads
+  • scan_max_hosts="${CONFIG[scan_max_hosts]:-4096}"  # Maximum hosts accepted from one target expression
+  • ap_scan_workers="${CONFIG[ap_scan_workers]:-10}"  # AP discovery threads
+  • ping_timeout="${CONFIG[ping_timeout]:-1}"         # Ping timeout (seconds)
+
+${BOLD}DISCOVERY METHODS:${NC}
+  ${GREEN}1. SNMP Discovery${NC} (Primary)
+     • Uses sysName, sysDescr, sysObjectID
+     • Extracts serial numbers, MAC addresses
+     • Supports both SNMPv2c and SNMPv3
+  
+  ${GREEN}2. SSH Discovery${NC} (Fallback/Enrichment)
+     • Runs 'show version' for detailed inventory
+     • Fills missing platform, model, serial info
+  
+  ${GREEN}3. LLDP/CDP Discovery${NC} (Neighbors)
+     • Discovers connected switches and APs
+     • Maps port-to-port connections
+     • Identifies device capabilities
+
+  ${GREEN}4. Controller Discovery${NC} (APs)
+     • Queries Cisco WLC for registered APs
+     • Queries Ruckus vSZ for registered APs
+
+${BOLD}TARGET PATTERNS:${NC}
+  • ${CYAN}IP Address${NC}        - 198.51.100.10
+  • ${CYAN}Subnet${NC}            - 198.51.100.0/24 or 198.51.100.
+  • ${CYAN}Range${NC}             - 198.51.100.10-50
+  • ${CYAN}Hostname${NC}          - core-switch (looks up in DB)
+  • ${CYAN}Pattern${NC}           - "198.51.100.112" (matches any device)
+
+${BOLD}OUTPUT EXAMPLES:${NC}
+  ${CYAN}# Search Result${NC}
+  → 203.0.113.47    SITE-A-FIN-MAN-SW        Cisco     ABC12345
+  
+  ${CYAN}# Topology Diagram${NC}
+  ▲ Upstream (Towards Core)
+    [core-switch-01                   ] Gi1/0/1      <---> Gi1/0/48   [dist-switch-01]
+  
+  ▶ Peers (Same Tier)
+    [dist-switch-01] Gi1/0/24 <---> Gi1/0/24 [dist-switch-02]
+  
+  ▼ Downstream (Away from Core)
+    [dist-switch-01] Gi1/0/2  <---> Gi1/0/1  [access-switch-01] (203.0.113.100)
+
+${BOLD}NOTES:${NC}
+  • Requires SNMP community strings for discovery (set in config)
+  • SSH credentials required for detailed enrichment (set via vault)
+  • AP discovery requires controller IPs configured
+  • Offline status determined by last successful contact
+  • Topology requires core_switch_ip for proper hierarchy
+  • All databases are plain text pipe-delimited files
+
+${BOLD}SEE ALSO:${NC}
+  netops --help          General NetOps help
+  netops control         Device management commands
+  netops probe           Network diagnostics
+  netops vault           Credential management
+EOF
+}
+
+json_devices() {
+    local pattern="${1:-}"
+    if [[ -n "$pattern" ]]; then grep -i -- "$pattern" "$DEVICES_DB" 2>/dev/null; else cat "$DEVICES_DB" 2>/dev/null; fi | jq -R -s '
+        split("\n")[:-1] | map(split("|") | select(length >= 9) | {
+            ip:.[0], hostname:.[1], platform:.[2], model:.[3], serial:.[4], mac:.[5], source:.[6], last_seen:(.[7]|tonumber? // 0), status:.[8]
+        })'
+}
+
+json_aps() {
+    local pattern="${1:-}"
+    if [[ -n "$pattern" ]]; then grep -i -- "$pattern" "$AP_DB" 2>/dev/null; else cat "$AP_DB" 2>/dev/null; fi | jq -R -s '
+        split("\n")[:-1] | map(split("|") | select(length >= 9) | {
+            ip:.[0], name:.[1], platform:.[2], switch_ip:.[3], switch_name:.[4], switch_port:.[5], mac:.[6], last_seen:(.[7]|tonumber? // 0), status:.[8]
+        })'
+}
+
+json_lookup() {
+    local pattern="${1:-}"
+    jq -n --argjson devices "$(json_devices "$pattern")" \
+          --argjson aps "$(json_aps "$pattern")" \
+          '{devices:$devices,aps:$aps}'
+}
+
+json_neighbors() {
+    cat "$NEIGHBOR_DB" 2>/dev/null | jq -R -s '
+        split("\n")[:-1] | map(split("|") | select(length >= 6) | {
+            local_ip:.[0], local_name:.[1], local_port:.[2], remote_name:.[3], remote_port:.[4], remote_ip:.[5]
+        })'
+}
+
+json_info() {
+    local devices aps neighbors offline_devices offline_aps
+    devices=$(wc -l < "$DEVICES_DB" 2>/dev/null || echo 0)
+    aps=$(wc -l < "$AP_DB" 2>/dev/null || echo 0)
+    neighbors=$(wc -l < "$NEIGHBOR_DB" 2>/dev/null || echo 0)
+    offline_devices=$(awk -F'|' '$9=="OFFLINE"{n++} END{print n+0}' "$DEVICES_DB" 2>/dev/null)
+    offline_aps=$(awk -F'|' '$9=="OFFLINE"{n++} END{print n+0}' "$AP_DB" 2>/dev/null)
+    jq -n --arg devices_db "$DEVICES_DB" --arg ap_db "$AP_DB" --arg neighbor_db "$NEIGHBOR_DB" \
+        --argjson devices "${devices:-0}" --argjson aps "${aps:-0}" --argjson neighbors "${neighbors:-0}" \
+        --argjson offline_devices "${offline_devices:-0}" --argjson offline_aps "${offline_aps:-0}" \
+        '{devices:$devices,aps:$aps,neighbors:$neighbors,offline_devices:$offline_devices,offline_aps:$offline_aps,paths:{devices:$devices_db,aps:$ap_db,neighbors:$neighbor_db}}'
+}
+
+json_offline() {
+    jq -n --argjson devices "$(awk -F'|' '$9=="OFFLINE"{print}' "$DEVICES_DB" 2>/dev/null | jq -R -s 'split("\n")[:-1] | map(split("|") | select(length >= 9) | {ip:.[0],hostname:.[1],platform:.[2],model:.[3],serial:.[4],mac:.[5],source:.[6],last_seen:(.[7]|tonumber? // 0),status:.[8]})')" \
+          --argjson aps "$(awk -F'|' '$9=="OFFLINE"{print}' "$AP_DB" 2>/dev/null | jq -R -s 'split("\n")[:-1] | map(split("|") | select(length >= 9) | {ip:.[0],name:.[1],platform:.[2],switch_ip:.[3],switch_name:.[4],switch_port:.[5],mac:.[6],last_seen:(.[7]|tonumber? // 0),status:.[8]})')" \
+          '{devices:$devices,aps:$aps}'
+}
+
+json_topology() {
+    local target="${1:-}"
+    jq -n --arg target "$target" --argjson edges "$(json_neighbors)" '{target:$target,edges:$edges}'
+}
+
+json_activity_list() {
+    local list_file="$1"
+    local results
+    results="$(check_activity_list "$list_file")" || return $?
+    results="$(order_activity_results <<< "$results")"
+    jq -R -s '
+        split("\n")[:-1] | map(split("|") | select(length >= 8) | {
+            type:.[0],
+            target:.[1],
+            ip:.[2],
+            name:.[3],
+            platform:.[4],
+            status:.[5],
+            source:.[6],
+            checked_at:(.[7]|tonumber? // 0)
+        })' <<< "$results"
+}
+
+# Add help handling at the beginning
+JSON_OUTPUT=false
+DRY_RUN=false
+CONFIRM_YES=false
+FORCE_SCAN=false
+STALE_BEFORE=""
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --json) JSON_OUTPUT=true; shift ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        --yes) CONFIRM_YES=true; shift ;;
+        --force) FORCE_SCAN=true; shift ;;
+        --stale-before)
+            [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { log_error "--stale-before requires a non-negative integer number of minutes."; exit 2; }
+            STALE_BEFORE="$2"; shift 2
+            ;;
+        --no-color) export NO_COLOR=1; shift ;;
+        *) POSITIONAL+=("$1"); shift ;;
+    esac
+done
+set -- "${POSITIONAL[@]}"
+
+if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+    show_help
+    exit 0
+fi
+
+if [[ "$JSON_OUTPUT" == true ]]; then
+    case "$1" in
+        -i|--info) json_info ;;
+        --aps) json_aps "${2:-}" ;;
+        --ping-list|--check-list|--activity-list) json_activity_list "${2:-}" ;;
+        --offline) json_offline ;;
+        --topology) json_topology "${2:-}" ;;
+        --topology-changes) show_topology_changes true ;;
+        --detail|--details) [[ -n "${2:-}" ]] || { jq -n '{ok:false,error:"missing target",usage:"netops discover --details <target>"}'; exit 2; }; json_lookup "${2:-}" ;;
+        --fast-health) fast_health_update "${2:-}" >/dev/null; json_info ;;
+        --deep) deep_discovery "${2:-}" >/dev/null; json_info ;;
+        -u|--update) update_cache "$2" >/dev/null; json_info ;;
+        --discover-aps) discover_aps >/dev/null; json_info ;;
+        --discover-neighbors) discover_neighbors >/dev/null; json_topology "" ;;
+        "") json_info ;;
+        *) json_lookup "$1" ;;
+    esac
+    exit $?
+fi
+
+# The existing case statement remains the same
+case "$1" in
+    -u|--update) update_cache "$2" ;;
+    --fast-health) fast_health_update "$2" ;;
+    --deep) deep_discovery "$2" ;;
+    --add) add_manual_device "$2" ;;
+    --db-add) add_db_record "$2" "$3" "$4" "$5" "$6" "$7" "$8" ;;
+    --db-edit) edit_db_record "$2" "$3" "$4" ;;
+    --db-delete) delete_db_record "$2" ;;
+    --discover-aps) discover_aps ;;
+    --discover-neighbors) discover_neighbors ;;
+    --topology) show_neighbor_diagram "$2" ;;
+    --topology-changes) show_topology_changes false ;;
+    --detail|--details) [[ -n "${2:-}" ]] || { log_error "Usage: netops discover --details <target>"; exit 2; }; search_cache "$2" "--detail" ;;
+    --aps) show_aps "$2" ;;
+    --ping-list|--check-list|--activity-list) show_activity_list "$2" ;;
+    --offline) show_offline ;;
+    -i|--info) show_info ;;
+    -c|--clear)
+        if [[ "$DRY_RUN" == true ]]; then
+            echo "Would clear: $DEVICES_DB $AP_DB $NEIGHBOR_DB"
+        elif [[ "$CONFIRM_YES" == true ]]; then
+            rm -f "$DEVICES_DB" "$AP_DB" "$NEIGHBOR_DB"; log_success "Caches cleared."
+        elif [[ -t 0 ]]; then
+            read -rp "Clear all NetOps cache databases? Type CLEAR to continue: " ans
+            [[ "$ans" == "CLEAR" ]] && { rm -f "$DEVICES_DB" "$AP_DB" "$NEIGHBOR_DB"; log_success "Caches cleared."; } || { log_error "Clear aborted."; exit 7; }
+        else
+            log_error "Refusing to clear caches without --yes or --dry-run."
+            exit 7
+        fi ;;
+    *) 
+        if [[ -n "$1" ]]; then 
+            search_cache "$1" "$2"
+        else 
+            show_help
+        fi ;;
+esac

@@ -1,0 +1,30 @@
+schema_version = 1
+
+[channel]
+name = "snmpv3-fixture"
+kind = "snmpv3"
+enabled = false
+entity_kind = "device"
+source_id_field = "id"
+observed_at_field = "observed_at"
+
+[reader]
+fixture_path = "../data/devices.json"
+records_path = "devices"
+completeness = "partial"
+confidence = 85
+
+[fields]
+ip = "management.ip"
+hostname = "name"
+platform = "platform"
+model = "model"
+status = "status"
+
+[secrets]
+auth_password = "vault:ingest/snmpv3/auth-password"
+privacy_password = "vault:ingest/snmpv3/privacy-password"
+
+[provenance]
+owner = "network-operations"
+source_system = "snmpv3-fixture"

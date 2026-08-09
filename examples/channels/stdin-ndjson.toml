@@ -1,0 +1,22 @@
+schema_version = 1
+
+[channel]
+name = "stdin-devices"
+kind = "stdin-ndjson"
+enabled = true
+entity_kind = "device"
+source_id_field = "id"
+observed_at_field = "observed_at"
+
+[reader]
+completeness = "partial"
+confidence = 80
+
+[fields]
+ip = "ip"
+hostname = "hostname"
+status = "status"
+
+[provenance]
+owner = "network-operations"
+source_system = "stdin-pipeline"

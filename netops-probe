@@ -1,0 +1,946 @@
+#!/usr/bin/env bash
+# NetOps Advanced Probe
+source "$(dirname "$(realpath "$0")")/netops-lib.sh"
+set -o pipefail
+
+
+# --- Colors ---
+if [[ -t 1 ]]; then
+    RED=$(tput setaf 1)
+    GREEN=$(tput setaf 2)
+    YELLOW=$(tput setaf 3)
+    BLUE=$(tput setaf 4)
+    CYAN=$(tput setaf 6)
+    GREY=$(tput setaf 8)
+    BOLD=$(tput bold)
+    NC=$(tput sgr0)
+else
+    RED=""; GREEN=""; YELLOW=""; BLUE=""; CYAN=""; GREY=""; BOLD=""; NC=""
+fi
+
+terminate_probe_tree() {
+    local pid="$1" child
+    local -a children=()
+    if command -v pgrep >/dev/null 2>&1; then
+        mapfile -t children < <(pgrep -P "$pid" 2>/dev/null || true)
+        for child in "${children[@]}"; do
+            [[ -n "$child" ]] && terminate_probe_tree "$child"
+        done
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+}
+
+# --- Help Function ---
+show_help() {
+    cat <<EOF
+${CYAN}${BOLD}NetOps ${NETOPS_VERSION} Advanced Probe${NC}
+Network diagnostic tool with intelligent device detection
+
+${BOLD}USAGE:${NC}
+  netops diagnose latency <target> [options]
+  netops diagnose speed [--profile quick|balanced|thorough] [--runs <1-5>] [--ca-file <pem>] [--json]
+
+${BOLD}TARGET:${NC}
+  IP address, hostname, or pattern (resolves from cache/DNS)
+  Examples: 192.0.2.5, core-switch, 192.0.2.
+
+${BOLD}OPTIONS:${NC}
+  ${GREEN}-c, --count${NC} <num>    Number of probes (default: unlimited)
+  ${GREEN}-p, --port${NC} <port>    TCP port to test (instead of ICMP)
+  ${GREEN}-t, --time${NC}          Show timestamps with each probe
+  ${GREEN}-r, --trace${NC}         Force traceroute after completion
+  ${GREEN}-b, --beep${NC}          Beep on packet loss/timeout
+  ${GREEN}-s, --speed-test${NC}    Reliable multi-server Internet speed test
+  ${GREEN}--profile${NC} <name>    Speed profile: quick, balanced, thorough (default: balanced)
+  ${GREEN}--runs${NC} <num>        Servers to test (profile default, range: 1-5)
+  ${GREEN}--ca-file${NC} <pem>     Additional trusted CA bundle (verification stays enabled)
+  ${GREEN}--json${NC}              Machine-readable speed-test output
+  ${GREEN}-h, --help${NC}          Show this help message
+
+${BOLD}FEATURES:${NC}
+  • Automatic device detection (hostname, platform from inventory)
+  • Real-time latency graph with color-coded bars
+  • Smart SSH handoff when device is reachable
+  • Auto-traceroute on packet loss (or forced with -r)
+  • TCP port probing for service availability
+  • Statistics with loss%, min/avg/max latency, jitter
+  • Non-blocking background metadata collection (SNMP/SSH checks)
+  • Color-coded output (green: <50ms, yellow: 50-150ms, red: >150ms)
+
+${BOLD}EXAMPLES:${NC}
+  ${CYAN}# Basic ICMP probe${NC}
+  netops diagnose latency 192.0.2.5
+
+  ${CYAN}# Probe with 10 packets and timestamps${NC}
+  netops diagnose latency core-switch -c 10 -t
+
+  ${CYAN}# TCP port probe (e.g., SSH)${NC}
+  netops diagnose latency 192.0.2.5 -p 22 -c 5
+
+  ${CYAN}# Force traceroute and beep on loss${NC}
+  netops diagnose latency 192.0.2.5 -r -b
+
+  ${CYAN}# Probe with automatic SSH on reachable device${NC}
+  netops diagnose latency 192.0.2.5
+  Press 'C' when prompted to SSH directly
+
+  ${CYAN}# Continuous monitoring with timestamps${NC}
+  netops diagnose latency core-switch -t
+
+  ${CYAN}# Balanced speed test with loaded latency${NC}
+  netops diagnose speed
+
+  ${CYAN}# Faster single-server speed test with confidence metadata${NC}
+  netops diagnose speed --profile quick
+
+  ${CYAN}# Machine-readable speed test${NC}
+  netops diagnose speed --profile balanced --json
+
+${BOLD}OUTPUT:${NC}
+  • Real-time: [HH:MM:SS] seq=1     12.34 ms ████████
+  • Timeout:   [HH:MM:SS] seq=2     TIMEOUT  ✗
+  • Statistics:
+    - Packets: X sent, Y recv | Loss: Z%
+    - Latency: Min/Avg/Max = X / Y / Z ms
+    - Jitter:  X ms
+  • Auto-traceroute triggered on loss > 0%
+  • SSH prompt: Press 'C' to connect when device is reachable
+
+${BOLD}BEHAVIOR:${NC}
+  • ${GREEN}ICMP Mode${NC} (default): Uses system ping with -O flag on Linux for accurate timeout detection
+  • ${GREEN}TCP Mode${NC} (-p): Uses Perl for high-precision timing (millisecond accuracy)
+  • ${GREEN}Auto-traceroute${NC}: Automatically runs when packet loss detected OR forced with -r
+  • ${GREEN}SSH Handoff${NC}: If device has SSH open, prompts to connect after probe completes
+  • ${GREEN}Background Metadata${NC}: SNMP/SSH checks run in parallel without blocking probe
+
+${BOLD}NOTES:${NC}
+  • Uses inventory database for device info (hostname, platform)
+  • Falls back to SNMP if device not in inventory
+  • Press Ctrl+C to stop probing and view statistics
+  • TCP mode uses Perl's IO::Socket::INET for reliable port checking
+  • Loss percentage calculated from timeouts vs total packets
+  • Jitter calculated as average of consecutive latency differences
+  • Traceroute uses 15 hops max, 1 probe per hop, 1 sec timeout
+
+${BOLD}DIAGNOSTICS:${NC}
+  • Green bars:   Latency < 50ms   (excellent)
+  • Yellow bars:  Latency 50-150ms (acceptable)
+  • Red bars:     Latency > 150ms  (poor)
+  • Red TIMEOUT:  Packet loss detected (beeps if -b enabled)
+
+${BOLD}SEE ALSO:${NC}
+  netops help diagnose   Diagnostic commands
+  netops device ssh      Interactive device connection
+  netops inventory scan  Network discovery
+  netops --version       Installed release
+EOF
+}
+
+# Reliable Internet-path measurement from the machine running NetOps. The
+# Python backend handles verified WSL/Windows enterprise trust and emits one
+# stable JSON contract regardless of the distro speedtest-cli executable.
+run_speed_test() (
+    set -o pipefail
+    local runs="" json=false ca_file="" profile="balanced"
+    while (($#)); do
+        case "$1" in
+            --runs|--speed-runs) runs="${2:-}"; shift 2 ;;
+            --profile) profile="${2:-}"; shift 2 ;;
+            --quick) profile="quick"; shift ;;
+            --thorough) profile="thorough"; shift ;;
+            --ca-file) ca_file="${2:-}"; shift 2 ;;
+            --json) json=true; shift ;;
+            *) echo "Unknown speed-test option: $1" >&2; return 1 ;;
+        esac
+    done
+    [[ "$profile" =~ ^(quick|balanced|thorough)$ ]] || { echo "Error: --profile must be quick, balanced, or thorough." >&2; return 1; }
+    case "$profile" in
+        quick) [[ -z "$runs" ]] && runs=1 ;;
+        balanced) [[ -z "$runs" ]] && runs=2 ;;
+        thorough) [[ -z "$runs" ]] && runs=3 ;;
+    esac
+    [[ "$runs" =~ ^[1-5]$ ]] || { echo "Error: --speed-runs must be 1-5." >&2; return 1; }
+    [[ -z "$ca_file" || -f "$ca_file" ]] || { echo "Error: CA bundle does not exist: $ca_file" >&2; return 1; }
+    for cmd in python3 jq ping timeout awk ip; do
+        command -v "$cmd" >/dev/null 2>&1 || { echo "Error: '$cmd' is required." >&2; return 1; }
+    done
+
+    local library_dir speed_helper
+    library_dir=$(dirname "$(realpath "$0")")
+    speed_helper="$library_dir/netops_speed.py"
+    [[ -f "$speed_helper" ]] || { echo "Error: secure speed backend is missing: $speed_helper" >&2; return 1; }
+
+    local tmp
+    tmp=$(mktemp -d /tmp/netops-speed.XXXXXX) || return 1
+    speed_cleanup() {
+        local rc=$? pid
+        local -a pids=()
+        trap - EXIT HUP INT TERM
+        mapfile -t pids < <(jobs -pr)
+        for pid in "${pids[@]}"; do [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null || true; done
+        for pid in "${pids[@]}"; do [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true; done
+        rm -rf -- "$tmp"
+        exit "$rc"
+    }
+    trap speed_cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    local request_timeout=60 discovery_timeout=150 phase_timeout=240 idle_count=8 candidate_limit min_completed=2 max_attempts
+    case "$profile" in
+        quick)
+            request_timeout=45
+            discovery_timeout=90
+            phase_timeout=180
+            idle_count=6
+            candidate_limit=$((runs * 3 + 1))
+            min_completed=1
+            max_attempts=$((runs + 1))
+            ;;
+        balanced)
+            request_timeout=60
+            discovery_timeout=150
+            phase_timeout=240
+            idle_count=8
+            candidate_limit=$((runs * 3))
+            min_completed=2
+            max_attempts=$candidate_limit
+            ;;
+        thorough)
+            request_timeout=120
+            discovery_timeout=240
+            phase_timeout=360
+            idle_count=12
+            candidate_limit=$((runs * 4))
+            min_completed=2
+            max_attempts=$candidate_limit
+            ;;
+    esac
+    ((candidate_limit<4)) && candidate_limit=4
+    ((candidate_limit>20)) && candidate_limit=20
+    [[ -z "$max_attempts" ]] && max_attempts=$candidate_limit
+    ((max_attempts<runs)) && max_attempts=$runs
+    ((max_attempts>candidate_limit)) && max_attempts=$candidate_limit
+    if [[ "$profile" != quick && "$runs" -lt 2 ]]; then
+        echo "Error: balanced/thorough speed tests require at least 2 servers; use --profile quick for a one-server check." >&2
+        return 1
+    fi
+
+    local helper_args=(--timeout "$request_timeout")
+    [[ -n "$ca_file" ]] && helper_args+=(--ca-file "$ca_file")
+
+    ping_stats() {
+        awk '
+        /time[=<][0-9.]+/ {
+            x=$0; sub(/^.*time[=<]/,"",x); sub(/ .*$/,"",x)
+            value=x+0; sample[++n]=value; sum+=value
+        }
+        /packets transmitted/ {
+            match($0,/[0-9.]+% packet loss/)
+            if (RSTART) loss=substr($0,RSTART,RLENGTH)+0
+        }
+        END {
+            if (!n) { print "0 0 100 0"; exit }
+            for (i=2;i<=n;i++) {
+                delta=sample[i]-sample[i-1]; if(delta<0)delta=-delta
+                jitter+=delta
+            }
+            printf "%.3f %.3f %.3f %d",sum/n,(n>1?jitter/(n-1):0),loss,n
+        }' "$1"
+    }
+
+    series_stats() {
+        awk '
+        $1>=0 { value[++n]=$1 }
+        END {
+            if (!n) { print "0 0 0 0 0"; exit }
+            for(i=1;i<=n;i++)for(j=i+1;j<=n;j++)if(value[i]>value[j]){
+                t=value[i];value[i]=value[j];value[j]=t
+            }
+            median=(n%2?value[(n+1)/2]:(value[n/2]+value[n/2+1])/2)
+            for(i=1;i<=n;i++){
+                ratio=(median?value[i]/median:1)
+                if(n<3||(ratio>=0.65&&ratio<=1.35))clean[++kept]=value[i]
+            }
+            if(kept<2){kept=n;for(i=1;i<=n;i++)clean[i]=value[i]}
+            low=clean[1];high=clean[1]
+            for(i=1;i<=kept;i++){
+                sum+=clean[i]
+                if(clean[i]<low)low=clean[i]
+                if(clean[i]>high)high=clean[i]
+            }
+            mean=sum/kept
+            for(i=1;i<=kept;i++)variance+=(clean[i]-mean)^2
+            printf "%.3f %.3f %.3f %.3f %d",mean,low,high,
+                (mean?sqrt(variance/kept)/mean*100:0),kept
+        }'
+    }
+
+    loaded_pair() {
+        local server="$1" output="$2" err_log="$3"
+        timeout "$((phase_timeout * 2))" python3 "$speed_helper" "${helper_args[@]}" run \
+            --server "$server" --direction both >"$output" 2>"$err_log" </dev/null
+    }
+
+    local route interface gateway source_ip vpn=false vpn_routed=false wifi=unknown started observed timestamp
+    route=$(ip route get 1.1.1.1 2>/dev/null | head -1 || true)
+    interface=$(awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}' <<<"$route")
+    gateway=$(awk '{for(i=1;i<=NF;i++)if($i=="via"){print $(i+1);exit}}' <<<"$route")
+    source_ip=$(awk '{for(i=1;i<=NF;i++)if($i=="src"){print $(i+1);exit}}' <<<"$route")
+    [[ -z "$interface" ]] && interface=unknown
+    [[ "$interface" =~ ^(tun|tap|wg|tailscale|ppp|vpn) ]] && vpn_routed=true
+    if ip -o link show up 2>/dev/null | awk -F': ' '{print $2}' | grep -Eq '^(tun|tap|wg|tailscale|ppp|vpn)[^:]*$'; then vpn=true; fi
+    if command -v iw >/dev/null 2>&1 && [[ "$interface" != unknown ]]; then
+        wifi=$(iw dev "$interface" link 2>/dev/null | awk '/signal:/{print $2 " dBm";exit}')
+        [[ -z "$wifi" ]] && wifi=not-wireless
+    fi
+    started=$(date +%s)
+    observed=$started
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    [[ "$json" == false ]] && {
+        echo "NetOps Internet Speed Test"
+        echo "Scope: this NetOps host -> Internet"
+        echo "Profile: $profile | servers=$runs | idle-pings=$idle_count | request-timeout=${request_timeout}s"
+        echo "Path: interface=$interface source=${source_ip:-unknown} gateway=${gateway:-direct} VPN-active=$vpn routed-via-VPN=$vpn_routed"
+        echo "Selecting candidate servers with verified TLS..."
+        echo
+    }
+    local server_json="$tmp/servers.json" helper_error="$tmp/servers.err" discovery_ok=false discovery_attempt cache_used=false
+    local cache_root cache_key cache_file cache_ttl cache_age cache_stage
+    cache_root="${NETOPS_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/netops}"
+    cache_ttl="${NETOPS_SPEED_CACHE_TTL_SECONDS:-21600}"
+    [[ "$cache_ttl" =~ ^[0-9]+$ ]] || cache_ttl=0
+    cache_key=$(printf '%s' "${interface}_${gateway:-direct}_${source_ip:-unknown}_${vpn_routed}" | tr -c 'A-Za-z0-9_.-' '_')
+    cache_file="$cache_root/speed_servers_${cache_key}.json"
+    if [[ -z "$ca_file" && -f "$cache_file" && "$cache_ttl" -gt 0 ]]; then
+        cache_age=$(($(date +%s)-$(stat -c %Y "$cache_file" 2>/dev/null || echo 0)))
+        if ((cache_age>=0 && cache_age<=cache_ttl)) && jq -e --argjson need "$runs" '(.ok == true) and ((.servers|length) >= $need)' "$cache_file" >/dev/null 2>&1; then
+            cp "$cache_file" "$server_json" 2>/dev/null && discovery_ok=true && cache_used=true
+            echo "[SPEED] using cached server candidates (${cache_age}s old)" >&2
+        fi
+    fi
+
+    if [[ "$discovery_ok" != true ]]; then
+        echo "[SPEED] discovering nearby servers" >&2
+        for discovery_attempt in 1 2; do
+            if timeout "$discovery_timeout" python3 "$speed_helper" "${helper_args[@]}" servers --limit "$candidate_limit" >"$server_json" 2>"$helper_error"; then
+                discovery_ok=true
+                if [[ -z "$ca_file" ]] && mkdir -p "$cache_root" 2>/dev/null; then
+                    cache_stage="${cache_file}.tmp.$$"
+                    if cp "$server_json" "$cache_stage" 2>/dev/null; then
+                        mv -f "$cache_stage" "$cache_file" 2>/dev/null || true
+                    fi
+                    rm -f -- "$cache_stage" 2>/dev/null || true
+                fi
+                break
+            fi
+            [[ "$discovery_attempt" -lt 2 ]] && {
+                echo "[SPEED] server discovery attempt $discovery_attempt failed; retrying" >&2
+                sleep "$discovery_attempt"
+            }
+        done
+    fi
+    if [[ "$discovery_ok" != true ]]; then
+        local detail
+        detail=$(jq -r '.error//empty' "$server_json" 2>/dev/null)
+        [[ -z "$detail" ]] && detail=$(tr '\n' ' ' <"$helper_error")
+        echo "Error: unable to retrieve verified speed-test servers${detail:+: $detail}" >&2
+        echo "Run 'netops diagnose doctor' to inspect TLS trust and prerequisites." >&2
+        return 1
+    fi
+
+    local trust_source backend server_ids available results="$tmp/results.tsv"
+    trust_source=$(jq -r '.tls_trust.source//"system"' "$server_json")
+    backend=$(jq -r '.backend//"speedtest-cli-python"' "$server_json")
+    server_ids=$(jq -r '.servers[].id' "$server_json" | head -n "$candidate_limit")
+    available=$(awk 'NF{n++}END{print n+0}' <<<"$server_ids")
+    ((available>=min_completed)) || { echo "Error: fewer than $min_completed test server(s) are available." >&2; return 1; }
+    ((max_attempts>available)) && max_attempts=$available
+
+    local completed=0 attempted=0 id info host ping_host sponsor city idle jitter loss samples
+    local pair_json pair_err download upload down_bytes up_bytes
+    local loaded_down loaded_up loaded_down_jitter loaded_up_jitter loaded_down_samples loaded_up_samples error_detail
+    while read -r id; do
+        ((completed>=runs)) && break
+        ((attempted>=max_attempts)) && break
+        [[ -z "$id" ]] && continue
+        ((attempted++))
+        info=$(jq -c --argjson id "$id" '.servers[] | select(.id==$id)' "$server_json")
+        host=$(jq -r '.host//empty' <<<"$info")
+        sponsor=$(jq -r '.sponsor//"Unknown"' <<<"$info")
+        city=$(jq -r '.name//"Unknown"' <<<"$info")
+        [[ -n "$host" ]] || continue
+        ping_host=${host%%:*}
+        echo "[SPEED] server $attempted/$max_attempts: $sponsor ($city), idle baseline" >&2
+
+        ping -n -c "$idle_count" -i 0.2 -W 2 "$ping_host" >"$tmp/$id.idle.ping" 2>/dev/null </dev/null || true
+        read -r idle jitter loss samples <<<"$(ping_stats "$tmp/$id.idle.ping")"
+
+        pair_json="$tmp/$id.pair.json"; pair_err="$tmp/$id.pair.err"
+        # Both transfers remain sequential so they do not compete for the same
+        # link. The backend reuses one pinned client/server session and samples
+        # loaded latency independently during each direction.
+        echo "[SPEED] server $attempted/$max_attempts: sequential upload and download under load" >&2
+        if ! loaded_pair "$id" "$pair_json" "$pair_err"; then
+            error_detail=$(jq -r '.error//empty' "$pair_json" 2>/dev/null)
+            [[ -z "$error_detail" ]] && error_detail=$(tr '\n' ' ' <"$pair_err" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//' | cut -c1-500)
+            echo "[SPEED] server $id transfer failed${error_detail:+: $error_detail}" >&2
+            continue
+        fi
+
+        download=$(jq -r '.directions.download.megabits_per_second//0' "$pair_json")
+        upload=$(jq -r '.directions.upload.megabits_per_second//0' "$pair_json")
+        down_bytes=$(jq -r '.directions.download.bytes//0' "$pair_json")
+        up_bytes=$(jq -r '.directions.upload.bytes//0' "$pair_json")
+        if ! awk -v d="$download" -v u="$upload" -v db="$down_bytes" -v ub="$up_bytes" 'BEGIN{exit !((d+0)>0 && (u+0)>0 && (db+0)>0 && (ub+0)>0)}'; then
+            echo "[SPEED] server $id returned a zero-transfer result; skipping" >&2
+            continue
+        fi
+        loaded_down=$(jq -r '.directions.download.loaded_latency_ms.avg//0' "$pair_json")
+        loaded_up=$(jq -r '.directions.upload.loaded_latency_ms.avg//0' "$pair_json")
+        loaded_down_jitter=$(jq -r '.directions.download.loaded_latency_ms.jitter//0' "$pair_json")
+        loaded_up_jitter=$(jq -r '.directions.upload.loaded_latency_ms.jitter//0' "$pair_json")
+        loaded_down_samples=$(jq -r '.directions.download.loaded_latency_ms.samples//0' "$pair_json")
+        loaded_up_samples=$(jq -r '.directions.upload.loaded_latency_ms.samples//0' "$pair_json")
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$sponsor" "$city" "$download" "$upload" "$idle" "$jitter" "$loss" \
+            "$loaded_down" "$loaded_up" "$loaded_down_jitter" "$loaded_up_jitter" \
+            "$down_bytes" "$up_bytes" "$samples" "$loaded_down_samples" "$loaded_up_samples" >>"$results"
+        ((completed++))
+        [[ "$json" == false ]] && printf '%-28s %8.2f down %8.2f up %6.1f ms idle %4.1f%% loss\n' \
+            "$sponsor ($city)" "$download" "$upload" "$idle" "$loss"
+    done <<<"$server_ids"
+
+    ((completed>=min_completed)) || { echo "Error: only $completed complete server test(s); $min_completed required for profile '$profile'." >&2; return 1; }
+
+    local dm dlo dhi dcv dk um ulo uhi ucv uk idle_mean idle_cv x
+    local loss_mean loss_max loaded_down_mean loaded_up_mean idle_jitter_mean
+    local loaded_down_jitter_mean loaded_up_jitter_mean bytes_down bytes_up
+    local idle_samples_total loaded_down_samples_total loaded_up_samples_total loaded_missing
+    local reliability=high reasons="" elapsed
+    read -r dm dlo dhi dcv dk <<<"$(awk -F'\t' '{print $3}' "$results" | series_stats)"
+    read -r um ulo uhi ucv uk <<<"$(awk -F'\t' '{print $4}' "$results" | series_stats)"
+    read -r idle_mean x x idle_cv x <<<"$(awk -F'\t' '{print $5}' "$results" | series_stats)"
+    loss_mean=$(awk -F'\t' '{s+=$7}END{printf "%.3f",s/NR}' "$results")
+    loss_max=$(awk -F'\t' '$7>m{m=$7}END{printf "%.3f",m+0}' "$results")
+    idle_jitter_mean=$(awk -F'\t' '{s+=$6}END{printf "%.3f",s/NR}' "$results")
+    loaded_down_mean=$(awk -F'\t' '{s+=$8}END{printf "%.3f",s/NR}' "$results")
+    loaded_up_mean=$(awk -F'\t' '{s+=$9}END{printf "%.3f",s/NR}' "$results")
+    loaded_down_jitter_mean=$(awk -F'\t' '{s+=$10}END{printf "%.3f",s/NR}' "$results")
+    loaded_up_jitter_mean=$(awk -F'\t' '{s+=$11}END{printf "%.3f",s/NR}' "$results")
+    bytes_down=$(awk -F'\t' '{s+=$12}END{printf "%.0f",s}' "$results")
+    bytes_up=$(awk -F'\t' '{s+=$13}END{printf "%.0f",s}' "$results")
+    idle_samples_total=$(awk -F'\t' '{s+=$14}END{print s+0}' "$results")
+    loaded_down_samples_total=$(awk -F'\t' '{s+=$15}END{print s+0}' "$results")
+    loaded_up_samples_total=$(awk -F'\t' '{s+=$16}END{print s+0}' "$results")
+    loaded_missing=$(awk -F'\t' '$15<1 || $16<1 {n++}END{print n+0}' "$results")
+
+    if awk -v d="$dcv" -v u="$ucv" 'BEGIN{exit !(d>20||u>20)}'; then reliability=medium; reasons="server variance"; fi
+    if awk -v l="$loss_max" 'BEGIN{exit !(l>1)}'; then reliability=medium; reasons="${reasons:+$reasons, }packet loss"; fi
+    if ((completed<runs)); then reliability=medium; reasons="${reasons:+$reasons, }incomplete servers"; fi
+    if ((completed<2)); then reliability=medium; reasons="${reasons:+$reasons, }single-server quick profile"; fi
+    if ((loaded_missing>0)); then reliability=medium; reasons="${reasons:+$reasons, }loaded ICMP samples unavailable"; fi
+    if awk -v d="$dcv" -v u="$ucv" -v l="$loss_max" 'BEGIN{exit !(d>35||u>35||l>5)}'; then reliability=low; reasons="unstable measurements"; fi
+    elapsed=$(($(date +%s)-started))
+
+    if [[ "$json" == true ]]; then
+        jq -n --arg timestamp "$timestamp" --argjson observed "$observed" \
+            --arg interface "$interface" --arg source "$source_ip" --arg gateway "$gateway" --arg route "$route" --arg wifi "$wifi" \
+            --arg backend "$backend" --arg trust "$trust_source" --arg profile "$profile" --arg rating "$reliability" --arg reasons "$reasons" \
+            --argjson vpn "$vpn" --argjson vpnRouted "$vpn_routed" --argjson cacheUsed "$cache_used" --argjson cacheTtl "$cache_ttl" --argjson servers "$completed" --argjson attempted "$attempted" --argjson duration "$elapsed" \
+            --argjson dm "$dm" --argjson dlo "$dlo" --argjson dhi "$dhi" --argjson dcv "$dcv" \
+            --argjson um "$um" --argjson ulo "$ulo" --argjson uhi "$uhi" --argjson ucv "$ucv" \
+            --argjson idle "$idle_mean" --argjson loss "$loss_mean" --argjson ij "$idle_jitter_mean" \
+            --argjson ld "$loaded_down_mean" --argjson lu "$loaded_up_mean" \
+            --argjson ldj "$loaded_down_jitter_mean" --argjson luj "$loaded_up_jitter_mean" \
+            --argjson bd "$bytes_down" --argjson bu "$bytes_up" --argjson idleSamples "$idle_samples_total" \
+            --argjson downSamples "$loaded_down_samples_total" --argjson upSamples "$loaded_up_samples_total" \
+            '{ok:true,timestamp:$timestamp,observed_at:$observed,scope:"netops-host-to-internet",backend:$backend,
+              tls:{verified:true,hostname_check:true,trust_source:$trust},
+              profile:$profile,
+              server_discovery:{cached:$cacheUsed,cache_ttl_seconds:$cacheTtl},
+              path:{interface:$interface,source_ip:$source,gateway:$gateway,route:$route,vpn_detected:$vpn,vpn_routed:$vpnRouted,wifi_signal:$wifi},
+              servers_completed:$servers,servers_attempted:$attempted,duration_seconds:$duration,
+              download_mbps:{sustained:$dm,observed_range:[$dlo,$dhi],coefficient_of_variation_pct:$dcv},
+              upload_mbps:{sustained:$um,observed_range:[$ulo,$uhi],coefficient_of_variation_pct:$ucv},
+              latency_ms:{idle:$idle,loaded_download:$ld,loaded_upload:$lu},
+              jitter_ms:{idle:$ij,loaded_download:$ldj,loaded_upload:$luj},packet_loss_pct:$loss,
+              latency_samples:{idle:$idleSamples,loaded_download:$downSamples,loaded_upload:$upSamples},
+              bytes_transferred:{download:$bd,upload:$bu},reliability:{rating:$rating,reasons:$reasons}}' || {
+                echo "Error: could not render the structured speed-test result." >&2
+                return 10
+            }
+    else
+        echo
+        echo "Aggregate performance"
+        printf 'Download       : %.2f Mbps sustained (%.2f-%.2f observed)\n' "$dm" "$dlo" "$dhi"
+        printf 'Upload         : %.2f Mbps sustained (%.2f-%.2f observed)\n' "$um" "$ulo" "$uhi"
+        printf 'Idle latency   : %.2f ms\n' "$idle_mean"
+        printf 'Loaded latency : %.2f ms down / %.2f ms up\n' "$loaded_down_mean" "$loaded_up_mean"
+        printf 'Jitter         : %.2f ms idle / %.2f ms down / %.2f ms up\n' "$idle_jitter_mean" "$loaded_down_jitter_mean" "$loaded_up_jitter_mean"
+        printf 'Latency samples: %d idle / %d down / %d up\n' "$idle_samples_total" "$loaded_down_samples_total" "$loaded_up_samples_total"
+        printf 'Packet loss    : %.2f%% average\n' "$loss_mean"
+        printf 'Agreement      : %.1f%% down CV / %.1f%% up CV\n' "$dcv" "$ucv"
+        printf 'Reliability    : %s%s\n' "$reliability" "${reasons:+ ($reasons)}"
+        printf 'Profile        : %s\n' "$profile"
+        printf 'Server list    : %s\n' "$([[ "$cache_used" == true ]] && echo cached || echo fresh)"
+        printf 'Verification   : TLS chain + hostname, trust=%s, backend=%s\n' "$trust_source" "$backend"
+        printf 'Test scope     : %d/%d servers, %ds, %.1f MB down / %.1f MB up\n' \
+            "$completed" "$attempted" "$elapsed" \
+            "$(awk -v b="$bytes_down" 'BEGIN{print b/1048576}')" "$(awk -v b="$bytes_up" 'BEGIN{print b/1048576}')"
+        echo "Interpretation : this measures the machine running NetOps, not an arbitrary switch port or endpoint. Quick profile is a fast check; balanced/thorough add stronger server agreement."
+    fi
+    [[ "$reliability" == low ]] && return 2
+    return 0
+)
+
+run_latency_json() (
+    local ip="$1" count="${PING_COUNT:-5}" mode="icmp" runtime samples tmp_raw started observed timestamp recv min avg max jitter loss status ping_rc=0 error=""
+    [[ -z "$count" || "$count" == "-1" ]] && count=5
+    [[ "$count" =~ ^[1-9][0-9]*$ ]] || { echo "Error: --count must be a positive integer for --json latency probes" >&2; return 6; }
+    command -v jq >/dev/null 2>&1 || { echo "Error: 'jq' is required for JSON latency output" >&2; return 5; }
+    runtime=$(mktemp -d /tmp/netops-probe-json.XXXXXX) || { echo "Error: could not create probe runtime state" >&2; return 10; }
+    trap 'rm -rf -- "$runtime"' EXIT
+    samples="$runtime/samples"
+    tmp_raw="$runtime/raw"
+    : > "$samples"
+    started=$(date +%s)
+    observed=$started
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    if [[ -n "$TCP_PORT" ]]; then
+        mode="tcp"
+        for ((i=1; i<=count; i++)); do
+            local start_ms end_ms res ms
+            start_ms=$(perl -MTime::HiRes=time -e 'printf "%.3f\n", time * 1000')
+            perl -MIO::Socket::INET -e '$s=IO::Socket::INET->new(PeerAddr=>$ARGV[0],PeerPort=>$ARGV[1],Timeout=>1);exit($s?0:1)' "$ip" "$TCP_PORT" 2>/dev/null
+            res=$?
+            end_ms=$(perl -MTime::HiRes=time -e 'printf "%.3f\n", time * 1000')
+            if [[ $res -eq 0 ]]; then
+                awk -v e="$end_ms" -v st="$start_ms" 'BEGIN{printf "%.3f\n", e-st}' >> "$samples"
+            fi
+            ((i < count)) && sleep 0.2
+        done
+    else
+        ping -n -c "$count" -W 1 "$ip" > "$tmp_raw" 2>&1
+        ping_rc=$?
+        awk '/time[=<][0-9.]+/ { x=$0; sub(/^.*time[=<]/,"",x); sub(/ .*$/,"",x); print x+0 }' "$tmp_raw" > "$samples"
+    fi
+
+    read -r recv min avg max jitter <<< "$(awk '
+        { v[++n]=$1; sum+=$1; if(n==1 || $1<min) min=$1; if($1>max) max=$1 }
+        END {
+            if(!n){ print "0 0 0 0 0"; exit }
+            for(i=2;i<=n;i++){ d=v[i]-v[i-1]; if(d<0)d=-d; js+=d }
+            printf "%d %.3f %.3f %.3f %.3f", n, min, sum/n, max, (n>1?js/(n-1):0)
+        }' "$samples")"
+    loss=$(awk -v sent="$count" -v got="${recv:-0}" 'BEGIN{if(sent<=0)print 100; else printf "%.3f", ((sent-got)/sent)*100}')
+    if ((recv == 0 && ping_rc > 1)); then
+        status="ERROR"
+        error=$(tr '\n' ' ' < "$tmp_raw" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//' | cut -c1-500)
+    elif ((recv == 0)); then status="UNREACHABLE"
+    elif ((recv < count)); then status="DEGRADED"
+    else status="REACHABLE"
+    fi
+    jq -n \
+        --arg timestamp "$timestamp" --argjson observed "$observed" --arg status "$status" --arg error "$error" --arg target "$TARGET_INPUT" --arg ip "$ip" --arg mode "$mode" --arg port "$TCP_PORT" \
+        --argjson count "$count" --argjson received "${recv:-0}" --argjson loss "$loss" \
+        --argjson min "${min:-0}" --argjson avg "${avg:-0}" --argjson max "${max:-0}" --argjson jitter "${jitter:-0}" \
+        '{ok:($received > 0),status:$status,error:(if $error == "" then null else $error end),timestamp:$timestamp,observed_at:$observed,target:$target,ip:$ip,mode:$mode,port:(if $port == "" then null else ($port|tonumber) end),packets:{sent:$count,received:$received,loss_pct:$loss},latency_ms:{min:$min,avg:$avg,max:$max,jitter:$jitter}}'
+    [[ "$status" == "ERROR" ]] && return 5
+    ((recv == 0)) && return 4
+    ((recv < count)) && return 3
+    return 0
+)
+
+# --- Argument Parsing ---
+AUTO_TRACE=false
+PING_COUNT="-1"
+BEEP=false
+SHOW_TIME=false
+TCP_PORT=""
+TARGET_INPUT=""
+SPEED_TEST=false
+JSON_OUTPUT=false
+SPEED_ARGS=()
+PING_PID=""
+META_PID=""
+PING_FIFO=""
+RUNTIME_DIR=""
+META_FILE=""
+TMP_DATA=""
+CURSOR_HIDDEN=false
+INTERRUPTED=false
+STATS_RENDERED=false
+PROBE_RESULT_RC=0
+PROBE_SENT=0
+PROBE_RECEIVED=0
+PROBE_LOSS=0
+PING_SUMMARY_SENT=0
+PING_SUMMARY_RECEIVED=0
+PING_COMMAND_RC=0
+PING_ERROR_FILE=""
+
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -b|--beep) BEEP=true; shift ;;
+        -t|--time) SHOW_TIME=true; shift ;;
+        -r|--trace) AUTO_TRACE=true; shift ;;
+        -s|--speed-test) SPEED_TEST=true; shift ;;
+        --runs|--speed-runs) [[ -n "${2:-}" ]] || { echo "Error: $1 requires a value" >&2; exit 1; }; SPEED_ARGS+=(--speed-runs "$2"); shift 2 ;;
+        --profile) [[ -n "${2:-}" ]] || { echo "Error: --profile requires quick, balanced, or thorough" >&2; exit 1; }; SPEED_ARGS+=(--profile "$2"); shift 2 ;;
+        --quick) SPEED_ARGS+=(--quick); shift ;;
+        --thorough) SPEED_ARGS+=(--thorough); shift ;;
+        --ca-file) [[ -n "${2:-}" ]] || { echo "Error: --ca-file requires a path" >&2; exit 1; }; SPEED_ARGS+=(--ca-file "$2"); shift 2 ;;
+        --json) JSON_OUTPUT=true; SPEED_ARGS+=(--json); shift ;;
+        -p|--port) [[ -n "${2:-}" ]] || { echo "Error: $1 requires a TCP port" >&2; exit 2; }; TCP_PORT="$2"; shift 2 ;;
+        -c|--count) [[ -n "${2:-}" ]] || { echo "Error: $1 requires a probe count" >&2; exit 2; }; PING_COUNT="$2"; shift 2 ;;
+        -h|--help) show_help; exit 0 ;;
+        --help) show_help; exit 0 ;;
+        -*) echo -e "${RED}Unknown option: $1${NC}"; show_help; exit 1 ;;
+        *)
+            [[ -z "$TARGET_INPUT" ]] || { echo "Error: only one latency target may be supplied" >&2; exit 2; }
+            TARGET_INPUT="$1"; shift ;;
+    esac
+done
+
+if [[ "$SPEED_TEST" == true ]]; then
+    SPEED_CHILD_PID=""
+    speed_entry_cleanup() {
+        local rc=$?
+        trap - EXIT HUP INT TERM
+        if [[ -n "$SPEED_CHILD_PID" ]]; then
+            terminate_probe_tree "$SPEED_CHILD_PID"
+            wait "$SPEED_CHILD_PID" 2>/dev/null || true
+        fi
+        exit "$rc"
+    }
+    trap speed_entry_cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    run_speed_test "${SPEED_ARGS[@]}" &
+    SPEED_CHILD_PID=$!
+    if wait "$SPEED_CHILD_PID"; then
+        speed_rc=0
+    else
+        speed_rc=$?
+    fi
+    SPEED_CHILD_PID=""
+    exit "$speed_rc"
+fi
+
+if [[ -z "$TARGET_INPUT" ]]; then
+    echo -e "${RED}Error: No target specified${NC}" >&2
+    echo "" >&2
+    show_help
+    exit 1
+fi
+
+if [[ -n "$TCP_PORT" ]] && { [[ ! "$TCP_PORT" =~ ^[0-9]+$ ]] || ((10#$TCP_PORT < 1 || 10#$TCP_PORT > 65535)); }; then
+    echo -e "${RED}Error: Port must be an integer from 1 to 65535${NC}" >&2
+    exit 2
+fi
+if [[ "$PING_COUNT" != "-1" ]] && { [[ ! "$PING_COUNT" =~ ^[1-9][0-9]*$ ]] || ((10#$PING_COUNT > 100000)); }; then
+    echo -e "${RED}Error: Count must be a positive integer (maximum 100000)${NC}" >&2
+    exit 2
+fi
+
+
+
+RESOLVED_TARGETS=$(resolve_targets "$TARGET_INPUT" "ALL" "false") || exit $?
+mapfile -t RESOLVED_ROWS <<< "$RESOLVED_TARGETS"
+mapfile -t RESOLVED_ROWS < <(printf '%s\n' "${RESOLVED_ROWS[@]}" | sed '/^[[:space:]]*$/d')
+if ((${#RESOLVED_ROWS[@]} != 1)); then
+    echo "Error: latency probing requires one resolved target; '${TARGET_INPUT}' produced ${#RESOLVED_ROWS[@]}." >&2
+    echo "Use an exact hostname/IP or select one inventory match." >&2
+    exit 2
+fi
+IP="${RESOLVED_ROWS[0]}"
+
+if [[ "$JSON_OUTPUT" == true ]]; then
+    run_latency_json "$IP"
+    exit $?
+fi
+
+# Private runtime state prevents concurrent probes from colliding and gives
+# every exit path one cleanup boundary.
+RUNTIME_DIR=$(mktemp -d /tmp/netops-probe.XXXXXX) || {
+    echo "Error: could not create probe runtime state" >&2
+    exit 10
+}
+chmod 700 "$RUNTIME_DIR" 2>/dev/null || true
+META_FILE="$RUNTIME_DIR/metadata"
+TMP_DATA="$RUNTIME_DIR/samples"
+PING_FIFO="$RUNTIME_DIR/ping.fifo"
+PING_ERROR_FILE="$RUNTIME_DIR/ping.error"
+: > "$TMP_DATA"
+: > "$PING_ERROR_FILE"
+
+# Non-blocking background inventory/SNMP/SSH metadata lookup.
+(
+    db_entry=$(awk -F'|' -v ip="$IP" '$1 == ip { print; exit }' "$DEVICES_DB" "$AP_DB" 2>/dev/null)
+    if [[ -n "$db_entry" ]]; then
+        sysname=$(printf '%s\n' "$db_entry" | cut -d'|' -f2 | tr -d '\r\n')
+        platform=$(printf '%s\n' "$db_entry" | cut -d'|' -f3 | tr -d '\r\n')
+    else
+        snmp_sys=$(netops_snmp_get "$IP" "sysName.0" 2>/dev/null)
+        sysname=$(printf '%s' "$snmp_sys" | tr -d '\r\n')
+        platform="Unknown"
+    fi
+
+    if perl -MIO::Socket::INET -e '$s=IO::Socket::INET->new(PeerAddr=>"$ARGV[0]",PeerPort=>22,Timeout=>1);exit($s?0:1)' "$IP" 2>/dev/null; then
+        ssh_ready=true
+    else
+        ssh_ready=false
+    fi
+    printf '%s\n%s\n%s\n' "$sysname" "$platform" "$ssh_ready" > "$META_FILE"
+) &
+META_PID=$!
+
+show_cursor() {
+    if [[ "$CURSOR_HIDDEN" == true ]]; then
+        tput cnorm 2>/dev/null || true
+        CURSOR_HIDDEN=false
+    fi
+}
+
+stop_probe_children() {
+    local pid
+    for pid in "$PING_PID" "$META_PID"; do
+        [[ -n "$pid" ]] || continue
+        if kill -0 "$pid" 2>/dev/null; then
+            terminate_probe_tree "$pid"
+        fi
+        wait "$pid" 2>/dev/null || true
+    done
+    PING_PID=""
+    META_PID=""
+}
+
+render_stats() {
+    [[ "$STATS_RENDERED" == true ]] && return 0
+    if [[ ! -s "$TMP_DATA" && "$PING_SUMMARY_SENT" -eq 0 ]]; then
+        return 0
+    fi
+    local calculated raw_count raw_received min avg max jitter sent received loss
+    calculated=$(awk '
+        { sample[$1]=$2; if (($1+0)>highest) highest=$1+0 }
+        END {
+            for (i=1; i<=highest; i++) {
+                if (!(i in sample)) continue
+                count++
+                if (sample[i] == "TIMEOUT") continue
+                value=sample[i]+0; latency[++recv]=value; sum+=value
+                if (recv==1 || value<min) min=value
+                if (recv==1 || value>max) max=value
+            }
+            for (i=2; i<=recv; i++) { delta=latency[i]-latency[i-1]; if(delta<0)delta=-delta; jitter+=delta }
+            printf "%d %d %.3f %.3f %.3f %.3f\n", count, recv, (recv?min:0), (recv?sum/recv:0), (recv?max:0), (recv>1?jitter/(recv-1):0)
+        }' "$TMP_DATA")
+    read -r raw_count raw_received min avg max jitter <<< "$calculated"
+    sent=${raw_count:-0}
+    received=${raw_received:-0}
+    ((PING_SUMMARY_SENT > sent)) && sent=$PING_SUMMARY_SENT
+    ((PING_SUMMARY_RECEIVED > received)) && received=$PING_SUMMARY_RECEIVED
+    loss=$(awk -v sent="$sent" -v recv="$received" 'BEGIN{printf "%.1f", (sent>0 ? ((sent-recv)/sent)*100 : 100)}')
+    PROBE_SENT=$sent
+    PROBE_RECEIVED=$received
+    PROBE_LOSS=$loss
+    if ((sent == 0)); then PROBE_RESULT_RC=10
+    elif ((received == 0)); then PROBE_RESULT_RC=4
+    elif ((received < sent)); then PROBE_RESULT_RC=3
+    else PROBE_RESULT_RC=0
+    fi
+
+    echo -e "\n${GREY}--- Stats for $IP ---${NC}"
+    if awk -v value="$loss" 'BEGIN{exit !(value>0)}'; then
+        printf 'Packets : %d sent, %d recv | Loss: %b%.1f%%%b\n' "$sent" "$received" "$RED" "$loss" "$NC"
+    else
+        printf 'Packets : %d sent, %d recv | Loss: 0%%\n' "$sent" "$received"
+    fi
+    if ((raw_received > 0)); then
+        printf 'Latency : Min/Avg/Max = %.2f / %.2f / %.2f ms\n' "$min" "$avg" "$max"
+        printf 'Jitter  : %.2f ms\n' "$jitter"
+    fi
+    STATS_RENDERED=true
+}
+
+cleanup_runtime() {
+    local rc=$?
+    trap - EXIT HUP INT TERM
+    stop_probe_children
+    show_cursor
+    if [[ "$INTERRUPTED" == true ]]; then
+        render_stats
+    fi
+    [[ -n "$RUNTIME_DIR" && -d "$RUNTIME_DIR" ]] && rm -rf -- "$RUNTIME_DIR"
+    exit "$rc"
+}
+
+probe_signal() {
+    INTERRUPTED=true
+    case "$1" in
+        HUP) exit 129 ;;
+        INT) exit 130 ;;
+        TERM) exit 143 ;;
+    esac
+}
+
+wait_for_metadata() {
+    local attempt
+    [[ -n "$META_PID" ]] || return 0
+    for attempt in {1..10}; do
+        kill -0 "$META_PID" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$META_PID" 2>/dev/null; then
+        kill -TERM "$META_PID" 2>/dev/null || true
+    fi
+    wait "$META_PID" 2>/dev/null || true
+    META_PID=""
+}
+
+trace_route_if_needed() {
+    if [[ "$AUTO_TRACE" != true ]] && ! awk -v loss="$PROBE_LOSS" 'BEGIN{exit !(loss>0 && loss<100)}'; then
+        return 0
+    fi
+    if ! command -v traceroute >/dev/null 2>&1; then
+        echo -e "${YELLOW}Routing path unavailable: traceroute is not installed.${NC}" >&2
+        return 5
+    fi
+    echo -e "${GREY}Routing path...${NC}"
+    traceroute -m 15 -q 1 -w 1 "$IP" 2>/dev/null | awk -v gr="\033[0;90m" -v nc="\033[0m" -v bl="\033[0;34m" -v re="\033[0;31m" '
+        NR>1 { hop=$1; if($2=="*") printf "  %s%2s%s | %s* Timeout%s\n", gr,hop,nc,re,nc; else printf "  %s%2s%s | %s%-35s%s %s %s\n", gr,hop,nc,bl,$2" "$3,nc,$4,$5; }'
+}
+
+offer_ssh_handoff() {
+    local metadata=() sysname platform ssh_ready tty_fd="" key=""
+    [[ -f "$META_FILE" ]] || return 0
+    mapfile -t metadata < "$META_FILE"
+    sysname="${metadata[0]:-}"
+    platform="${metadata[1]:-Unknown}"
+    ssh_ready="${metadata[2]:-false}"
+    [[ "$ssh_ready" == true && ! "$platform" =~ -AP ]] || return 0
+    if { exec {tty_fd}<>/dev/tty; } 2>/dev/null; then
+        echo -ne "\n${GREEN}SSH is open on ${sysname:-$IP}.${NC} Press ${CYAN}[C]${NC} within 5s to connect, or any other key to finish: "
+        read -t 5 -n 1 -s key <&"$tty_fd" || true
+        exec {tty_fd}>&-
+    elif [[ -t 0 ]]; then
+        echo -ne "\n${GREEN}SSH is open on ${sysname:-$IP}.${NC} Press ${CYAN}[C]${NC} within 5s to connect, or any other key to finish: "
+        read -t 5 -n 1 -s key || true
+    else
+        return 0
+    fi
+    echo
+    [[ "$key" =~ [cC] ]]
+}
+
+trap cleanup_runtime EXIT
+trap 'probe_signal HUP' HUP
+trap 'probe_signal INT' INT
+trap 'probe_signal TERM' TERM
+
+if [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && tput civis 2>/dev/null; then
+    CURSOR_HIDDEN=true
+fi
+
+# Header prints instantly
+HEADER="\033[0;36m▶ Target:\033[0m $IP"
+[[ -n "$TCP_PORT" ]] && HEADER+=" | \033[0;90mTCP:$TCP_PORT\033[0m" || HEADER+=" | \033[0;90mICMP\033[0m"
+echo -e "$HEADER\n"
+
+seq_num=1
+MAX_VAL=50
+
+draw_bar() {
+    local val=${1%.*} max=${2%.*} width=35 filled bar
+    [[ "$val" =~ ^[0-9]+$ ]] || val=0; [[ "$max" =~ ^[0-9]+$ ]] || max=100; [ "$max" -eq 0 ] && max=100
+    filled=$(( (val * width) / max )); [ "$filled" -gt "$width" ] && filled=$width
+    if [ "$filled" -eq 0 ] && [ "$val" -gt 0 ]; then filled=1; fi
+    if [ "$filled" -gt 0 ]; then
+        printf -v bar '%*s' "$filled" ''
+        printf '%s' "${bar// /█}"
+    fi
+}
+
+if [ -n "$TCP_PORT" ]; then
+    while [ "$PING_COUNT" == "-1" ] || [ "$seq_num" -le "$PING_COUNT" ]; do
+        ts_str=""; [ "$SHOW_TIME" = true ] && ts_str="\033[0;90m[$(date '+%H:%M:%S')]\033[0m "
+        ms=$(perl -MIO::Socket::INET -MTime::HiRes=time -e '$start=time; $s=IO::Socket::INET->new(PeerAddr=>$ARGV[0],PeerPort=>$ARGV[1],Timeout=>1); if($s){printf "%.1f",(time-$start)*1000;exit 0} print "$!"; exit 1' "$IP" "$TCP_PORT" 2>/dev/null)
+        res=$?
+        if [ $res -eq 0 ]; then
+            printf '%s %s\n' "$seq_num" "$ms" >> "$TMP_DATA"
+            ms_int=${ms%.*}; [[ -z "$ms_int" ]] && ms_int=0; [ "$ms_int" -gt "$MAX_VAL" ] && MAX_VAL=$ms_int
+            bar=$(draw_bar "$ms_int" "$((MAX_VAL + 20))"); col="\033[0;32m"; [ "$ms_int" -gt 50 ] && col="\033[1;33m"; [ "$ms_int" -gt 150 ] && col="\033[0;31m"
+            printf "%b\033[0;90mseq=%-5s\033[0m %b%6s ms\033[0m %s\n" "$ts_str" "$seq_num" "$col" "$ms" "$bar"
+        else
+            printf '%s TIMEOUT\n' "$seq_num" >> "$TMP_DATA"; [ "$BEEP" = true ] && echo -ne "\a" >&2
+            if [[ "${ms,,}" =~ timed[[:space:]]out ]]; then tcp_state="TIMEOUT"; else tcp_state="CLOSED"; fi
+            printf "%b\033[0;90mseq=%-5s\033[0m \033[0;31m%-8s ✗\033[0m\n" "$ts_str" "$seq_num" "$tcp_state"
+        fi
+        ((seq_num++))
+        if [[ "$PING_COUNT" == "-1" || "$seq_num" -le "$PING_COUNT" ]]; then sleep 1; fi
+    done
+else
+    cmd=(ping)
+    [[ "$OSTYPE" == "linux-gnu"* ]] && cmd+=(-O)
+    [ "$PING_COUNT" != "-1" ] && cmd+=(-c "$PING_COUNT")
+
+    mkfifo "$PING_FIFO" || { echo "Error: failed to create ping pipe" >&2; exit 1; }
+    "${cmd[@]}" "$IP" > "$PING_FIFO" 2>&1 &
+    PING_PID=$!
+
+    while read -r line; do
+        ts_str=""; [ "$SHOW_TIME" = true ] && ts_str="\033[0;90m[$(date '+%H:%M:%S')]\033[0m "
+        if [[ "$line" =~ time[=\<]([0-9.]+) ]]; then
+            ms="${BASH_REMATCH[1]}"
+            if [[ "$line" =~ icmp_seq=([0-9]+) ]]; then seq="${BASH_REMATCH[1]}"; else seq="$seq_num"; fi
+            printf '%s %s\n' "$seq" "$ms" >> "$TMP_DATA"
+            ms_int=${ms%.*}; [[ -z "$ms_int" ]] && ms_int=0; [ "$ms_int" -gt "$MAX_VAL" ] && MAX_VAL=$ms_int
+            bar=$(draw_bar "$ms_int" "$((MAX_VAL + 20))"); col="\033[0;32m"; [ "$ms_int" -gt 50 ] && col="\033[1;33m"; [ "$ms_int" -gt 150 ] && col="\033[0;31m"
+            printf "%b\033[0;90mseq=%-5s\033[0m %b%6s ms\033[0m %s\n" "$ts_str" "$seq" "$col" "$ms" "$bar"
+            ((seq >= seq_num)) && seq_num=$((seq + 1))
+        elif [[ "${line,,}" =~ no[[:space:]]answer|timeout ]]; then
+            if [[ "$line" =~ icmp_seq=([0-9]+) ]]; then seq="${BASH_REMATCH[1]}"; else seq="$seq_num"; fi
+            printf '%s TIMEOUT\n' "$seq" >> "$TMP_DATA"; [ "$BEEP" = true ] && echo -ne "\a" >&2
+            printf "%b\033[0;90mseq=%-5s\033[0m \033[0;31mTIMEOUT  ✗\033[0m\n" "$ts_str" "$seq"
+            ((seq >= seq_num)) && seq_num=$((seq + 1))
+        elif [[ "$line" =~ ([0-9]+)[[:space:]]packets[[:space:]]transmitted,[[:space:]]+([0-9]+)[[:space:]]+(packets[[:space:]]+)?received ]]; then
+            PING_SUMMARY_SENT="${BASH_REMATCH[1]}"
+            PING_SUMMARY_RECEIVED="${BASH_REMATCH[2]}"
+        elif [[ -n "$line" && "${line,,}" =~ (operation[[:space:]]not[[:space:]]permitted|permission[[:space:]]denied|unknown[[:space:]]host|name[[:space:]]or[[:space:]]service[[:space:]]not[[:space:]]known|not[[:space:]]found) ]]; then
+            printf '%s\n' "$line" >> "$PING_ERROR_FILE"
+        fi
+    done < "$PING_FIFO"
+    wait "$PING_PID" 2>/dev/null
+    PING_COMMAND_RC=$?
+    PING_PID=""
+fi
+
+wait_for_metadata
+show_cursor
+render_stats
+if ((PING_COMMAND_RC > 1)) && ((PROBE_SENT == 0)); then
+    PROBE_RESULT_RC=5
+    if [[ -s "$PING_ERROR_FILE" ]]; then
+        echo "Error: ping could not run: $(tr '\n' ' ' < "$PING_ERROR_FILE" | sed 's/[[:space:]]\+/ /g; s/ $//')" >&2
+    else
+        echo "Error: ping exited with status $PING_COMMAND_RC before producing samples." >&2
+    fi
+fi
+trace_route_if_needed || true
+
+if ((PROBE_RECEIVED > 0)) && offer_ssh_handoff; then
+    trap - EXIT HUP INT TERM
+    stop_probe_children
+    show_cursor
+    rm -rf -- "$RUNTIME_DIR"
+    exec "$(dirname "$(realpath "$0")")/netops-connect" "$IP"
+    echo "Error: could not start netops-connect" >&2
+    exit 5
+fi
+
+exit "$PROBE_RESULT_RC"

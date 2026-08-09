@@ -1,0 +1,26 @@
+schema_version = 1
+
+[channel]
+name = "json-devices"
+kind = "json"
+enabled = true
+entity_kind = "device"
+source_id_field = "id"
+observed_at_field = "observed_at"
+
+[reader]
+path = "../data/devices.json"
+records_path = "devices"
+completeness = "partial"
+confidence = 90
+
+[fields]
+ip = "management.ip"
+hostname = "name"
+platform = "platform"
+model = "model"
+status = "status"
+
+[provenance]
+owner = "network-operations"
+source_system = "asset-export"

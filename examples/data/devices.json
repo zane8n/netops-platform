@@ -1,0 +1,13 @@
+{
+  "devices": [
+    {
+      "id": "switch-001",
+      "name": "SITE-A-ACCESS-01",
+      "management": {"ip": "192.0.2.11"},
+      "platform": "Cisco IOS-XE 17.9",
+      "model": "C9300",
+      "status": "ONLINE",
+      "observed_at": "2026-01-15T09:30:00Z"
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+schema_version = 1
+
+[channel]
+name = "netbox-devices"
+kind = "netbox"
+enabled = false
+entity_kind = "device"
+source_id_field = "id"
+observed_at_field = "last_updated"
+
+[reader]
+url = "https://netbox.example/api/dcim/devices/"
+timeout_seconds = 20
+rate_limit_attempts = 3
+max_pages = 100
+tls_verify = true
+completeness = "full"
+confidence = 98
+
+[fields]
+hostname = "name"
+platform = "platform.name"
+model = "device_type.model"
+serial = "serial"
+status = "status.value"
+ip = "primary_ip4.address"
+
+[secrets]
+token = "vault:ingest/netbox/token"
+
+[provenance]
+owner = "network-source-of-truth"
+source_system = "netbox"

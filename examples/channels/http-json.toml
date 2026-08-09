@@ -1,0 +1,34 @@
+schema_version = 1
+
+[channel]
+name = "https-devices"
+kind = "http-json"
+enabled = false
+entity_kind = "device"
+source_id_field = "id"
+observed_at_field = "observed_at"
+
+[reader]
+url = "https://inventory.example/api/v1/devices"
+records_path = "items"
+next_path = "pagination.next"
+timeout_seconds = 20
+rate_limit_attempts = 2
+max_pages = 100
+tls_verify = true
+completeness = "partial"
+confidence = 90
+
+[fields]
+ip = "management_ip"
+hostname = "name"
+platform = "platform"
+model = "model"
+status = "status"
+
+[secrets]
+token = "vault:ingest/inventory/token"
+
+[provenance]
+owner = "network-operations"
+source_system = "inventory-api"

@@ -1,0 +1,2873 @@
+#!/usr/bin/env bash
+# NetOps Unified CLI Router and local platform shim
+
+INSTALL_DIR=$(dirname "$(realpath "$0")")
+if [[ -r "${INSTALL_DIR}/VERSION" ]]; then
+    VERSION=$(<"${INSTALL_DIR}/VERSION")
+elif command -v netops >/dev/null 2>&1; then
+    VERSION=$(netops --version 2>/dev/null | awk 'NR==1 {print $2}')
+    [[ -n "$VERSION" ]] || VERSION="unknown"
+else
+    VERSION="unknown"
+fi
+
+netops_paths() {
+    if [[ -n "${NETOPS_CONFIG_DIR:-}" ]]; then
+        CONFIG_DIR="$NETOPS_CONFIG_DIR"
+    elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        CONFIG_DIR="/etc/netsnmp"
+    else
+        CONFIG_DIR="${HOME}/.config/netsnmp"
+    fi
+    if [[ -n "${NETOPS_CACHE_DIR:-}" ]]; then
+        CACHE_DIR="$NETOPS_CACHE_DIR"
+    elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        CACHE_DIR="/var/cache/netsnmp"
+    else
+        CACHE_DIR="${HOME}/.cache/netsnmp"
+    fi
+    CONFIG_FILE="${CONFIG_DIR}/netsnmp.conf"
+    ENV_FILE="${CONFIG_DIR}/.env"
+    DEVICES_DB="${CACHE_DIR}/devices.db"
+    AP_DB="${CACHE_DIR}/ap_devices.db"
+    NEIGHBOR_DB="${CACHE_DIR}/neighbor.db"
+    SQLITE_DB="${NETOPS_SQLITE_DB:-${CACHE_DIR}/netops.sqlite3}"
+}
+
+show_help() {
+    cat << EOF_HELP
+NetOps Unified Platform v${VERSION}
+Usage: netops <command> [options]
+
+Commands:
+  discover    Network discovery, AP mapping, topology, and CRUD DB management
+  discovery   Alias for discover
+  connect     Interactive smart SSH login to devices
+  control     Autonomous SSH C&C (configs, backups, VLANs, show, lookups)
+  probe       Ping, latency, routing, and reliable multi-server speed tests
+  db          SQLite state bridge (init, import, export, status, path)
+  serve       Localhost NetOps cockpit API and WebUI
+  check       Filtering/security path diagnostics
+  interface   Interface utilization monitor
+  health      Health state, events, and attention queue
+  commands    List unified command registry
+  run         Run or preview a registered command
+  workflow    Run multi-step operational workflows
+  topology    Topology change history
+  history     Inventory history and identity change archive
+  archive     Alias for history
+  memory      Background memory and attachment knowledge module
+  ask         Deterministic questions over inventory and memory
+
+Options:
+  -h, --help  Show this help menu
+  --wizard    Run the configuration wizard
+
+Examples:
+  netops probe 192.0.2.1 -t -b
+  netops probe -s
+  netops discover admin-sw --detail
+  netops discover --offline
+  netops db import
+  netops db status --json
+  netops serve --port 8787
+  netops memory aps-on ZONE10-SW-01
+  netops ask "APs that are down in ZONE10"
+EOF_HELP
+}
+
+sql_quote() {
+    local s="${1:-}"
+    s=${s//\'/\'\'}
+    printf "'%s'" "$s"
+}
+
+sql_int() {
+    local n="${1:-0}"
+    [[ "$n" =~ ^[0-9]+$ ]] && printf '%s' "$n" || printf '0'
+}
+
+netops_db_schema() {
+    cat <<'SQL_SCHEMA'
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+CREATE TABLE IF NOT EXISTS devices (
+    ip TEXT PRIMARY KEY,
+    hostname TEXT,
+    platform TEXT,
+    model TEXT,
+    serial TEXT,
+    mac TEXT,
+    source TEXT,
+    last_seen INTEGER,
+    status TEXT
+);
+CREATE TABLE IF NOT EXISTS aps (
+    ip TEXT PRIMARY KEY,
+    name TEXT,
+    platform TEXT,
+    switch_ip TEXT,
+    switch_name TEXT,
+    switch_port TEXT,
+    mac TEXT,
+    last_seen INTEGER,
+    status TEXT
+);
+CREATE TABLE IF NOT EXISTS neighbors (
+    local_ip TEXT,
+    local_name TEXT,
+    local_port TEXT,
+    remote_name TEXT,
+    remote_port TEXT,
+    remote_ip TEXT,
+    PRIMARY KEY (local_ip, local_port, remote_name, remote_port)
+);
+CREATE TABLE IF NOT EXISTS probe_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target TEXT,
+    mode TEXT,
+    created_at INTEGER NOT NULL,
+    packet_loss_pct REAL,
+    min_ms REAL,
+    avg_ms REAL,
+    max_ms REAL,
+    jitter_ms REAL,
+    raw_json TEXT
+);
+CREATE TABLE IF NOT EXISTS speed_tests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at INTEGER NOT NULL,
+    interface TEXT,
+    download_mbps REAL,
+    upload_mbps REAL,
+    idle_latency_ms REAL,
+    loaded_down_ms REAL,
+    loaded_up_ms REAL,
+    packet_loss_pct REAL,
+    reliability TEXT,
+    raw_json TEXT
+);
+CREATE TABLE IF NOT EXISTS interface_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at INTEGER NOT NULL,
+    device_ip TEXT,
+    interface_name TEXT,
+    in_bps INTEGER,
+    out_bps INTEGER,
+    utilization_pct REAL,
+    oper_status TEXT,
+    raw_json TEXT
+);
+CREATE TABLE IF NOT EXISTS filtering_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at INTEGER NOT NULL,
+    target TEXT,
+    result TEXT,
+    raw_json TEXT
+);
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    action TEXT NOT NULL,
+    command TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    exit_code INTEGER,
+    read_only INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS job_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    stream TEXT NOT NULL,
+    line TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS command_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    command TEXT NOT NULL,
+    exit_code INTEGER,
+    read_only INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status);
+CREATE INDEX IF NOT EXISTS idx_aps_status ON aps(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_job_logs_job ON job_logs(job_id, id);
+CREATE INDEX IF NOT EXISTS idx_probe_results_created ON probe_results(created_at);
+CREATE INDEX IF NOT EXISTS idx_speed_tests_created ON speed_tests(created_at);
+CREATE INDEX IF NOT EXISTS idx_interface_samples_created ON interface_samples(created_at);
+CREATE INDEX IF NOT EXISTS idx_filtering_checks_created ON filtering_checks(created_at);
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO schema_meta(key,value,updated_at) VALUES('schema_version','2',strftime('%s','now'));
+CREATE TABLE IF NOT EXISTS health_state (
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    name TEXT,
+    platform TEXT,
+    serial TEXT,
+    status TEXT,
+    first_seen INTEGER,
+    last_seen INTEGER,
+    last_failed INTEGER,
+    outage_started_at INTEGER,
+    flap_count INTEGER NOT NULL DEFAULT 0,
+    switch_ip TEXT,
+    switch_port TEXT,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(entity_type, entity_id)
+);
+CREATE TABLE IF NOT EXISTS health_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at INTEGER NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    previous_value TEXT,
+    current_value TEXT,
+    detail TEXT
+);
+CREATE TABLE IF NOT EXISTS topology_snapshot (
+    local_ip TEXT,
+    local_port TEXT,
+    remote_name TEXT,
+    remote_port TEXT,
+    remote_ip TEXT,
+    PRIMARY KEY(local_ip, local_port, remote_name, remote_port)
+);
+CREATE TABLE IF NOT EXISTS topology_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    local_ip TEXT,
+    local_port TEXT,
+    remote_name TEXT,
+    remote_port TEXT,
+    remote_ip TEXT,
+    detail TEXT
+);
+CREATE TABLE IF NOT EXISTS ap_move_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at INTEGER NOT NULL,
+    ap_ip TEXT NOT NULL,
+    ap_name TEXT,
+    previous_switch_ip TEXT,
+    previous_switch_port TEXT,
+    current_switch_ip TEXT,
+    current_switch_port TEXT
+);
+CREATE TABLE IF NOT EXISTS snmp_cache (
+    device_ip TEXT PRIMARY KEY,
+    community_hint TEXT,
+    version TEXT,
+    last_success INTEGER,
+    failure_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS backup_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at INTEGER NOT NULL,
+    device_ip TEXT NOT NULL,
+    hostname TEXT,
+    path TEXT,
+    sha256 TEXT,
+    changed INTEGER NOT NULL DEFAULT 1,
+    size_bytes INTEGER,
+    status TEXT NOT NULL,
+    message TEXT
+);
+CREATE TABLE IF NOT EXISTS inventory_identity_state (
+    identity_kind TEXT NOT NULL,
+    identity_value TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    ip TEXT,
+    mac TEXT,
+    name TEXT,
+    platform TEXT,
+    model TEXT,
+    serial TEXT,
+    switch_ip TEXT,
+    switch_name TEXT,
+    switch_port TEXT,
+    source TEXT,
+    status TEXT,
+    first_seen INTEGER,
+    last_seen INTEGER,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(identity_kind, identity_value, entity_type)
+);
+CREATE TABLE IF NOT EXISTS inventory_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at INTEGER NOT NULL,
+    entity_type TEXT NOT NULL,
+    identity_kind TEXT NOT NULL,
+    identity_value TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    field_name TEXT,
+    previous_value TEXT,
+    current_value TEXT,
+    ip TEXT,
+    mac TEXT,
+    name TEXT,
+    switch_ip TEXT,
+    switch_name TEXT,
+    switch_port TEXT,
+    platform TEXT,
+    model TEXT,
+    serial TEXT,
+    source TEXT,
+    status TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_health_state_status ON health_state(status);
+CREATE INDEX IF NOT EXISTS idx_health_events_entity ON health_events(entity_type, entity_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_topology_events_created ON topology_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_ap_move_events_created ON ap_move_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_backup_history_device ON backup_history(device_ip, created_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_history_identity ON inventory_history(identity_kind, identity_value, entity_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_history_ip ON inventory_history(ip, created_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_history_mac ON inventory_history(mac, created_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_history_field ON inventory_history(field_name, created_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_identity_updated ON inventory_identity_state(updated_at);
+SQL_SCHEMA
+}
+
+netops_db_init() {
+    netops_paths
+    mkdir -p "$CACHE_DIR"
+    netops_db_schema | sqlite3 "$SQLITE_DB" >/dev/null
+}
+
+netops_db_import() {
+    netops_paths
+    netops_db_init
+    touch "$DEVICES_DB" "$AP_DB" "$NEIGHBOR_DB"
+    local tmp
+    tmp=$(mktemp /tmp/netops-db-import.XXXXXX.sql)
+    {
+        echo "BEGIN;"
+        echo "DELETE FROM devices;"
+        while IFS='|' read -r ip host plat model serial mac source ts status _; do
+            [[ -z "${ip:-}" ]] && continue
+            printf "INSERT OR REPLACE INTO devices VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s);\n" \
+                "$(sql_quote "$ip")" "$(sql_quote "$host")" "$(sql_quote "$plat")" \
+                "$(sql_quote "$model")" "$(sql_quote "$serial")" "$(sql_quote "$mac")" \
+                "$(sql_quote "$source")" "$(sql_int "$ts")" "$(sql_quote "${status:-UNKNOWN}")"
+        done < "$DEVICES_DB"
+        echo "DELETE FROM aps;"
+        while IFS='|' read -r ip name plat sw_ip sw_name sw_port mac ts status _; do
+            [[ -z "${ip:-}" ]] && continue
+            printf "INSERT OR REPLACE INTO aps VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s);\n" \
+                "$(sql_quote "$ip")" "$(sql_quote "$name")" "$(sql_quote "$plat")" \
+                "$(sql_quote "$sw_ip")" "$(sql_quote "$sw_name")" "$(sql_quote "$sw_port")" \
+                "$(sql_quote "$mac")" "$(sql_int "$ts")" "$(sql_quote "${status:-UNKNOWN}")"
+        done < "$AP_DB"
+        if [[ -s "$NEIGHBOR_DB" ]]; then
+            echo "DELETE FROM neighbors;"
+            while IFS='|' read -r local_ip local_name local_port remote_name remote_port remote_ip _; do
+                [[ -z "${local_ip:-}" ]] && continue
+                printf "INSERT OR REPLACE INTO neighbors VALUES(%s,%s,%s,%s,%s,%s);\n" \
+                    "$(sql_quote "$local_ip")" "$(sql_quote "$local_name")" "$(sql_quote "$local_port")" \
+                    "$(sql_quote "$remote_name")" "$(sql_quote "$remote_port")" "$(sql_quote "$remote_ip")"
+            done < "$NEIGHBOR_DB"
+        fi
+        echo "COMMIT;"
+    } > "$tmp"
+    sqlite3 "$SQLITE_DB" < "$tmp"
+    rm -f "$tmp"
+    netops_inventory_history_sync >/dev/null 2>&1 || true
+    netops_health_sync >/dev/null 2>&1 || true
+    netops_topology_sync >/dev/null 2>&1 || true
+}
+
+netops_db_export() {
+    netops_paths
+    netops_db_init
+    sqlite3 -separator '|' "$SQLITE_DB" "SELECT ip,hostname,platform,model,serial,mac,source,last_seen,status FROM devices ORDER BY ip;" > "$DEVICES_DB"
+    sqlite3 -separator '|' "$SQLITE_DB" "SELECT ip,name,platform,switch_ip,switch_name,switch_port,mac,last_seen,status FROM aps ORDER BY ip;" > "$AP_DB"
+    sqlite3 -separator '|' "$SQLITE_DB" "SELECT local_ip,local_name,local_port,remote_name,remote_port,remote_ip FROM neighbors ORDER BY local_ip,local_port;" > "$NEIGHBOR_DB"
+}
+
+netops_db_count() {
+    sqlite3 "$SQLITE_DB" "SELECT COUNT(*) FROM $1;" 2>/dev/null || echo 0
+}
+
+netops_sql_json() {
+    sqlite3 -json "$SQLITE_DB" "$1" 2>/dev/null || printf '[]'
+}
+
+netops_db_migrate() {
+    netops_db_init
+    netops_inventory_history_sync >/dev/null 2>&1 || true
+    netops_health_sync >/dev/null 2>&1 || true
+    netops_topology_sync >/dev/null 2>&1 || true
+    sqlite3 "$SQLITE_DB" "INSERT OR REPLACE INTO schema_meta(key,value,updated_at) VALUES('schema_version','3',strftime('%s','now'));" >/dev/null
+    echo "SQLite migrations applied: $SQLITE_DB"
+}
+
+netops_db_repair() {
+    netops_paths
+    mkdir -p "$CACHE_DIR"
+    touch "$DEVICES_DB" "$AP_DB" "$NEIGHBOR_DB"
+    netops_db_migrate >/dev/null
+    netops_db_import
+    local check
+    check=$(sqlite3 "$SQLITE_DB" "PRAGMA integrity_check;" 2>/dev/null || echo "failed")
+    if [[ "$check" == "ok" ]]; then
+        echo "SQLite repair complete: $SQLITE_DB"
+    else
+        echo "SQLite integrity check failed: $check" >&2
+        return 1
+    fi
+}
+
+netops_inventory_history_sync() {
+    netops_paths
+    netops_db_init
+    local now
+    now=$(date +%s)
+    sqlite3 "$SQLITE_DB" <<SQL_INVENTORY_HISTORY
+BEGIN;
+DROP TABLE IF EXISTS temp.current_inventory;
+CREATE TEMP TABLE current_inventory AS
+    SELECT 'device' AS entity_type,
+           ip,
+           NULLIF(NULLIF(hostname,''),'N/A') AS name,
+           NULLIF(NULLIF(mac,''),'N/A') AS mac,
+           platform,
+           model,
+           serial,
+           NULL AS switch_ip,
+           NULL AS switch_name,
+           NULL AS switch_port,
+           source,
+           COALESCE(NULLIF(status,''),'UNKNOWN') AS status,
+           COALESCE(last_seen, $now) AS source_seen
+      FROM devices
+     WHERE COALESCE(ip,'') <> ''
+    UNION ALL
+    SELECT 'ap' AS entity_type,
+           ip,
+           NULLIF(NULLIF(name,''),'N/A') AS name,
+           NULLIF(NULLIF(mac,''),'N/A') AS mac,
+           platform,
+           NULL AS model,
+           NULL AS serial,
+           switch_ip,
+           switch_name,
+           switch_port,
+           'AP' AS source,
+           COALESCE(NULLIF(status,''),'UNKNOWN') AS status,
+           COALESCE(last_seen, $now) AS source_seen
+      FROM aps
+     WHERE COALESCE(ip,'') <> '';
+DROP TABLE IF EXISTS temp.current_identity_raw;
+CREATE TEMP TABLE current_identity_raw AS
+    SELECT 'ip' AS identity_kind,
+           ip AS identity_value,
+           entity_type, ip, mac, name, platform, model, serial,
+           switch_ip, switch_name, switch_port, source, status, source_seen
+      FROM current_inventory
+     WHERE COALESCE(ip,'') <> ''
+    UNION ALL
+    SELECT 'mac' AS identity_kind,
+           lower(replace(replace(replace(mac,':',''),'-',''),'.','')) AS identity_value,
+           entity_type, ip, mac, name, platform, model, serial,
+           switch_ip, switch_name, switch_port, source, status, source_seen
+      FROM current_inventory
+     WHERE COALESCE(mac,'') <> ''
+       AND upper(mac) NOT IN ('N/A','UNKNOWN','NULL','00:00:00:00:00:00')
+       AND length(lower(replace(replace(replace(mac,':',''),'-',''),'.',''))) >= 8
+    UNION ALL
+    SELECT 'name' AS identity_kind,
+           lower(name) AS identity_value,
+           entity_type, ip, mac, name, platform, model, serial,
+           switch_ip, switch_name, switch_port, source, status, source_seen
+      FROM current_inventory
+     WHERE COALESCE(name,'') <> '';
+DROP TABLE IF EXISTS temp.current_identity;
+CREATE TEMP TABLE current_identity AS
+    SELECT r.*
+      FROM current_identity_raw r
+     WHERE r.rowid = (
+           SELECT r2.rowid
+             FROM current_identity_raw r2
+            WHERE r2.identity_kind=r.identity_kind
+              AND r2.identity_value=r.identity_value
+              AND r2.entity_type=r.entity_type
+            ORDER BY COALESCE(r2.source_seen,0) DESC, r2.rowid DESC
+            LIMIT 1
+     );
+INSERT INTO inventory_history(created_at,entity_type,identity_kind,identity_value,event_type,field_name,previous_value,current_value,ip,mac,name,switch_ip,switch_name,switch_port,platform,model,serial,source,status)
+SELECT $now, c.entity_type, c.identity_kind, c.identity_value, 'first_seen', NULL, NULL,
+       COALESCE(c.name,'') || '|' || COALESCE(c.ip,'') || '|' || COALESCE(c.mac,'') || '|' || COALESCE(c.switch_name,'') || '|' || COALESCE(c.switch_port,''),
+       c.ip, c.mac, c.name, c.switch_ip, c.switch_name, c.switch_port, c.platform, c.model, c.serial, c.source, c.status
+  FROM current_identity c
+  LEFT JOIN inventory_identity_state s
+    ON s.identity_kind=c.identity_kind AND s.identity_value=c.identity_value AND s.entity_type=c.entity_type
+ WHERE s.identity_value IS NULL;
+INSERT INTO inventory_history(created_at,entity_type,identity_kind,identity_value,event_type,field_name,previous_value,current_value,ip,mac,name,switch_ip,switch_name,switch_port,platform,model,serial,source,status)
+SELECT $now, c.entity_type, c.identity_kind, c.identity_value, 'field_changed', 'ip', s.ip, c.ip, c.ip, c.mac, c.name, c.switch_ip, c.switch_name, c.switch_port, c.platform, c.model, c.serial, c.source, c.status
+  FROM current_identity c JOIN inventory_identity_state s ON s.identity_kind=c.identity_kind AND s.identity_value=c.identity_value AND s.entity_type=c.entity_type
+ WHERE COALESCE(s.ip,'') <> COALESCE(c.ip,'')
+UNION ALL
+SELECT $now, c.entity_type, c.identity_kind, c.identity_value, 'field_changed', 'mac', s.mac, c.mac, c.ip, c.mac, c.name, c.switch_ip, c.switch_name, c.switch_port, c.platform, c.model, c.serial, c.source, c.status
+  FROM current_identity c JOIN inventory_identity_state s ON s.identity_kind=c.identity_kind AND s.identity_value=c.identity_value AND s.entity_type=c.entity_type
+ WHERE COALESCE(s.mac,'') <> COALESCE(c.mac,'')
+UNION ALL
+SELECT $now, c.entity_type, c.identity_kind, c.identity_value, 'field_changed', 'name', s.name, c.name, c.ip, c.mac, c.name, c.switch_ip, c.switch_name, c.switch_port, c.platform, c.model, c.serial, c.source, c.status
+  FROM current_identity c JOIN inventory_identity_state s ON s.identity_kind=c.identity_kind AND s.identity_value=c.identity_value AND s.entity_type=c.entity_type
+ WHERE COALESCE(s.name,'') <> COALESCE(c.name,'')
+UNION ALL
+SELECT $now, c.entity_type, c.identity_kind, c.identity_value, 'field_changed', 'platform', s.platform, c.platform, c.ip, c.mac, c.name, c.switch_ip, c.switch_name, c.switch_port, c.platform, c.model, c.serial, c.source, c.status
+  FROM current_identity c JOIN inventory_identity_state s ON s.identity_kind=c.identity_kind AND s.identity_value=c.identity_value AND s.entity_type=c.entity_type
+ WHERE COALESCE(s.platform,'') <> COALESCE(c.platform,'')
+UNION ALL
+SELECT $now, c.entity_type, c.identity_kind, c.identity_value, 'field_changed', 'model', s.model, c.model, c.ip, c.mac, c.name, c.switch_ip, c.switch_name, c.switch_port, c.platform, c.model, c.serial, c.source, c.status
+  FROM current_identity c JOIN inventory_identity_state s ON s.identity_kind=c.identity_kind AND s.identity_value=c.identity_value AND s.entity_type=c.entity_type
+ WHERE COALESCE(s.model,'') <> COALESCE(c.model,'')
+UNION ALL
+SELECT $now, c.entity_type, c.identity_kind, c.identity_value, 'field_changed', 'serial', s.serial, c.serial, c.ip, c.mac, c.name, c.switch_ip, c.switch_name, c.switch_port, c.platform, c.model, c.serial, c.source, c.status
+  FROM current_identity c JOIN inventory_identity_state s ON s.identity_kind=c.identity_kind AND s.identity_value=c.identity_value AND s.entity_type=c.entity_type
+ WHERE COALESCE(s.serial,'') <> COALESCE(c.serial,'')
+UNION ALL
+SELECT $now, c.entity_type, c.identity_kind, c.identity_value, 'field_changed', 'switch_ip', s.switch_ip, c.switch_ip, c.ip, c.mac, c.name, c.switch_ip, c.switch_name, c.switch_port, c.platform, c.model, c.serial, c.source, c.status
+  FROM current_identity c JOIN inventory_identity_state s ON s.identity_kind=c.identity_kind AND s.identity_value=c.identity_value AND s.entity_type=c.entity_type
+ WHERE COALESCE(s.switch_ip,'') <> COALESCE(c.switch_ip,'')
+UNION ALL
+SELECT $now, c.entity_type, c.identity_kind, c.identity_value, 'field_changed', 'switch_name', s.switch_name, c.switch_name, c.ip, c.mac, c.name, c.switch_ip, c.switch_name, c.switch_port, c.platform, c.model, c.serial, c.source, c.status
+  FROM current_identity c JOIN inventory_identity_state s ON s.identity_kind=c.identity_kind AND s.identity_value=c.identity_value AND s.entity_type=c.entity_type
+ WHERE COALESCE(s.switch_name,'') <> COALESCE(c.switch_name,'')
+UNION ALL
+SELECT $now, c.entity_type, c.identity_kind, c.identity_value, 'field_changed', 'switch_port', s.switch_port, c.switch_port, c.ip, c.mac, c.name, c.switch_ip, c.switch_name, c.switch_port, c.platform, c.model, c.serial, c.source, c.status
+  FROM current_identity c JOIN inventory_identity_state s ON s.identity_kind=c.identity_kind AND s.identity_value=c.identity_value AND s.entity_type=c.entity_type
+ WHERE COALESCE(s.switch_port,'') <> COALESCE(c.switch_port,'')
+UNION ALL
+SELECT $now, c.entity_type, c.identity_kind, c.identity_value, 'field_changed', 'source', s.source, c.source, c.ip, c.mac, c.name, c.switch_ip, c.switch_name, c.switch_port, c.platform, c.model, c.serial, c.source, c.status
+  FROM current_identity c JOIN inventory_identity_state s ON s.identity_kind=c.identity_kind AND s.identity_value=c.identity_value AND s.entity_type=c.entity_type
+ WHERE COALESCE(s.source,'') <> COALESCE(c.source,'')
+UNION ALL
+SELECT $now, c.entity_type, c.identity_kind, c.identity_value, 'field_changed', 'status', s.status, c.status, c.ip, c.mac, c.name, c.switch_ip, c.switch_name, c.switch_port, c.platform, c.model, c.serial, c.source, c.status
+  FROM current_identity c JOIN inventory_identity_state s ON s.identity_kind=c.identity_kind AND s.identity_value=c.identity_value AND s.entity_type=c.entity_type
+ WHERE COALESCE(s.status,'') <> COALESCE(c.status,'');
+INSERT OR REPLACE INTO inventory_identity_state(identity_kind,identity_value,entity_type,ip,mac,name,platform,model,serial,switch_ip,switch_name,switch_port,source,status,first_seen,last_seen,updated_at)
+SELECT c.identity_kind, c.identity_value, c.entity_type, c.ip, c.mac, c.name, c.platform, c.model, c.serial,
+       c.switch_ip, c.switch_name, c.switch_port, c.source, c.status,
+       COALESCE(s.first_seen, c.source_seen, $now),
+       COALESCE(c.source_seen, $now),
+       $now
+  FROM current_identity c
+  LEFT JOIN inventory_identity_state s
+    ON s.identity_kind=c.identity_kind AND s.identity_value=c.identity_value AND s.entity_type=c.entity_type;
+COMMIT;
+SQL_INVENTORY_HISTORY
+}
+
+netops_health_sync() {
+    netops_paths
+    netops_db_init
+    local now
+    now=$(date +%s)
+    sqlite3 "$SQLITE_DB" <<SQL_HEALTH
+BEGIN;
+DROP TABLE IF EXISTS temp.current_health;
+CREATE TEMP TABLE current_health AS
+    SELECT 'device' AS entity_type, ip AS entity_id, hostname AS name, platform, serial, status,
+           COALESCE(last_seen, $now) AS source_seen, NULL AS switch_ip, NULL AS switch_port
+      FROM devices
+    UNION ALL
+    SELECT 'ap' AS entity_type, ip AS entity_id, name, platform, NULL AS serial, status,
+           COALESCE(last_seen, $now) AS source_seen, switch_ip, switch_port
+      FROM aps;
+INSERT INTO health_events(created_at,entity_type,entity_id,event_type,previous_value,current_value,detail)
+SELECT $now, c.entity_type, c.entity_id, 'status_change', h.status, c.status, c.name
+  FROM current_health c JOIN health_state h ON h.entity_type=c.entity_type AND h.entity_id=c.entity_id
+ WHERE COALESCE(h.status,'') <> COALESCE(c.status,'');
+INSERT INTO health_events(created_at,entity_type,entity_id,event_type,previous_value,current_value,detail)
+SELECT $now, c.entity_type, c.entity_id, 'identity_change', COALESCE(h.platform,'') || '|' || COALESCE(h.serial,''), COALESCE(c.platform,'') || '|' || COALESCE(c.serial,''), c.name
+  FROM current_health c JOIN health_state h ON h.entity_type=c.entity_type AND h.entity_id=c.entity_id
+ WHERE c.entity_type='device'
+   AND (COALESCE(h.platform,'') <> COALESCE(c.platform,'') OR COALESCE(h.serial,'') <> COALESCE(c.serial,''))
+   AND (COALESCE(h.platform,'') <> '' OR COALESCE(h.serial,'') <> '');
+INSERT INTO ap_move_events(created_at,ap_ip,ap_name,previous_switch_ip,previous_switch_port,current_switch_ip,current_switch_port)
+SELECT $now, c.entity_id, c.name, h.switch_ip, h.switch_port, c.switch_ip, c.switch_port
+  FROM current_health c JOIN health_state h ON h.entity_type='ap' AND h.entity_id=c.entity_id
+ WHERE c.entity_type='ap'
+   AND (COALESCE(h.switch_ip,'') <> COALESCE(c.switch_ip,'') OR COALESCE(h.switch_port,'') <> COALESCE(c.switch_port,''))
+   AND (COALESCE(h.switch_ip,'') <> '' OR COALESCE(h.switch_port,'') <> '');
+INSERT INTO health_events(created_at,entity_type,entity_id,event_type,previous_value,current_value,detail)
+SELECT $now, 'ap', c.entity_id, 'ap_moved', COALESCE(h.switch_ip,'') || '/' || COALESCE(h.switch_port,''), COALESCE(c.switch_ip,'') || '/' || COALESCE(c.switch_port,''), c.name
+  FROM current_health c JOIN health_state h ON h.entity_type='ap' AND h.entity_id=c.entity_id
+ WHERE c.entity_type='ap'
+   AND (COALESCE(h.switch_ip,'') <> COALESCE(c.switch_ip,'') OR COALESCE(h.switch_port,'') <> COALESCE(c.switch_port,''))
+   AND (COALESCE(h.switch_ip,'') <> '' OR COALESCE(h.switch_port,'') <> '');
+INSERT OR REPLACE INTO health_state(entity_type,entity_id,name,platform,serial,status,first_seen,last_seen,last_failed,outage_started_at,flap_count,switch_ip,switch_port,updated_at)
+SELECT c.entity_type, c.entity_id, c.name, c.platform, c.serial, c.status,
+       COALESCE(h.first_seen, c.source_seen, $now),
+       CASE WHEN c.status='ONLINE' THEN COALESCE(c.source_seen, $now) ELSE h.last_seen END,
+       CASE WHEN c.status='OFFLINE' THEN $now ELSE h.last_failed END,
+       CASE WHEN c.status='OFFLINE' THEN COALESCE(h.outage_started_at, $now) ELSE NULL END,
+       COALESCE(h.flap_count,0) + CASE WHEN h.status IS NOT NULL AND COALESCE(h.status,'') <> COALESCE(c.status,'') THEN 1 ELSE 0 END,
+       c.switch_ip, c.switch_port, $now
+  FROM current_health c LEFT JOIN health_state h ON h.entity_type=c.entity_type AND h.entity_id=c.entity_id;
+COMMIT;
+SQL_HEALTH
+}
+
+netops_topology_sync() {
+    netops_paths
+    netops_db_init
+    local now
+    now=$(date +%s)
+    sqlite3 "$SQLITE_DB" <<SQL_TOPO
+BEGIN;
+INSERT INTO topology_events(created_at,event_type,local_ip,local_port,remote_name,remote_port,remote_ip,detail)
+SELECT $now, 'link_added', n.local_ip, n.local_port, n.remote_name, n.remote_port, n.remote_ip, 'new neighbor link'
+  FROM neighbors n LEFT JOIN topology_snapshot s
+    ON s.local_ip=n.local_ip AND s.local_port=n.local_port AND s.remote_name=n.remote_name AND s.remote_port=n.remote_port
+ WHERE s.local_ip IS NULL;
+INSERT INTO topology_events(created_at,event_type,local_ip,local_port,remote_name,remote_port,remote_ip,detail)
+SELECT $now, 'link_removed', s.local_ip, s.local_port, s.remote_name, s.remote_port, s.remote_ip, 'missing from latest neighbor discovery'
+  FROM topology_snapshot s LEFT JOIN neighbors n
+    ON s.local_ip=n.local_ip AND s.local_port=n.local_port AND s.remote_name=n.remote_name AND s.remote_port=n.remote_port
+ WHERE n.local_ip IS NULL;
+DELETE FROM topology_snapshot;
+INSERT OR REPLACE INTO topology_snapshot(local_ip,local_port,remote_name,remote_port,remote_ip)
+SELECT local_ip,local_port,remote_name,remote_port,remote_ip FROM neighbors;
+COMMIT;
+SQL_TOPO
+}
+
+netops_health_json() {
+    netops_db_import >/dev/null 2>&1 || netops_db_init
+    local state events attention
+    state=$(netops_sql_json "SELECT entity_type,entity_id,name,platform,status,first_seen,last_seen,last_failed,outage_started_at,flap_count,switch_ip,switch_port,updated_at FROM health_state ORDER BY status, entity_type, name LIMIT 500")
+    events=$(netops_sql_json "SELECT id,created_at,entity_type,entity_id,event_type,previous_value,current_value,detail FROM health_events ORDER BY created_at DESC,id DESC LIMIT 80")
+    attention=$(netops_sql_json "SELECT entity_type,entity_id,name,platform,status,last_seen,last_failed,outage_started_at,flap_count,switch_ip,switch_port FROM health_state WHERE status='OFFLINE' OR flap_count>=3 OR (last_seen IS NOT NULL AND last_seen < strftime('%s','now') - 86400) ORDER BY status,flap_count DESC,last_seen LIMIT 100")
+    jq -n --argjson state "${state:-[]}" --argjson events "${events:-[]}" --argjson attention "${attention:-[]}" \
+        '{state:$state,events:$events,attention:$attention}'
+}
+
+netops_health() {
+    local cmd="${1:-summary}"
+    case "$cmd" in
+        --json|json) netops_health_json ;;
+        attention)
+            if [[ "${2:-}" == "--json" ]]; then
+                netops_health_json | jq '.attention'
+            else
+                netops_health_json | jq -r '.attention[]? | "\(.entity_type)\t\(.entity_id)\t\(.name // "N/A")\t\(.status)\tflaps=\(.flap_count)"'
+            fi
+            ;;
+        summary|"")
+            netops_health_json | jq -r '"Attention: \(.attention|length)", "Recent events: \(.events|length)", "Tracked entities: \(.state|length)"'
+            ;;
+        *) echo "Usage: netops health [--json|attention [--json]]" >&2; return 6 ;;
+    esac
+}
+
+netops_check_usage() {
+    cat <<'EOF_CHECK'
+NetOps Filtering/Security Path Diagnostics
+Usage:
+  netops check [--json] [--timeout SECONDS] [TARGET]
+
+Examples:
+  netops check
+  netops check google.com
+  netops check --json google.com
+EOF_CHECK
+}
+
+netops_check_dns() {
+    local domain="$1" server="${2:-}"
+    if command -v dig >/dev/null 2>&1; then
+        if [[ -n "$server" ]]; then
+            dig +short "$domain" @"$server" +time=2 +tries=1 2>/dev/null | grep -v '^;' | tail -n1
+        else
+            dig +short "$domain" +time=2 +tries=1 2>/dev/null | grep -v '^;' | tail -n1
+        fi
+    else
+        getent hosts "$domain" 2>/dev/null | awk '{print $1; exit}'
+    fi
+}
+
+netops_check_port() {
+    local host="$1" port="$2" proto="${3:-tcp}" timeout_val="${NETOPS_CHECK_TIMEOUT:-4}"
+    if command -v nc >/dev/null 2>&1; then
+        if [[ "$proto" == "udp" ]]; then
+            nc -zuw "$timeout_val" "$host" "$port" 2>/dev/null
+        else
+            nc -zw "$timeout_val" "$host" "$port" 2>/dev/null
+        fi
+    elif [[ "$proto" == "tcp" ]]; then
+        timeout "$timeout_val" bash -c '</dev/tcp/"$0"/"$1"' "$host" "$port" >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
+
+netops_check_private_ip() {
+    [[ "${1:-}" =~ ^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.) ]]
+}
+
+netops_check_ssl_issuer_raw() {
+    local site="$1" timeout_val="${NETOPS_CHECK_TIMEOUT:-4}"
+    timeout "$timeout_val" bash -c 'echo | openssl s_client -connect "${0}:443" -servername "$0" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null' "$site" || true
+}
+
+netops_check_issuer_status() {
+    local issuer="$1"
+    if [[ "$issuer" =~ (Fortinet|Zscaler|Sophos|Cisco|Palo|CheckPoint|BlueCoat|Forcepoint|Kaspersky|Bitdefender|Netskope) ]]; then
+        echo known_intercepting_proxy
+    elif [[ -n "$issuer" && "$issuer" != *"Google Trust Services"* && "$issuer" != *"DigiCert"* && "$issuer" != *"GlobalSign"* && "$issuer" != *"Microsoft"* && "$issuer" != *"Amazon"* && "$issuer" != *"Let's Encrypt"* ]]; then
+        echo unusual_issuer
+    elif [[ -n "$issuer" ]]; then
+        echo present
+    else
+        echo unavailable
+    fi
+}
+
+netops_check_site_text() {
+    local domain="$1" label="${2:-$1}" ip
+    printf "  %-20s (%-18s): " "$label" "$domain"
+    ip=$(netops_check_dns "$domain")
+    if [[ -z "$ip" ]]; then
+        echo "DNS BLOCKED"
+    elif curl --connect-timeout "${NETOPS_CHECK_TIMEOUT:-4}" -sI "https://$domain" >/dev/null 2>&1; then
+        echo "ACCESSIBLE"
+    elif ! netops_check_port "$domain" 443 tcp; then
+        echo "CONNECTION BLOCKED (Port 443)"
+    else
+        echo "SSL/DPI INTERFERENCE"
+    fi
+}
+
+netops_check_json() {
+    local target="${1:-google.com}" started sys_res pub_res port443 https_ok issuer issuer_status dot_open quic_open nx_domain nx_res block_page=false
+    started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    sys_res=$(netops_check_dns "$target")
+    pub_res=$(netops_check_dns "$target" "1.1.1.1")
+    if netops_check_port "$target" 443 tcp; then port443=true; else port443=false; fi
+    if curl --connect-timeout "${NETOPS_CHECK_TIMEOUT:-4}" -sI "https://$target" >/dev/null 2>&1; then https_ok=true; else https_ok=false; fi
+    issuer=$(netops_check_ssl_issuer_raw "$target")
+    issuer_status=$(netops_check_issuer_status "$issuer")
+    if netops_check_port "1.1.1.1" 853 tcp; then dot_open=true; else dot_open=false; fi
+    if netops_check_port "8.8.8.8" 443 udp; then quic_open=true; else quic_open=false; fi
+    nx_domain="this.does.not.exist.$(date +%s).example.com"
+    nx_res=$(netops_check_dns "$nx_domain")
+    jq -n \
+        --arg timestamp "$started" --arg target "$target" --arg system_dns "$sys_res" --arg public_dns "$pub_res" \
+        --arg nxdomain_probe "$nx_domain" --arg nxdomain_result "$nx_res" --arg issuer "$issuer" --arg issuer_status "$issuer_status" \
+        --argjson port443 "$port443" --argjson https_accessible "$https_ok" --argjson dot_open "$dot_open" --argjson quic_open "$quic_open" --argjson block_page "$block_page" \
+        '{timestamp:$timestamp,target:$target,dns:{system:$system_dns,public:$public_dns,mismatch:(($system_dns != "") and ($public_dns != "") and ($system_dns != $public_dns)),nxdomain_probe:$nxdomain_probe,nxdomain_result:$nxdomain_result,nxdomain_hijack:($nxdomain_result != "")},connectivity:{tcp_443:$port443,https_accessible:$https_accessible,dns_over_tls_853:$dot_open,quic_udp_443:$quic_open},ssl:{issuer:$issuer,issuer_status:$issuer_status},http:{block_page_detected:$block_page}}'
+}
+
+netops_check_text() {
+    local target="${1:-}" sys_res pub_res nx_domain nx_res issuer issuer_status mitm_found=0
+    echo "=================================================="
+    echo "   NetOps Filtering/Security Path Diagnostics"
+    echo "=================================================="
+    echo ""
+    if [[ -n "$target" ]]; then
+        echo "Targeted check for: $target"
+        echo ""
+        echo "[1/3] DNS Resolution"
+        sys_res=$(netops_check_dns "$target")
+        pub_res=$(netops_check_dns "$target" "1.1.1.1")
+        if [[ -z "$sys_res" ]]; then
+            echo "  System DNS failed to resolve $target"
+        elif [[ "$sys_res" != "$pub_res" && -n "$pub_res" ]]; then
+            echo "  DNS mismatch: system=$sys_res public=$pub_res"
+        else
+            echo "  DNS resolution seems standard: $sys_res"
+        fi
+        echo ""
+        echo "[2/3] Connectivity"
+        netops_check_site_text "$target" "Custom Target"
+        echo ""
+        echo "[3/3] SSL/MITM"
+        issuer=$(netops_check_ssl_issuer_raw "$target")
+        issuer_status=$(netops_check_issuer_status "$issuer")
+        echo "  Issuer status: $issuer_status"
+        [[ -n "$issuer" ]] && echo "  $issuer"
+    else
+        echo "[1/5] DNS Integrity"
+        sys_res=$(netops_check_dns google.com)
+        pub_res=$(netops_check_dns google.com 1.1.1.1)
+        if [[ -z "$sys_res" ]]; then echo "  System DNS failed to resolve google.com"; elif [[ "$sys_res" != "$pub_res" && -n "$pub_res" ]]; then echo "  DNS mismatch: system=$sys_res public=$pub_res"; else echo "  DNS resolution matches public standards."; fi
+        nx_domain="this.does.not.exist.$(date +%s).example.com"
+        nx_res=$(netops_check_dns "$nx_domain")
+        if [[ -n "$nx_res" ]]; then echo "  NXDOMAIN hijack possible: $nx_domain -> $nx_res"; else echo "  No NXDOMAIN hijacking detected."; fi
+        if netops_check_port 8.8.4.4 53 udp; then echo "  Outbound DNS UDP/53 is open."; else echo "  Outbound DNS UDP/53 is blocked or intercepted."; fi
+        if netops_check_port 1.1.1.1 853 tcp; then echo "  DNS-over-TLS 853 is accessible."; else echo "  DNS-over-TLS 853 is blocked."; fi
+        echo ""
+        echo "[2/5] Category Filtering"
+        netops_check_site_text torproject.org "Privacy/Tor"
+        netops_check_site_text nordvpn.com "VPN Services"
+        netops_check_site_text kali.org "Security"
+        netops_check_site_text tiktok.com "Social Media"
+        netops_check_site_text thepiratebay.org "File Sharing"
+        echo ""
+        echo "[3/5] SSL Interception"
+        for site in google.com microsoft.com amazon.com; do
+            issuer=$(netops_check_ssl_issuer_raw "$site")
+            issuer_status=$(netops_check_issuer_status "$issuer")
+            echo "  $site: $issuer_status"
+            [[ "$issuer_status" == "known_intercepting_proxy" || "$issuer_status" == "unusual_issuer" ]] && mitm_found=1
+        done
+        [[ "$mitm_found" -eq 0 ]] && echo "  No obvious SSL interception detected for major sites."
+        echo ""
+        echo "[4/5] Protocol Blocking"
+        if netops_check_port 8.8.8.8 443 udp; then echo "  QUIC UDP/443 seems open."; else echo "  QUIC UDP/443 might be blocked."; fi
+        echo ""
+        echo "[5/5] Block Page Probe"
+        if curl --connect-timeout "${NETOPS_CHECK_TIMEOUT:-4}" -sL http://thepiratebay.org | head -c 1000 | grep -Eiq 'Access Denied|Filtered|Policy|Blocked|Restricted|Firewall|Administrator|Security'; then
+            echo "  Active block page pattern detected."
+        else
+            echo "  No clear HTTP block page detected."
+        fi
+    fi
+    echo ""
+    echo "Check complete."
+}
+
+netops_check() {
+    local json=false target="" timeout_val="4"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --timeout) timeout_val="${2:-4}"; shift 2 ;;
+            -h|--help) netops_check_usage; return 0 ;;
+            *) target="$1"; shift ;;
+        esac
+    done
+    [[ "$timeout_val" =~ ^[0-9]+$ && "$timeout_val" -gt 0 && "$timeout_val" -le 30 ]] || timeout_val=4
+    NETOPS_CHECK_TIMEOUT="$timeout_val"
+    export NETOPS_CHECK_TIMEOUT
+    if [[ "$json" == true ]]; then
+        netops_check_json "${target:-google.com}"
+    else
+        netops_check_text "$target"
+    fi
+}
+
+netops_history_usage() {
+    cat <<'EOF_HISTORY'
+NetOps Inventory History Archive
+Usage:
+  netops history <IP|MAC|NAME|recent> [--limit N] [--json]
+  netops history prune --days N
+
+Examples:
+  netops history 198.51.100.25
+  netops history 02:00:00:00:00:25
+  netops history ZONE10-AP-01
+  netops history recent --limit 30
+  netops history prune --days 365
+EOF_HISTORY
+}
+
+netops_normalize_mac_key() {
+    printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d ':.-'
+}
+
+netops_history_json() {
+    local target="${1:-recent}" limit="${2:-80}" where sql target_lc target_like mac_key mac_q ip_q
+    [[ "$limit" =~ ^[0-9]+$ ]] || limit=80
+    (( limit < 1 )) && limit=1
+    (( limit > 1000 )) && limit=1000
+
+    netops_db_import >/dev/null 2>&1 || netops_db_init
+
+    if [[ -z "$target" || "$target" == "recent" || "$target" == "all" ]]; then
+        where="1=1"
+    elif [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        ip_q=$(sql_quote "$target")
+        where="((identity_kind='ip' AND identity_value=$ip_q) OR ip=$ip_q)"
+    else
+        mac_key=$(netops_normalize_mac_key "$target")
+        if [[ "$mac_key" =~ ^[0-9a-f]{8,16}$ ]]; then
+            mac_q=$(sql_quote "$mac_key")
+            where="((identity_kind='mac' AND identity_value=$mac_q) OR lower(replace(replace(replace(COALESCE(mac,''),':',''),'-',''),'.',''))=$mac_q OR (field_name='mac' AND (lower(replace(replace(replace(COALESCE(previous_value,''),':',''),'-',''),'.',''))=$mac_q OR lower(replace(replace(replace(COALESCE(current_value,''),':',''),'-',''),'.',''))=$mac_q)))"
+        else
+            target_lc="${target,,}"
+            target_like=$(sql_quote "%$target_lc%")
+            where="(lower(COALESCE(identity_value,'')) LIKE $target_like OR lower(COALESCE(name,'')) LIKE $target_like OR lower(COALESCE(previous_value,'')) LIKE $target_like OR lower(COALESCE(current_value,'')) LIKE $target_like OR lower(COALESCE(switch_name,'')) LIKE $target_like)"
+        fi
+    fi
+
+    sql="SELECT id,created_at,entity_type,identity_kind,identity_value,event_type,field_name,previous_value,current_value,ip,mac,name,switch_ip,switch_name,switch_port,platform,model,serial,source,status FROM inventory_history WHERE $where ORDER BY created_at DESC,id DESC LIMIT $limit;"
+    netops_sql_json "$sql"
+}
+
+netops_history_print() {
+    local target="${1:-recent}" limit="${2:-80}" rows
+    rows=$(netops_history_json "$target" "$limit")
+    if [[ "$(jq 'length' <<< "$rows" 2>/dev/null || echo 0)" == "0" ]]; then
+        echo "No inventory history found for: ${target:-recent}"
+        return 0
+    fi
+    jq -r '.[] | [
+        (.created_at | tonumber | strftime("%Y-%m-%d %H:%M:%S")),
+        .entity_type,
+        (.identity_kind + ":" + .identity_value),
+        .event_type,
+        (.field_name // "-"),
+        ((.previous_value // "") + " -> " + (.current_value // "")),
+        ("ip=" + (.ip // "")),
+        ("mac=" + (.mac // "")),
+        ("name=" + (.name // "")),
+        ("switch=" + (.switch_name // "") + "/" + (.switch_port // ""))
+    ] | @tsv' <<< "$rows" | awk -F '\t' '
+        BEGIN { printf "%-19s %-6s %-28s %-13s %-12s %-38s %s\n", "TIME", "TYPE", "IDENTITY", "EVENT", "FIELD", "CHANGE", "CONTEXT"; print "------------------------------------------------------------------------------------------------------------------------------------------------" }
+        { printf "%-19s %-6s %-28.28s %-13s %-12s %-38.38s %s %s %s %s\n", $1, $2, $3, $4, $5, $6, $7, $8, $9, $10 }
+    '
+}
+
+netops_history() {
+    local target="recent" limit="80" json=false days=""
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then netops_history_usage; return 0; fi
+    if [[ "${1:-}" == "prune" ]]; then
+        shift || true
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --days) days="${2:-}"; shift 2 ;;
+                *) echo "Unknown history prune option: $1" >&2; netops_history_usage >&2; return 6 ;;
+            esac
+        done
+        [[ "$days" =~ ^[0-9]+$ ]] || { echo "Usage: netops history prune --days N" >&2; return 6; }
+        netops_db_init
+        sqlite3 "$SQLITE_DB" "DELETE FROM inventory_history WHERE created_at < strftime('%s','now') - ($days * 86400);" >/dev/null
+        echo "Pruned inventory history older than $days day(s)."
+        return 0
+    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --limit) limit="${2:-80}"; shift 2 ;;
+            recent|all) target="$1"; shift ;;
+            *) target="$1"; shift ;;
+        esac
+    done
+    if [[ "$json" == true ]]; then
+        netops_history_json "$target" "$limit"
+    else
+        netops_history_print "$target" "$limit"
+    fi
+}
+
+netops_memory_usage() {
+    cat <<'EOF_MEMORY'
+NetOps Memory Module
+Usage:
+  netops memory switch <SWITCH> [--json] [--limit N] [--history] [--verify-core]
+  netops memory aps-on <SWITCH> [--json] [--verify-core]
+  netops memory connected <SWITCH> [--json]
+  netops memory core <IP|MAC>
+  netops memory refresh
+  netops memory recent [--limit N]
+  netops memory suggestions
+
+Examples:
+  netops memory switch ZONE10-SW-01
+  netops memory aps-on 198.51.100.10 --json
+  netops memory switch ZONE10-SW-01 --history
+  netops memory switch ZONE10-SW-01 --verify-core --verify-limit 3
+
+Notes:
+  Memory queries combine SQLite inventory, AP discovery, LLDP/CDP topology,
+  inventory history, and optional live core-lookup verification.
+EOF_MEMORY
+}
+
+netops_memory_switch_sql_prefix() {
+    local target="$1" target_q target_lc_q target_like_q
+    target_q=$(sql_quote "$target")
+    target_lc_q=$(sql_quote "${target,,}")
+    target_like_q=$(sql_quote "%${target,,}%")
+    cat <<SQL_PREFIX
+WITH matched_switches AS (
+    SELECT ip,
+           hostname,
+           CASE WHEN instr(hostname,'.') > 0 THEN substr(hostname,1,instr(hostname,'.')-1) ELSE hostname END AS short_name,
+           platform,
+           status,
+           last_seen,
+           CASE
+             WHEN ip = $target_q THEN 0
+             WHEN lower(hostname) = $target_lc_q THEN 1
+             WHEN lower(CASE WHEN instr(hostname,'.') > 0 THEN substr(hostname,1,instr(hostname,'.')-1) ELSE hostname END) = $target_lc_q THEN 2
+             ELSE 3
+           END AS rank
+      FROM devices
+     WHERE ip = $target_q
+        OR lower(hostname) = $target_lc_q
+        OR lower(CASE WHEN instr(hostname,'.') > 0 THEN substr(hostname,1,instr(hostname,'.')-1) ELSE hostname END) = $target_lc_q
+        OR lower(hostname) LIKE $target_like_q
+),
+sw AS (
+    SELECT ip, hostname, short_name, platform, status, last_seen, rank FROM matched_switches
+    UNION ALL
+    SELECT NULL AS ip, $target_q AS hostname, $target_q AS short_name, NULL AS platform, NULL AS status, NULL AS last_seen, 99 AS rank
+     WHERE NOT EXISTS (SELECT 1 FROM matched_switches)
+)
+SQL_PREFIX
+}
+
+netops_memory_switches_json() {
+    local target="$1" sql_prefix limit="${2:-20}"
+    sql_prefix=$(netops_memory_switch_sql_prefix "$target")
+    netops_sql_json "$sql_prefix
+SELECT ip,hostname,short_name,platform,status,last_seen,rank
+  FROM sw
+ ORDER BY rank, hostname
+ LIMIT $limit;"
+}
+
+netops_memory_aps_json() {
+    local target="$1" limit="${2:-200}" sql_prefix target_like_q
+    sql_prefix=$(netops_memory_switch_sql_prefix "$target")
+    target_like_q=$(sql_quote "%${target,,}%")
+    netops_sql_json "$sql_prefix
+SELECT DISTINCT
+       'ap' AS kind,
+       a.ip,
+       a.name,
+       a.platform,
+       a.mac,
+       a.switch_ip,
+       a.switch_name,
+       a.switch_port,
+       a.status,
+       a.last_seen,
+       'ap_inventory' AS source,
+       CASE
+         WHEN sw.ip IS NOT NULL AND a.switch_ip = sw.ip THEN 100
+         WHEN lower(COALESCE(a.switch_name,'')) = lower(COALESCE(sw.hostname,'')) THEN 95
+         WHEN lower(COALESCE(a.switch_name,'')) = lower(COALESCE(sw.short_name,'')) THEN 92
+         WHEN lower(COALESCE(a.switch_name,'')) LIKE '%' || lower(COALESCE(sw.short_name,'')) || '%' THEN 82
+         WHEN lower(COALESCE(a.switch_name,'')) LIKE $target_like_q THEN 76
+         ELSE 65
+       END AS confidence
+  FROM aps a
+  JOIN sw ON (
+        (sw.ip IS NOT NULL AND a.switch_ip = sw.ip)
+     OR lower(COALESCE(a.switch_name,'')) = lower(COALESCE(sw.hostname,''))
+     OR lower(COALESCE(a.switch_name,'')) = lower(COALESCE(sw.short_name,''))
+     OR lower(COALESCE(a.switch_name,'')) LIKE '%' || lower(COALESCE(sw.short_name,'')) || '%'
+     OR lower(COALESCE(a.switch_name,'')) LIKE $target_like_q
+  )
+ ORDER BY a.status, a.switch_port, a.name, a.ip
+ LIMIT $limit;"
+}
+
+netops_memory_neighbors_json() {
+    local target="$1" limit="${2:-200}" sql_prefix target_like_q
+    sql_prefix=$(netops_memory_switch_sql_prefix "$target")
+    target_like_q=$(sql_quote "%${target,,}%")
+    netops_sql_json "$sql_prefix
+SELECT DISTINCT
+       'neighbor' AS kind,
+       n.remote_name AS name,
+       n.remote_ip AS ip,
+       d.platform AS platform,
+       d.mac AS mac,
+       n.local_ip AS switch_ip,
+       n.local_name AS switch_name,
+       n.local_port AS switch_port,
+       n.remote_port AS remote_port,
+       COALESCE(d.status,'UNKNOWN') AS status,
+       d.last_seen AS last_seen,
+       'topology' AS source,
+       CASE
+         WHEN sw.ip IS NOT NULL AND n.local_ip = sw.ip THEN 100
+         WHEN lower(COALESCE(n.local_name,'')) = lower(COALESCE(sw.hostname,'')) THEN 94
+         WHEN lower(COALESCE(n.local_name,'')) = lower(COALESCE(sw.short_name,'')) THEN 90
+         WHEN lower(COALESCE(n.local_name,'')) LIKE $target_like_q THEN 74
+         ELSE 60
+       END AS confidence
+  FROM neighbors n
+  JOIN sw ON (
+        (sw.ip IS NOT NULL AND n.local_ip = sw.ip)
+     OR lower(COALESCE(n.local_name,'')) = lower(COALESCE(sw.hostname,''))
+     OR lower(COALESCE(n.local_name,'')) = lower(COALESCE(sw.short_name,''))
+     OR lower(COALESCE(n.local_name,'')) LIKE '%' || lower(COALESCE(sw.short_name,'')) || '%'
+     OR lower(COALESCE(n.local_name,'')) LIKE $target_like_q
+  )
+  LEFT JOIN devices d ON d.ip = n.remote_ip
+ ORDER BY n.local_port, n.remote_name
+ LIMIT $limit;"
+}
+
+netops_memory_history_json() {
+    local target="$1" limit="${2:-80}" sql_prefix target_like_q
+    sql_prefix=$(netops_memory_switch_sql_prefix "$target")
+    target_like_q=$(sql_quote "%${target,,}%")
+    netops_sql_json "$sql_prefix
+SELECT DISTINCT h.id,h.created_at,h.entity_type,h.identity_kind,h.identity_value,h.event_type,h.field_name,
+       h.previous_value,h.current_value,h.ip,h.mac,h.name,h.switch_ip,h.switch_name,h.switch_port,h.platform,h.source,h.status
+  FROM inventory_history h
+  JOIN sw ON (
+        (sw.ip IS NOT NULL AND h.switch_ip = sw.ip)
+     OR lower(COALESCE(h.switch_name,'')) = lower(COALESCE(sw.hostname,''))
+     OR lower(COALESCE(h.switch_name,'')) = lower(COALESCE(sw.short_name,''))
+     OR lower(COALESCE(h.switch_name,'')) LIKE '%' || lower(COALESCE(sw.short_name,'')) || '%'
+     OR lower(COALESCE(h.previous_value,'')) LIKE $target_like_q
+     OR lower(COALESCE(h.current_value,'')) LIKE $target_like_q
+  )
+ WHERE h.entity_type IN ('ap','device')
+   AND (h.field_name IN ('switch_ip','switch_name','switch_port','ip','mac','name') OR h.event_type='first_seen')
+ ORDER BY h.created_at DESC,h.id DESC
+ LIMIT $limit;"
+}
+
+netops_memory_switch_json() {
+    local target="$1" limit="${2:-200}" history_limit="${3:-80}" include_history="${4:-false}"
+    [[ -n "$target" ]] || { jq -n '{ok:false,error:"missing switch target"}'; return 2; }
+    [[ "$limit" =~ ^[0-9]+$ ]] || limit=200
+    [[ "$history_limit" =~ ^[0-9]+$ ]] || history_limit=80
+    netops_db_import >/dev/null 2>&1 || netops_db_init
+    local switches aps neighbors history
+    switches=$(netops_memory_switches_json "$target" 20)
+    aps=$(netops_memory_aps_json "$target" "$limit")
+    neighbors=$(netops_memory_neighbors_json "$target" "$limit")
+    if [[ "$include_history" == "true" ]]; then
+        history=$(netops_memory_history_json "$target" "$history_limit")
+    else
+        history='[]'
+    fi
+    jq -n --arg target "$target" --argjson switches "${switches:-[]}" --argjson aps "${aps:-[]}" --argjson neighbors "${neighbors:-[]}" --argjson history "${history:-[]}" \
+        '{ok:true,module:"memory",target:$target,switches:$switches,attachments:{aps:$aps,neighbors:$neighbors},history:$history,counts:{switches:($switches|length),aps:($aps|length),neighbors:($neighbors|length),history:($history|length)},sources:["ap_inventory","topology","inventory_history","core_lookup_on_demand"]}'
+}
+
+netops_memory_switch_print() {
+    local payload="$1"
+    jq -r '
+      "Memory: switch attachments for " + .target,
+      "Switch matches: " + (.counts.switches|tostring) + " | APs: " + (.counts.aps|tostring) + " | Neighbors: " + (.counts.neighbors|tostring) + " | History: " + (.counts.history|tostring),
+      "Sources: AP inventory + LLDP/CDP topology + inventory history; use --verify-core for live core lookup.",
+      "",
+      "Switches:",
+      (if (.switches|length)==0 then "  none" else (.switches[] | "  " + ((.hostname // .short_name // .ip // "unknown")|tostring) + "\t" + ((.ip // "")|tostring) + "\t" + ((.status // "")|tostring)) end),
+      "",
+      "APs on switch:",
+      (if (.attachments.aps|length)==0 then "  none" else (.attachments.aps[] | "  " + ((.switch_port // "?")|tostring) + "\t" + ((.name // "?")|tostring) + "\t" + ((.ip // "")|tostring) + "\t" + ((.mac // "")|tostring) + "\t" + ((.status // "")|tostring) + "\tconf=" + ((.confidence // 0)|tostring)) end),
+      "",
+      "Topology neighbors:",
+      (if (.attachments.neighbors|length)==0 then "  none" else (.attachments.neighbors[] | "  " + ((.switch_port // "?")|tostring) + " -> " + ((.name // "?")|tostring) + "\t" + ((.ip // "")|tostring) + "\tremote=" + ((.remote_port // "")|tostring) + "\tconf=" + ((.confidence // 0)|tostring)) end),
+      (if (.history|length)>0 then "\nRecent movement/history:" else empty end),
+      (if (.history|length)>0 then (.history[] | "  " + ((.field_name // .event_type // "event")|tostring) + "\t" + ((.name // .identity_value // "")|tostring) + "\t" + ((.previous_value // "")|tostring) + " -> " + ((.current_value // "")|tostring)) else empty end)
+    ' <<< "$payload"
+}
+
+netops_memory_verify_core() {
+    local payload="$1" limit="${2:-4}" target value count=0
+    [[ "$limit" =~ ^[0-9]+$ ]] || limit=4
+    (( limit < 1 )) && limit=1
+    echo ""
+    echo "Core lookup verification (limited to $limit attachment(s))"
+    jq -r '.attachments.aps[]? | if ((.mac // "") != "" and (.mac // "") != "N/A") then .mac else .ip end | select(. != null and . != "" and . != "N/A")' <<< "$payload" | while IFS= read -r target; do
+        count=$((count + 1))
+        [[ "$count" -gt "$limit" ]] && break
+        echo ""
+        echo "--- core-lookup $target ---"
+        "$INSTALL_DIR/netops-control" core-lookup "$target" || true
+    done
+}
+
+netops_memory_suggestions() {
+    cat <<'EOF_SUGGEST'
+Useful memory-module additions to consider next:
+  1. Conflict detection: flag APs whose controller switch differs from LLDP/CDP switch.
+  2. Confidence scoring: classify each attachment as confirmed, probable, stale, or conflicting.
+  3. Port occupancy timeline: show what lived on a switch port over time.
+  4. MAC aging memory: keep last-known switch/port for disconnected clients and APs.
+  5. Site/location inference: infer location from switch hostname and AP naming conventions.
+  6. Drift alerts: notify when APs move unexpectedly or a switch gains/loses AP count.
+  7. Core lookup cache: store explicit core-lookup results with retention so live SSH is not repeated.
+EOF_SUGGEST
+}
+
+netops_memory() {
+    local cmd="${1:-}"; shift || true
+    case "$cmd" in
+        -h|--help|help|"") netops_memory_usage ;;
+        refresh)
+            netops_db_import
+            echo "Memory refreshed from current flat-file caches and SQLite derived state."
+            ;;
+        recent)
+            netops_history recent "$@"
+            ;;
+        suggestions|ideas)
+            netops_memory_suggestions
+            ;;
+        core|verify|core-lookup)
+            [[ -n "${1:-}" ]] || { echo "Usage: netops memory core <IP|MAC>" >&2; return 6; }
+            "$INSTALL_DIR/netops-control" core-lookup "$1"
+            ;;
+        switch|connected|attachments|aps-on|aps)
+            local target="" json=false include_history=false verify_core=false limit=200 history_limit=80 verify_limit=4 payload
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json) json=true; shift ;;
+                    --history) include_history=true; shift ;;
+                    --verify-core|--core-lookup) verify_core=true; shift ;;
+                    --limit) limit="${2:-200}"; shift 2 ;;
+                    --history-limit) history_limit="${2:-80}"; shift 2 ;;
+                    --verify-limit) verify_limit="${2:-4}"; shift 2 ;;
+                    *) [[ -z "$target" ]] && target="$1"; shift ;;
+                esac
+            done
+            [[ -n "$target" ]] || { echo "Usage: netops memory $cmd <SWITCH>" >&2; return 6; }
+            payload=$(netops_memory_switch_json "$target" "$limit" "$history_limit" "$include_history") || return $?
+            if [[ "$json" == true ]]; then
+                echo "$payload"
+            else
+                netops_memory_switch_print "$payload"
+                if [[ "$verify_core" == true ]]; then
+                    netops_memory_verify_core "$payload" "$verify_limit"
+                fi
+            fi
+            return 0
+            ;;
+        *)
+            echo "Unknown memory command: $cmd" >&2
+            netops_memory_usage >&2
+            return 6
+            ;;
+    esac
+}
+
+netops_topology() {
+    local cmd="${1:-changes}"; shift || true
+    case "$cmd" in
+        changes)
+            netops_db_import >/dev/null 2>&1 || netops_db_init
+            if [[ "${1:-}" == "--json" ]]; then
+                netops_sql_json "SELECT * FROM topology_events ORDER BY created_at DESC,id DESC LIMIT 100"
+            else
+                netops_sql_json "SELECT * FROM topology_events ORDER BY created_at DESC,id DESC LIMIT 30" | jq -r '.[]? | "\(.event_type)\t\(.local_ip) \(.local_port) -> \(.remote_name) \(.remote_port)"'
+            fi
+            ;;
+        *) echo "Usage: netops topology changes [--json]" >&2; return 6 ;;
+    esac
+}
+
+netops_db_status_json() {
+    netops_paths
+    netops_db_init
+    local devices aps neighbors offline_devices offline_aps sqlite_devices sqlite_aps sqlite_neighbors sqlite_history sqlite_identity_state
+    devices=$(wc -l < "$DEVICES_DB" 2>/dev/null || echo 0)
+    aps=$(wc -l < "$AP_DB" 2>/dev/null || echo 0)
+    neighbors=$(wc -l < "$NEIGHBOR_DB" 2>/dev/null || echo 0)
+    offline_devices=$(awk -F'|' '$9=="OFFLINE"{n++} END{print n+0}' "$DEVICES_DB" 2>/dev/null)
+    offline_aps=$(awk -F'|' '$9=="OFFLINE"{n++} END{print n+0}' "$AP_DB" 2>/dev/null)
+    sqlite_devices=$(netops_db_count devices)
+    sqlite_aps=$(netops_db_count aps)
+    sqlite_neighbors=$(netops_db_count neighbors)
+    sqlite_history=$(netops_db_count inventory_history)
+    sqlite_identity_state=$(netops_db_count inventory_identity_state)
+    jq -n \
+        --arg db_path "$SQLITE_DB" --arg cache_dir "$CACHE_DIR" --arg config_file "$CONFIG_FILE" \
+        --argjson devices "${devices:-0}" --argjson aps "${aps:-0}" --argjson neighbors "${neighbors:-0}" \
+        --argjson offline_devices "${offline_devices:-0}" --argjson offline_aps "${offline_aps:-0}" \
+        --argjson sqlite_devices "${sqlite_devices:-0}" --argjson sqlite_aps "${sqlite_aps:-0}" --argjson sqlite_neighbors "${sqlite_neighbors:-0}" \
+        --argjson sqlite_history "${sqlite_history:-0}" --argjson sqlite_identity_state "${sqlite_identity_state:-0}" \
+        '{db_path:$db_path,cache_dir:$cache_dir,config_file:$config_file,flat:{devices:$devices,aps:$aps,neighbors:$neighbors,offline_devices:$offline_devices,offline_aps:$offline_aps},sqlite:{devices:$sqlite_devices,aps:$sqlite_aps,neighbors:$sqlite_neighbors,history:$sqlite_history,identity_state:$sqlite_identity_state}}'
+}
+
+netops_db_usage() {
+    cat <<'EOF_DB'
+NetOps SQLite State Bridge
+Usage: netops db <command> [options]
+
+Commands:
+  init            Create or update the SQLite schema
+  import          Import current flat-file caches into SQLite
+  export          Export SQLite inventory/topology back to flat-file caches
+  migrate        Apply schema migrations and refresh derived state
+  repair         Recreate missing cache files, import flat files, verify SQLite
+  status [--json] Show cache and SQLite counts
+  path            Print the SQLite database path
+
+Environment:
+  NETOPS_SQLITE_DB  Override the SQLite database path
+EOF_DB
+}
+
+netops_db() {
+    local cmd="${1:-}"
+    case "$cmd" in
+        init) netops_db_init; netops_paths; echo "SQLite schema ready: $SQLITE_DB" ;;
+        migrate) netops_paths; netops_db_migrate ;;
+        repair) netops_db_repair ;;
+        import) netops_db_import; netops_paths; echo "Imported flat-file caches into: $SQLITE_DB" ;;
+        export) netops_db_export; echo "Exported SQLite inventory/topology to flat-file caches." ;;
+        status)
+            if [[ "${2:-}" == "--json" ]]; then
+                netops_db_status_json
+            else
+                netops_db_status_json | jq -r '"SQLite: \(.db_path)", "Flat files: devices=\(.flat.devices), aps=\(.flat.aps), neighbors=\(.flat.neighbors)", "SQLite:    devices=\(.sqlite.devices), aps=\(.sqlite.aps), neighbors=\(.sqlite.neighbors)", "History:   events=\(.sqlite.history), identities=\(.sqlite.identity_state)", "Offline:   devices=\(.flat.offline_devices), aps=\(.flat.offline_aps)"'
+            fi
+            ;;
+        path) netops_paths; echo "$SQLITE_DB" ;;
+        -h|--help|"") netops_db_usage ;;
+        *) echo "Unknown netops db command: $cmd" >&2; netops_db_usage >&2; exit 6 ;;
+    esac
+}
+
+
+
+netops_commands_json() {
+    cat <<'JSON_COMMANDS'
+[
+  {"id":"db-import","label":"Import flat files","command":"netops db import","read_only":true,"writes_local":true},
+  {"id":"discover-update","label":"Discovery refresh","command":"netops discover --update","read_only":true,"writes_local":true},
+  {"id":"discover-fast-health","label":"Fast health scan","command":"netops discover --fast-health","read_only":true,"writes_local":true},
+  {"id":"discover-deep","label":"Deep discovery","command":"netops discover --deep","read_only":true,"writes_local":true},
+  {"id":"discover-aps","label":"AP discovery","command":"netops discover --discover-aps","read_only":true,"writes_local":true},
+  {"id":"discover-neighbors","label":"Neighbor discovery","command":"netops discover --discover-neighbors","read_only":true,"writes_local":true},
+  {"id":"probe-speed","label":"Reliable speed test","command":"netops probe -s --json","read_only":true,"writes_local":true},
+  {"id":"filtering-check","label":"Filtering diagnostics","command":"netops check --json","read_only":true,"writes_local":true},
+  {"id":"history-recent","label":"Recent inventory history","command":"netops history recent --limit 30","read_only":true,"writes_local":false},
+  {"id":"memory-switch","label":"Switch attachment memory","command":"netops memory switch <target>","read_only":true,"writes_local":false},
+  {"id":"ask-query","label":"Natural Ask query","command":"netops ask \"APs that are down in ZONE10\"","read_only":true,"writes_local":false},
+  {"id":"backup-online","label":"Backup online devices","command":"netops control backup <target> --online-only --changed-only --summary","read_only":true,"writes_local":true},
+  {"id":"workflow-morning-check","label":"Morning check","command":"netops workflow morning-check","read_only":true,"writes_local":true},
+  {"id":"workflow-refresh-inventory","label":"Refresh inventory","command":"netops workflow refresh-inventory","read_only":true,"writes_local":true},
+  {"id":"workflow-ap-audit","label":"AP audit","command":"netops workflow ap-audit","read_only":true,"writes_local":true}
+]
+JSON_COMMANDS
+}
+
+netops_commands() {
+    if [[ "${1:-}" == "--json" ]]; then
+        netops_commands_json
+    else
+        netops_commands_json | jq -r '.[] | "\(.id)\t\(.label)\t\(.command)"'
+    fi
+}
+
+netops_run() {
+    local id="${1:-}" preview=false target="" domain="" runs="3" networks=""
+    [[ -z "$id" ]] && { echo "Usage: netops run <command-id> [--preview] [--target X] [--domain X] [--runs N] [--networks CIDR]" >&2; return 6; }
+    shift || true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --preview) preview=true; shift ;;
+            --target) target="${2:-}"; shift 2 ;;
+            --domain) domain="${2:-}"; shift 2 ;;
+            --runs) runs="${2:-3}"; shift 2 ;;
+            --networks) networks="${2:-}"; shift 2 ;;
+            *) [[ -z "$target" ]] && target="$1"; shift ;;
+        esac
+    done
+    local cmd=()
+    case "$id" in
+        db-import) cmd=("$INSTALL_DIR/netops" db import) ;;
+        discover-update) cmd=("$INSTALL_DIR/netops-discovery" --update); [[ -n "$networks" ]] && cmd+=("$networks") ;;
+        discover-fast-health) cmd=("$INSTALL_DIR/netops-discovery" --fast-health); [[ -n "$networks" ]] && cmd+=("$networks") ;;
+        discover-deep) cmd=("$INSTALL_DIR/netops-discovery" --deep); [[ -n "$networks" ]] && cmd+=("$networks") ;;
+        discover-aps) cmd=("$INSTALL_DIR/netops-discovery" --discover-aps) ;;
+        discover-neighbors) cmd=("$INSTALL_DIR/netops-discovery" --discover-neighbors) ;;
+        probe-speed) cmd=("$INSTALL_DIR/netops-probe" -s --speed-runs "$runs" --json) ;;
+        netcheck|filtering-check) cmd=("$INSTALL_DIR/netops" check --json); [[ -n "$domain" ]] && cmd+=("$domain") ;;
+        history-recent) cmd=("$INSTALL_DIR/netops" history recent --limit 30) ;;
+        memory-switch) [[ -n "$target" ]] || { echo "memory-switch requires --target" >&2; return 6; }; cmd=("$INSTALL_DIR/netops" memory switch "$target") ;;
+        ask-query) [[ -n "$target" ]] || { echo "ask-query requires --target question" >&2; return 6; }; cmd=("$INSTALL_DIR/netops" ask "$target") ;;
+        backup-online) [[ -n "$target" ]] || { echo "backup-online requires --target" >&2; return 6; }; cmd=("$INSTALL_DIR/netops-control" backup "$target" --online-only --changed-only --summary) ;;
+        workflow-morning-check) cmd=("$INSTALL_DIR/netops" workflow morning-check) ;;
+        workflow-refresh-inventory) cmd=("$INSTALL_DIR/netops" workflow refresh-inventory) ;;
+        workflow-ap-audit) cmd=("$INSTALL_DIR/netops" workflow ap-audit) ;;
+        *) echo "Unknown command id: $id" >&2; return 6 ;;
+    esac
+    if [[ "$preview" == true ]]; then
+        printf '%q ' "${cmd[@]}"; printf '\n'
+    else
+        "${cmd[@]}"
+    fi
+}
+
+netops_workflow() {
+    local name="${1:-}"; shift || true
+    case "$name" in
+        morning-check)
+            "$INSTALL_DIR/netops" db import
+            "$INSTALL_DIR/netops-discovery" --fast-health
+            "$INSTALL_DIR/netops-discovery" --topology-changes --json >/dev/null 2>&1 || true
+            "$INSTALL_DIR/netops" check --json google.com >/dev/null || true
+            "$INSTALL_DIR/netops" health attention
+            ;;
+        refresh-inventory)
+            "$INSTALL_DIR/netops-discovery" --fast-health
+            "$INSTALL_DIR/netops-discovery" --discover-aps
+            "$INSTALL_DIR/netops-discovery" --discover-neighbors
+            "$INSTALL_DIR/netops" db import
+            "$INSTALL_DIR/netops" health attention
+            ;;
+        backup-online)
+            local target="${1:-}"
+            if [[ -n "$target" ]]; then
+                "$INSTALL_DIR/netops-control" backup "$target" --online-only --changed-only --summary
+            else
+                netops_paths
+                awk -F'|' '$9!="OFFLINE"{print $1}' "$DEVICES_DB" | while IFS= read -r ip; do
+                    [[ -n "$ip" ]] && "$INSTALL_DIR/netops-control" backup "$ip" --online-only --changed-only --summary
+                done
+            fi
+            ;;
+        site-health)
+            local target="${1:-google.com}"
+            "$INSTALL_DIR/netops-probe" "$target" -c 5 --json
+            "$INSTALL_DIR/netops" check --json "$target"
+            ;;
+        ap-audit)
+            "$INSTALL_DIR/netops-discovery" --discover-aps
+            "$INSTALL_DIR/netops" db import
+            "$INSTALL_DIR/netops" health attention
+            ;;
+        -h|--help|"")
+            cat <<'EOF_WORKFLOW'
+Usage: netops workflow <name> [target]
+Workflows:
+  morning-check
+  backup-online [target]
+  refresh-inventory
+  site-health <target>
+  ap-audit
+EOF_WORKFLOW
+            ;;
+        *) echo "Unknown workflow: $name" >&2; return 6 ;;
+    esac
+}
+
+netops_read_kv() {
+    local path="$1" wanted="$2" key value
+    [[ -f "$path" ]] || return 1
+    while IFS='=' read -r key value; do
+        [[ "$key" =~ ^# ]] || [[ -z "$key" ]] && continue
+        key=$(echo "$key" | tr -d '[:space:]')
+        [[ "$key" == "$wanted" ]] || continue
+        value=$(echo "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
+        printf '%s
+' "$value"
+        return 0
+    done < "$path"
+    return 1
+}
+
+netops_interface_usage() {
+    cat <<'EOF_INTERFACE'
+NetOps Interface Monitor
+Usage:
+  netops interface <IP> on <INTERFACE> [OPTIONS]
+  netops interface monitor <IP> on <INTERFACE> [OPTIONS]
+  netops interface <IP> on <INTERFACE> --json --once [-i SECONDS]
+
+Options:
+  -i, --interval SECONDS       Update/sample interval, 1..30 seconds
+  -w, --width CHARACTERS       Bar/chart width
+  -c, --community STRING       SNMP community override
+  --chart classic|histogram    Live chart style
+  --histogram                  Shortcut for --chart histogram
+  --scale MBPS                 Histogram fixed scale, default 1000
+  --json --once                Emit one JSON sample
+  -h, --help                   Show this help
+EOF_INTERFACE
+}
+
+netops_interface_human_bps() {
+    awk -v bps="${1:-0}" 'BEGIN {
+        split("bps Kbps Mbps Gbps Tbps", u, " "); v=bps+0; i=1;
+        while (v >= 1000 && i < 5) { v/=1000; i++ }
+        printf "%.2f %s", v, u[i]
+    }'
+}
+
+netops_interface_bar() {
+    local value="${1:-0}" max="${2:-0}" width="${3:-50}" fill="${4:-#}" empty="${5:-.}"
+    awk -v value="$value" -v max="$max" -v width="$width" -v fill="$fill" -v empty="$empty" 'BEGIN {
+        n = (max > 0) ? int((value / max) * width) : 0;
+        if (n < 0) n = 0; if (n > width) n = width;
+        for (i=0; i<n; i++) printf fill;
+        for (i=n; i<width; i++) printf empty;
+    }'
+}
+
+netops_interface_mbps() {
+    awk -v bps="${1:-0}" 'BEGIN { printf "%.2f", (bps+0)/1000000 }'
+}
+
+netops_interface_histogram_push() {
+    local in_mbps="$1" out_mbps="$2" max_points="${3:-50}"
+    HIST_IN+=("$in_mbps")
+    HIST_OUT+=("$out_mbps")
+    while [[ ${#HIST_IN[@]} -gt $max_points ]]; do
+        HIST_IN=("${HIST_IN[@]:1}")
+        HIST_OUT=("${HIST_OUT[@]:1}")
+    done
+}
+
+netops_interface_histogram_chart() {
+    local scale="$1"
+    awk -v scale="$scale" -v in_series="${HIST_IN[*]}" -v out_series="${HIST_OUT[*]}" 'BEGIN {
+        split(in_series, ins, " "); split(out_series, outs, " ");
+        levels[1]=scale; levels[2]=scale*2/3; levels[3]=scale/3; levels[4]=0; levels[5]=-scale/3; levels[6]=-scale*2/3; levels[7]=-scale;
+        print "";
+        print "Rate chart (Mbps); output above zero, input below zero; scale fixed -" scale ".." scale;
+        for (r=1; r<=7; r++) {
+            level=levels[r]; printf "%8.2f  %s", level, (level == 0 ? "+" : "|");
+            for (i=1; i<=length(outs); i++) {
+                mark=" ";
+                if (level > 0 && outs[i]+0 >= level) mark="#";
+                else if (level < 0 && ins[i]+0 >= -level) mark="#";
+                else if (level == 0) mark="-";
+                printf "%s", mark;
+            }
+            printf "\n";
+        }
+    }'
+}
+
+netops_interface_render_live() {
+    local sample="$1" chart="$2" width="$3" scale="$4"
+    local device iface status speed max_bps in_bps out_bps peak_bps aggregate_bps in_util out_util peak_util in_mbps out_mbps
+    device=$(jq -r '.device_ip // ""' <<< "$sample")
+    iface=$(jq -r '.interface_name // .requested_interface // ""' <<< "$sample")
+    status=$(jq -r '.oper_status // "unknown"' <<< "$sample")
+    speed=$(jq -r '.speed_mbps // 0' <<< "$sample")
+    max_bps=$(jq -r '.max_bps // 0' <<< "$sample")
+    in_bps=$(jq -r '.in_bps // 0' <<< "$sample")
+    out_bps=$(jq -r '.out_bps // 0' <<< "$sample")
+    peak_bps=$(jq -r '.peak_direction_bps // 0' <<< "$sample")
+    aggregate_bps=$(jq -r '.aggregate_bps // 0' <<< "$sample")
+    in_util=$(jq -r '.in_utilization_pct // 0' <<< "$sample")
+    out_util=$(jq -r '.out_utilization_pct // 0' <<< "$sample")
+    peak_util=$(jq -r '.utilization_pct // 0' <<< "$sample")
+    in_mbps=$(netops_interface_mbps "$in_bps")
+    out_mbps=$(netops_interface_mbps "$out_bps")
+    if [[ "$chart" == "histogram" ]]; then
+        netops_interface_histogram_push "$in_mbps" "$out_mbps" "$width"
+        printf "NetOps Interface - %s - %s\n" "$device" "$iface"
+        printf "Interface speed: %s Mbps | Status: %s\n\n" "$speed" "$status"
+        printf "Input / Downlink  %12s Mbps  %s\n" "$in_mbps" "$(netops_interface_bar "$in_mbps" "$scale" 24 '#' '.')"
+        printf "Output / Uplink   %12s Mbps  %s\n" "$out_mbps" "$(netops_interface_bar "$out_mbps" "$scale" 24 '#' '.')"
+        netops_interface_histogram_chart "$scale"
+        printf "Press Ctrl+C to exit\n"
+    else
+        printf "NetOps Interface - %s - %s\n" "$device" "$iface"
+        printf "Speed: %s Mbps | Status: %s\n" "$speed" "$status"
+        printf "----------------------------------------------------------------------\n"
+        printf "Downlink  %-14s [%s] %s%%\n" "$(netops_interface_human_bps "$in_bps")" "$(netops_interface_bar "$in_bps" "$max_bps" "$width" '#' '.')" "$in_util"
+        printf "Uplink    %-14s [%s] %s%%\n" "$(netops_interface_human_bps "$out_bps")" "$(netops_interface_bar "$out_bps" "$max_bps" "$width" '#' '.')" "$out_util"
+        printf "Peak dir  %-14s [%s] %s%%\n" "$(netops_interface_human_bps "$peak_bps")" "$(netops_interface_bar "$peak_bps" "$max_bps" "$width" '#' '.')" "$peak_util"
+        printf "Aggregate %-14s (input + output)\n" "$(netops_interface_human_bps "$aggregate_bps")"
+        printf "Update interval active. Press Ctrl+C to exit.\n"
+    fi
+}
+
+netops_interface_live() {
+    local ip="" iface="" interval="2" width="50" community="" chart="classic" scale="1000" sample rc
+    local cached_index="" cached_name="" baseline_in="" baseline_out="" baseline_speed="" baseline_admin="" baseline_oper=""
+    local baseline_counter_bits="" sample_args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            on) iface="${2:-}"; shift 2 ;;
+            -i|--interval) interval="${2:-2}"; shift 2 ;;
+            -w|--width) width="${2:-50}"; shift 2 ;;
+            -c|--community) community="${2:-}"; shift 2 ;;
+            --chart) chart="${2:-classic}"; shift 2 ;;
+            --histogram) chart="histogram"; shift ;;
+            --scale) scale="${2:-1000}"; shift 2 ;;
+            -h|--help) netops_interface_usage; return 0 ;;
+            *) if [[ -z "$ip" ]]; then ip="$1"; shift; else echo "Unknown interface option: $1" >&2; return 6; fi ;;
+        esac
+    done
+    [[ -n "$ip" && -n "$iface" ]] || { netops_interface_usage >&2; return 6; }
+    [[ "$interval" =~ ^[0-9]+$ && "$interval" -gt 0 && "$interval" -le 30 ]] || interval=2
+    [[ "$width" =~ ^[0-9]+$ && "$width" -ge 10 && "$width" -le 120 ]] || width=50
+    [[ "$chart" == "classic" || "$chart" == "histogram" ]] || { echo "Error: --chart must be classic or histogram" >&2; return 6; }
+    [[ "$scale" =~ ^[0-9]+([.][0-9]+)?$ ]] || scale=1000
+    trap 'echo; echo "Monitoring stopped."; exit 130' INT
+    trap 'echo; echo "Monitoring terminated."; exit 143' TERM
+    HIST_IN=(); HIST_OUT=()
+    while true; do
+        sample_args=("$ip" on "$iface" --json --once -i "$interval")
+        [[ -n "$community" ]] && sample_args+=(-c "$community")
+        if [[ -n "$cached_index" && -n "$baseline_in" && -n "$baseline_out" ]]; then
+            sample_args+=(--if-index "$cached_index" --if-name "$cached_name" --baseline-in "$baseline_in" --baseline-out "$baseline_out")
+            sample_args+=(--baseline-speed "$baseline_speed" --baseline-admin "$baseline_admin" --baseline-oper "$baseline_oper")
+            sample_args+=(--counter-bits "$baseline_counter_bits")
+        fi
+        sample=$(netops_interface_sample "${sample_args[@]}" 2>&1); rc=$?
+        if [[ "$rc" -ne 0 ]]; then
+            printf '%s\n' "$sample" >&2
+            return "$rc"
+        fi
+        if ! jq -e 'type == "object" and (.interface_index != null) and (.counters.in_octets != null) and (.counters.out_octets != null)' >/dev/null 2>&1 <<< "$sample"; then
+            echo "Error: interface sampler returned an invalid result" >&2
+            return 10
+        fi
+        cached_index=$(jq -r '.interface_index' <<< "$sample")
+        cached_name=$(jq -r '.interface_name' <<< "$sample")
+        baseline_in=$(jq -r '.counters.in_octets' <<< "$sample")
+        baseline_out=$(jq -r '.counters.out_octets' <<< "$sample")
+        baseline_speed=$(jq -r '.speed_mbps // 0' <<< "$sample")
+        baseline_admin=$(jq -r '.admin_status_code // 4' <<< "$sample")
+        baseline_oper=$(jq -r '.oper_status_code // 4' <<< "$sample")
+        baseline_counter_bits=$(jq -r '.counter_bits // 64' <<< "$sample")
+        if [[ -t 1 ]]; then
+            printf '\033[H\033[2J'
+            netops_interface_render_live "$sample" "$chart" "$width" "$scale"
+        else
+            jq -r '"\(.timestamp) \(.device_ip) \(.interface_name) in=\(.in_bps)bps out=\(.out_bps)bps util=\(.utilization_pct)% status=\(.oper_status)"' <<< "$sample"
+        fi
+    done
+}
+
+netops_iface_normalize() {
+    local iface="$1" lower numbers
+    lower=$(echo "$iface" | tr '[:upper:]' '[:lower:]')
+    case "$lower" in
+        gig*|gi*|gigabit*) numbers=$(echo "$iface" | sed 's/[^0-9\/]//g'); echo "GigabitEthernet$numbers" ;;
+        fast*|fa*) numbers=$(echo "$iface" | sed 's/[^0-9\/]//g'); echo "FastEthernet$numbers" ;;
+        eth*) numbers=$(echo "$iface" | sed 's/[^0-9\/]//g'); echo "Ethernet$numbers" ;;
+        te*|tengig*) numbers=$(echo "$iface" | sed 's/[^0-9\/]//g'); echo "TenGigabitEthernet$numbers" ;;
+        *) echo "$iface" ;;
+    esac
+}
+
+netops_iface_status() {
+    case "$1" in
+        1) echo up ;;
+        2) echo down ;;
+        3) echo testing ;;
+        4) echo unknown ;;
+        5) echo dormant ;;
+        6) echo notPresent ;;
+        7) echo lowerLayerDown ;;
+        *) echo unknown ;;
+    esac
+}
+
+netops_iface_pct() {
+    awk -v part="${1:-0}" -v total="${2:-0}" 'BEGIN{if(total<=0)printf "0.00"; else printf "%.2f", (part*100)/total}'
+}
+
+netops_interface_sample() {
+    local ip="" iface="" interval="2" community="" json=false once=false no_color=false
+    local supplied_if_index="" supplied_if_name="" baseline_in="" baseline_out="" baseline_speed="0" baseline_admin="4" baseline_oper="4" supplied_counter_bits=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            on) iface="${2:-}"; shift 2 ;;
+            -i|--interval) interval="${2:-2}"; shift 2 ;;
+            -c|--community) community="${2:-}"; shift 2 ;;
+            --json) json=true; shift ;;
+            --once) once=true; shift ;;
+            --no-color) no_color=true; shift ;;
+            --if-index) supplied_if_index="${2:-}"; shift 2 ;;
+            --if-name) supplied_if_name="${2:-}"; shift 2 ;;
+            --baseline-in) baseline_in="${2:-}"; shift 2 ;;
+            --baseline-out) baseline_out="${2:-}"; shift 2 ;;
+            --baseline-speed) baseline_speed="${2:-0}"; shift 2 ;;
+            --baseline-admin) baseline_admin="${2:-4}"; shift 2 ;;
+            --baseline-oper) baseline_oper="${2:-4}"; shift 2 ;;
+            --counter-bits) supplied_counter_bits="${2:-}"; shift 2 ;;
+            -h|--help) netops_interface_usage; return 0 ;;
+            *) if [[ -z "$ip" ]]; then ip="$1"; shift; else echo "Unknown interface option: $1" >&2; return 6; fi ;;
+        esac
+    done
+    [[ -n "$ip" && -n "$iface" ]] || { echo "Usage: netops interface <ip> on <interface> --json --once [-i seconds]" >&2; return 6; }
+    [[ "$interval" =~ ^[0-9]+$ && "$interval" -gt 0 && "$interval" -le 30 ]] || interval=2
+    for cmd in snmpget snmpwalk jq awk sed; do
+        command -v "$cmd" >/dev/null 2>&1 || { echo "Error: '$cmd' is required for interface sampling" >&2; return 4; }
+    done
+    netops_paths
+    local timeout_val comms normalized if_index if_name interface_row initial current prev_in prev_out current_in current_out if_speed admin_status oper_status max_bps counter_bits value
+    timeout_val=$(netops_read_kv "$CONFIG_FILE" snmp_timeout 2>/dev/null || true)
+    [[ -z "$timeout_val" ]] && timeout_val=3
+    if [[ -z "$community" ]]; then
+        comms=$(netops_read_kv "$ENV_FILE" communities 2>/dev/null || true)
+        community="${comms%% *}"
+    fi
+    [[ -n "$community" ]] || { echo "Error: SNMP community is not configured" >&2; return 4; }
+    normalized=$(netops_iface_normalize "$iface")
+    if [[ -n "$supplied_if_index" ]]; then
+        [[ "$supplied_if_index" =~ ^[0-9]+$ ]] || { echo "Error: cached interface index is invalid" >&2; return 6; }
+        if_index="$supplied_if_index"
+        if_name="${supplied_if_name:-$normalized}"
+    else
+        timeout "$timeout_val" snmpget -v2c -c "$community" -t "$timeout_val" "$ip" "SNMPv2-MIB::sysName.0" >/dev/null 2>&1 || { echo "Error: Cannot connect to SNMP agent on $ip" >&2; return 2; }
+        interface_row=$(timeout "$timeout_val" snmpwalk -v2c -c "$community" -t "$timeout_val" -On "$ip" IF-MIB::ifDescr 2>/dev/null | awk -v target="$normalized" '
+            BEGIN { wanted=tolower(target) }
+            {
+                line=$0; oid=$1; sub(/^.*\./,"",oid); sub(/[[:space:]]*=.*$/,"",oid)
+                value=$0; sub(/^.*=[[:space:]]*/,"",value); sub(/^[A-Za-z-]+:[[:space:]]*/,"",value); gsub(/^"|"$/,"",value)
+                lower=tolower(value)
+                if (lower==wanted) { print oid "|" value; found=1; exit }
+                if (!partial && index(lower,wanted)) partial=oid "|" value
+            }
+            END { if (!found && partial) print partial }')
+        [[ -n "$interface_row" ]] || { echo "Error: Could not find interface '$iface' on $ip" >&2; return 2; }
+        if_index="${interface_row%%|*}"
+        if_name="${interface_row#*|}"
+    fi
+    if [[ -n "$baseline_in" && -n "$baseline_out" ]]; then
+        [[ "$baseline_in" =~ ^[0-9]+$ && "$baseline_out" =~ ^[0-9]+$ ]] || { echo "Error: cached interface counters are invalid" >&2; return 6; }
+        [[ "$supplied_counter_bits" == "32" || "$supplied_counter_bits" == "64" ]] || { echo "Error: cached counter width must be 32 or 64" >&2; return 6; }
+        initial=("$baseline_in" "$baseline_out" "$baseline_speed" "$baseline_admin" "$baseline_oper")
+        counter_bits="$supplied_counter_bits"
+    else
+        initial=($(timeout "$timeout_val" bash -c 'snmpget -v2c -c "$0" -t "$1" -OevqU "$2" "IF-MIB::ifHCInOctets.$3" "IF-MIB::ifHCOutOctets.$3" "IF-MIB::ifHighSpeed.$3" "IF-MIB::ifAdminStatus.$3" "IF-MIB::ifOperStatus.$3" 2>/dev/null' "$community" "$timeout_val" "$ip" "$if_index"))
+        counter_bits=64
+        if [[ -z "${initial[0]:-}" || -z "${initial[1]:-}" ]]; then
+            initial=($(timeout "$timeout_val" bash -c 'snmpget -v2c -c "$0" -t "$1" -OevqU "$2" "IF-MIB::ifInOctets.$3" "IF-MIB::ifOutOctets.$3" "IF-MIB::ifHighSpeed.$3" "IF-MIB::ifAdminStatus.$3" "IF-MIB::ifOperStatus.$3" 2>/dev/null' "$community" "$timeout_val" "$ip" "$if_index"))
+            counter_bits=32
+        fi
+    fi
+    [[ -n "${initial[0]:-}" && -n "${initial[1]:-}" ]] || { echo "Error: Could not get interface counters for $if_name" >&2; return 2; }
+    prev_in=${initial[0]}; prev_out=${initial[1]}; if_speed=${initial[2]:-0}; admin_status=${initial[3]:-4}; oper_status=${initial[4]:-4}
+    sleep "$interval"
+    if [[ "$counter_bits" == "32" ]]; then
+        current=($(timeout "$timeout_val" bash -c 'snmpget -v2c -c "$0" -t "$1" -OevqU "$2" "IF-MIB::ifInOctets.$3" "IF-MIB::ifOutOctets.$3" "IF-MIB::ifHighSpeed.$3" "IF-MIB::ifAdminStatus.$3" "IF-MIB::ifOperStatus.$3" 2>/dev/null' "$community" "$timeout_val" "$ip" "$if_index"))
+    else
+        current=($(timeout "$timeout_val" bash -c 'snmpget -v2c -c "$0" -t "$1" -OevqU "$2" "IF-MIB::ifHCInOctets.$3" "IF-MIB::ifHCOutOctets.$3" "IF-MIB::ifHighSpeed.$3" "IF-MIB::ifAdminStatus.$3" "IF-MIB::ifOperStatus.$3" 2>/dev/null' "$community" "$timeout_val" "$ip" "$if_index"))
+        if [[ -z "${current[0]:-}" || -z "${current[1]:-}" ]]; then
+            echo "Error: 64-bit interface counters became unavailable during sampling" >&2
+            return 2
+        fi
+    fi
+    [[ -n "${current[0]:-}" && -n "${current[1]:-}" ]] || { echo "Error: Could not get follow-up counters for $if_name" >&2; return 2; }
+    current_in=${current[0]}; current_out=${current[1]}; if_speed=${current[2]:-$if_speed}; admin_status=${current[3]:-$admin_status}; oper_status=${current[4]:-$oper_status}
+    local in_delta out_delta in_rate out_rate in_bps out_bps aggregate_bps peak_bps in_util out_util peak_util timestamp observed_at counter_reset=false
+    for value in "$prev_in" "$prev_out" "$current_in" "$current_out" "$if_speed" "$admin_status" "$oper_status"; do
+        [[ "$value" =~ ^[0-9]+$ ]] || { echo "Error: SNMP returned a non-numeric interface value" >&2; return 2; }
+    done
+    if (( current_in >= prev_in )); then
+        in_delta=$((current_in - prev_in))
+    elif [[ "$counter_bits" == "32" && "$prev_in" -le 4294967295 && "$current_in" -le 4294967295 ]]; then
+        in_delta=$((4294967296 - prev_in + current_in))
+    else
+        in_delta=0
+        counter_reset=true
+    fi
+    if (( current_out >= prev_out )); then
+        out_delta=$((current_out - prev_out))
+    elif [[ "$counter_bits" == "32" && "$prev_out" -le 4294967295 && "$current_out" -le 4294967295 ]]; then
+        out_delta=$((4294967296 - prev_out + current_out))
+    else
+        out_delta=0
+        counter_reset=true
+    fi
+    in_rate=$((in_delta / interval)); out_rate=$((out_delta / interval))
+    in_bps=$((in_rate * 8)); out_bps=$((out_rate * 8)); aggregate_bps=$((in_bps + out_bps))
+    if (( in_bps >= out_bps )); then peak_bps=$in_bps; else peak_bps=$out_bps; fi
+    max_bps=$(( ${if_speed:-0} * 1000000 ))
+    in_util=$(netops_iface_pct "$in_bps" "$max_bps"); out_util=$(netops_iface_pct "$out_bps" "$max_bps"); peak_util=$(netops_iface_pct "$peak_bps" "$max_bps")
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    observed_at=$(date -u +%s)
+    if [[ "$json" == true ]]; then
+        jq -n \
+            --arg timestamp "$timestamp" --arg device_ip "$ip" --arg requested_interface "$iface" --arg interface_name "$if_name" \
+            --arg oper_status "$(netops_iface_status "$oper_status")" --arg admin_status "$(netops_iface_status "$admin_status")" \
+            --argjson observed_at "$observed_at" --argjson interface_index "$if_index" --argjson interval_seconds "$interval" --argjson speed_mbps "${if_speed:-0}" --argjson max_bps "$max_bps" \
+            --argjson admin_status_code "$admin_status" --argjson oper_status_code "$oper_status" --argjson counter_bits "$counter_bits" --argjson counter_reset_detected "$counter_reset" \
+            --argjson previous_in "$prev_in" --argjson previous_out "$prev_out" --argjson current_in "$current_in" --argjson current_out "$current_out" \
+            --argjson in_bps "$in_bps" --argjson out_bps "$out_bps" --argjson aggregate_bps "$aggregate_bps" --argjson peak_direction_bps "$peak_bps" \
+            --argjson in_utilization_pct "$in_util" --argjson out_utilization_pct "$out_util" --argjson utilization_pct "$peak_util" \
+            '{timestamp:$timestamp,observed_at:$observed_at,device_ip:$device_ip,requested_interface:$requested_interface,interface_name:$interface_name,interface_index:$interface_index,interval_seconds:$interval_seconds,speed_mbps:$speed_mbps,max_bps:$max_bps,counter_bits:$counter_bits,counter_reset_detected:$counter_reset_detected,counters:{previous_in_octets:$previous_in,previous_out_octets:$previous_out,in_octets:$current_in,out_octets:$current_out},in_bps:$in_bps,out_bps:$out_bps,aggregate_bps:$aggregate_bps,peak_direction_bps:$peak_direction_bps,in_utilization_pct:$in_utilization_pct,out_utilization_pct:$out_utilization_pct,utilization_pct:$utilization_pct,admin_status_code:$admin_status_code,oper_status_code:$oper_status_code,admin_status:$admin_status,oper_status:$oper_status}'
+    else
+        printf '%s %s in=%sbps out=%sbps peak-util=%s%% status=%s\n' "$ip" "$if_name" "$in_bps" "$out_bps" "$peak_util" "$(netops_iface_status "$oper_status")"
+    fi
+}
+
+netops_interface() {
+    if [[ "${1:-}" == "monitor" ]]; then
+        shift
+    fi
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || $# -eq 0 ]]; then
+        netops_interface_usage
+        return 0
+    fi
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --json|--once) netops_interface_sample "$@"; return $? ;;
+        esac
+    done
+    netops_interface_live "$@"
+}
+
+netops_serve() {
+    local host="127.0.0.1" port="8787"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --host) host="${2:-127.0.0.1}"; shift 2 ;;
+            --port) port="${2:-8787}"; shift 2 ;;
+            -h|--help)
+                echo "Usage: netops serve [--host 127.0.0.1] [--port 8787]"
+                return 0
+                ;;
+            *) echo "Unknown serve option: $1" >&2; return 6 ;;
+        esac
+    done
+
+    local serve_py="/tmp/netops-serve-${USER:-user}.py"
+    cat > "$serve_py" <<'PY_SERVER'
+#!/usr/bin/env python3
+import argparse
+import json
+import mimetypes
+import os
+import queue
+import shlex
+import signal
+import sqlite3
+import subprocess
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+SCHEMA = """
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+CREATE TABLE IF NOT EXISTS devices (ip TEXT PRIMARY KEY, hostname TEXT, platform TEXT, model TEXT, serial TEXT, mac TEXT, source TEXT, last_seen INTEGER, status TEXT);
+CREATE TABLE IF NOT EXISTS aps (ip TEXT PRIMARY KEY, name TEXT, platform TEXT, switch_ip TEXT, switch_name TEXT, switch_port TEXT, mac TEXT, last_seen INTEGER, status TEXT);
+CREATE TABLE IF NOT EXISTS neighbors (local_ip TEXT, local_name TEXT, local_port TEXT, remote_name TEXT, remote_port TEXT, remote_ip TEXT, PRIMARY KEY (local_ip, local_port, remote_name, remote_port));
+CREATE TABLE IF NOT EXISTS probe_results (id INTEGER PRIMARY KEY AUTOINCREMENT, target TEXT, mode TEXT, created_at INTEGER NOT NULL, packet_loss_pct REAL, min_ms REAL, avg_ms REAL, max_ms REAL, jitter_ms REAL, raw_json TEXT);
+CREATE TABLE IF NOT EXISTS speed_tests (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, interface TEXT, download_mbps REAL, upload_mbps REAL, idle_latency_ms REAL, loaded_down_ms REAL, loaded_up_ms REAL, packet_loss_pct REAL, reliability TEXT, raw_json TEXT);
+CREATE TABLE IF NOT EXISTS interface_samples (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, device_ip TEXT, interface_name TEXT, in_bps INTEGER, out_bps INTEGER, utilization_pct REAL, oper_status TEXT, raw_json TEXT);
+CREATE TABLE IF NOT EXISTS filtering_checks (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, target TEXT, result TEXT, raw_json TEXT);
+CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, action TEXT NOT NULL, command TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER, finished_at INTEGER, exit_code INTEGER, read_only INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS job_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, created_at INTEGER NOT NULL, stream TEXT NOT NULL, line TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS command_history (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, action TEXT NOT NULL, command TEXT NOT NULL, exit_code INTEGER, read_only INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status);
+CREATE INDEX IF NOT EXISTS idx_aps_status ON aps(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_job_logs_job ON job_logs(job_id, id);
+CREATE INDEX IF NOT EXISTS idx_probe_results_created ON probe_results(created_at);
+CREATE INDEX IF NOT EXISTS idx_speed_tests_created ON speed_tests(created_at);
+CREATE INDEX IF NOT EXISTS idx_interface_samples_created ON interface_samples(created_at);
+CREATE INDEX IF NOT EXISTS idx_filtering_checks_created ON filtering_checks(created_at);
+CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
+INSERT OR IGNORE INTO schema_meta(key,value,updated_at) VALUES('schema_version','2',strftime('%s','now'));
+CREATE TABLE IF NOT EXISTS health_state (entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, name TEXT, platform TEXT, serial TEXT, status TEXT, first_seen INTEGER, last_seen INTEGER, last_failed INTEGER, outage_started_at INTEGER, flap_count INTEGER NOT NULL DEFAULT 0, switch_ip TEXT, switch_port TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(entity_type, entity_id));
+CREATE TABLE IF NOT EXISTS health_events (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, event_type TEXT NOT NULL, previous_value TEXT, current_value TEXT, detail TEXT);
+CREATE TABLE IF NOT EXISTS topology_snapshot (local_ip TEXT, local_port TEXT, remote_name TEXT, remote_port TEXT, remote_ip TEXT, PRIMARY KEY(local_ip, local_port, remote_name, remote_port));
+CREATE TABLE IF NOT EXISTS topology_events (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, event_type TEXT NOT NULL, local_ip TEXT, local_port TEXT, remote_name TEXT, remote_port TEXT, remote_ip TEXT, detail TEXT);
+CREATE TABLE IF NOT EXISTS ap_move_events (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, ap_ip TEXT NOT NULL, ap_name TEXT, previous_switch_ip TEXT, previous_switch_port TEXT, current_switch_ip TEXT, current_switch_port TEXT);
+CREATE TABLE IF NOT EXISTS snmp_cache (device_ip TEXT PRIMARY KEY, community_hint TEXT, version TEXT, last_success INTEGER, failure_count INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS backup_history (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, device_ip TEXT NOT NULL, hostname TEXT, path TEXT, sha256 TEXT, changed INTEGER NOT NULL DEFAULT 1, size_bytes INTEGER, status TEXT NOT NULL, message TEXT);
+CREATE TABLE IF NOT EXISTS inventory_identity_state (identity_kind TEXT NOT NULL, identity_value TEXT NOT NULL, entity_type TEXT NOT NULL, ip TEXT, mac TEXT, name TEXT, platform TEXT, model TEXT, serial TEXT, switch_ip TEXT, switch_name TEXT, switch_port TEXT, source TEXT, status TEXT, first_seen INTEGER, last_seen INTEGER, updated_at INTEGER NOT NULL, PRIMARY KEY(identity_kind, identity_value, entity_type));
+CREATE TABLE IF NOT EXISTS inventory_history (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, entity_type TEXT NOT NULL, identity_kind TEXT NOT NULL, identity_value TEXT NOT NULL, event_type TEXT NOT NULL, field_name TEXT, previous_value TEXT, current_value TEXT, ip TEXT, mac TEXT, name TEXT, switch_ip TEXT, switch_name TEXT, switch_port TEXT, platform TEXT, model TEXT, serial TEXT, source TEXT, status TEXT);
+CREATE INDEX IF NOT EXISTS idx_health_state_status ON health_state(status);
+CREATE INDEX IF NOT EXISTS idx_health_events_entity ON health_events(entity_type, entity_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_topology_events_created ON topology_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_ap_move_events_created ON ap_move_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_backup_history_device ON backup_history(device_ip, created_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_history_identity ON inventory_history(identity_kind, identity_value, entity_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_history_ip ON inventory_history(ip, created_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_history_mac ON inventory_history(mac, created_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_history_field ON inventory_history(field_name, created_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_identity_updated ON inventory_identity_state(updated_at);
+"""
+
+COMMANDS = [
+    {"id": "db-import", "label": "Import flat files", "read_only": True, "writes_local": True, "description": "Import current NetOps flat-file caches into SQLite."},
+    {"id": "db-export", "label": "Export flat files", "read_only": True, "writes_local": True, "description": "Export SQLite inventory and topology back to flat-file caches."},
+    {"id": "discover-update", "label": "Discovery refresh", "read_only": True, "writes_local": True, "description": "Scan configured or supplied subnets and update inventory."},
+    {"id": "discover-fast-health", "label": "Fast health scan", "read_only": True, "writes_local": True, "description": "Ping known or supplied devices/APs without deep enrichment."},
+    {"id": "discover-deep", "label": "Deep discovery", "read_only": True, "writes_local": True, "description": "Run switch, AP, and neighbor discovery in one pass."},
+    {"id": "discover-aps", "label": "AP discovery", "read_only": True, "writes_local": True, "description": "Discover APs from controllers and switch LLDP/CDP."},
+    {"id": "discover-neighbors", "label": "Neighbor discovery", "read_only": True, "writes_local": True, "description": "Build switch topology from LLDP/CDP."},
+    {"id": "probe-speed", "label": "Reliable speed test", "read_only": True, "writes_local": True, "description": "Run multi-server speed test with JSON output."},
+    {"id": "probe-target", "label": "Latency probe", "read_only": True, "writes_local": True, "description": "Run a finite latency probe against a target."},
+    {"id": "filtering-check", "label": "Filtering diagnostics", "read_only": True, "writes_local": True, "description": "Run DNS, SSL, and filtering checks."},
+    {"id": "interface-sample", "label": "Interface sample", "read_only": True, "writes_local": True, "description": "Capture one SNMP interface utilization sample."},
+    {"id": "backup-online", "label": "Backup online devices", "read_only": True, "writes_local": True, "description": "Run changed-only config backup for online devices."},
+    {"id": "workflow-morning-check", "label": "Morning check", "read_only": True, "writes_local": True, "description": "Run health, discovery, topology, and filtering checks."},
+    {"id": "workflow-refresh-inventory", "label": "Refresh inventory", "read_only": True, "writes_local": True, "description": "Run fast health, AP, and topology refresh."},
+    {"id": "workflow-ap-audit", "label": "AP audit", "read_only": True, "writes_local": True, "description": "Refresh AP inventory and surface AP attention."},
+]
+
+AUTOMATION_PROFILES = [
+    {"id": "sync-sqlite", "label": "SQLite cache sync", "action": "db-import", "interval_minutes": 15, "args": {}, "description": "Import flat-file caches into SQLite on a short cadence."},
+    {"id": "discovery-refresh", "label": "Discovery refresh", "action": "discover-update", "interval_minutes": 240, "args": {}, "description": "Refresh configured discovery inventory."},
+    {"id": "ap-refresh", "label": "AP refresh", "action": "discover-aps", "interval_minutes": 240, "args": {}, "description": "Refresh wireless access point inventory."},
+    {"id": "topology-refresh", "label": "Topology refresh", "action": "discover-neighbors", "interval_minutes": 120, "args": {}, "description": "Refresh LLDP/CDP neighbor topology."},
+    {"id": "fast-health", "label": "Fast health", "action": "discover-fast-health", "interval_minutes": 30, "args": {}, "description": "Refresh online/offline state without deep enrichment."},
+    {"id": "filtering-check", "label": "Filtering check", "action": "filtering-check", "interval_minutes": 360, "args": {"target": "google.com"}, "description": "Run a DNS, SSL, and filtering health check."},
+]
+
+class State:
+    def __init__(self, install_dir):
+        self.install_dir = install_dir
+        self.home = os.path.expanduser("~")
+        if os.geteuid() == 0:
+            self.config_dir = "/etc/netsnmp"
+            self.cache_dir = "/var/cache/netsnmp"
+        else:
+            self.config_dir = os.path.join(self.home, ".config", "netsnmp")
+            self.cache_dir = os.path.join(self.home, ".cache", "netsnmp")
+        self.config_file = os.path.join(self.config_dir, "netsnmp.conf")
+        self.env_file = os.path.join(self.config_dir, ".env")
+        self.devices_file = os.path.join(self.cache_dir, "devices.db")
+        self.aps_file = os.path.join(self.cache_dir, "ap_devices.db")
+        self.neighbors_file = os.path.join(self.cache_dir, "neighbor.db")
+        self.db_path = os.environ.get("NETOPS_SQLITE_DB", os.path.join(self.cache_dir, "netops.sqlite3"))
+        self.lock = threading.RLock()
+        self.jobs = {}
+        self.log_queues = {}
+        self.sem = threading.Semaphore(3)
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self.init_db()
+        self.import_flat_files()
+        self.scheduler_thread = threading.Thread(target=self.scheduler_loop, daemon=True)
+        self.scheduler_thread.start()
+
+    def connect(self):
+        con = sqlite3.connect(self.db_path, timeout=30)
+        con.row_factory = sqlite3.Row
+        return con
+
+    def init_db(self):
+        with self.connect() as con:
+            con.executescript(SCHEMA)
+
+    def read_config(self):
+        public = {}
+        for path in [self.config_file]:
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    public[key.strip()] = value.strip().strip('"')
+        env_status = {"env_present": os.path.exists(self.env_file), "ssh_password_present": os.path.exists(os.path.join(self.home, ".ssh", "sshpass_cache.gpg"))}
+        if os.path.exists(self.env_file):
+            with open(self.env_file, "r", encoding="utf-8", errors="ignore") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip().strip('"')
+                    if key == "snmp_version":
+                        env_status["snmp_version"] = value
+                    elif key == "ssh_user":
+                        env_status["ssh_user_configured"] = bool(value)
+                    elif key == "communities":
+                        env_status["communities_configured"] = bool(value)
+                    elif key == "snmpv3_user":
+                        env_status[key + "_configured"] = bool(value)
+        return {"public": public, "credential_status": env_status}
+
+    def import_table(self, con, table, path, columns):
+        if not os.path.exists(path):
+            open(path, "a", encoding="utf-8").close()
+            return
+        if os.path.getsize(path) == 0:
+            return
+        con.execute(f"DELETE FROM {table}")
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            for raw in fh:
+                raw = raw.rstrip("\n")
+                if not raw:
+                    continue
+                parts = raw.split("|")
+                if len(parts) < len(columns):
+                    parts += [""] * (len(columns) - len(parts))
+                vals = parts[:len(columns)]
+                for i, col in enumerate(columns):
+                    if col in ("last_seen",):
+                        try:
+                            vals[i] = int(vals[i] or 0)
+                        except ValueError:
+                            vals[i] = 0
+                marks = ",".join("?" for _ in columns)
+                con.execute(f"INSERT OR REPLACE INTO {table} ({','.join(columns)}) VALUES ({marks})", vals)
+
+    def import_flat_files(self):
+        with self.lock, self.connect() as con:
+            self.import_table(con, "devices", self.devices_file, ["ip", "hostname", "platform", "model", "serial", "mac", "source", "last_seen", "status"])
+            self.import_table(con, "aps", self.aps_file, ["ip", "name", "platform", "switch_ip", "switch_name", "switch_port", "mac", "last_seen", "status"])
+            self.import_table(con, "neighbors", self.neighbors_file, ["local_ip", "local_name", "local_port", "remote_name", "remote_port", "remote_ip"])
+            self.sync_derived_state(con)
+
+    def sync_derived_state(self, con):
+        now = int(time.time())
+        con.execute("DROP TABLE IF EXISTS temp.current_health")
+        con.execute("""
+            CREATE TEMP TABLE current_health AS
+            SELECT 'device' AS entity_type, ip AS entity_id, hostname AS name, platform, serial, status, COALESCE(last_seen, ?) AS source_seen, NULL AS switch_ip, NULL AS switch_port FROM devices
+            UNION ALL
+            SELECT 'ap' AS entity_type, ip AS entity_id, name, platform, NULL AS serial, status, COALESCE(last_seen, ?) AS source_seen, switch_ip, switch_port FROM aps
+        """, (now, now))
+        con.execute("""
+            INSERT OR REPLACE INTO health_state(entity_type,entity_id,name,platform,serial,status,first_seen,last_seen,last_failed,outage_started_at,flap_count,switch_ip,switch_port,updated_at)
+            SELECT c.entity_type,c.entity_id,c.name,c.platform,c.serial,c.status,
+                   COALESCE(h.first_seen,c.source_seen,?),
+                   CASE WHEN c.status='ONLINE' THEN COALESCE(c.source_seen,?) ELSE h.last_seen END,
+                   CASE WHEN c.status='OFFLINE' THEN ? ELSE h.last_failed END,
+                   CASE WHEN c.status='OFFLINE' THEN COALESCE(h.outage_started_at,?) ELSE NULL END,
+                   COALESCE(h.flap_count,0) + CASE WHEN h.status IS NOT NULL AND COALESCE(h.status,'') <> COALESCE(c.status,'') THEN 1 ELSE 0 END,
+                   c.switch_ip,c.switch_port,?
+              FROM current_health c LEFT JOIN health_state h ON h.entity_type=c.entity_type AND h.entity_id=c.entity_id
+        """, (now, now, now, now, now))
+
+    def export_flat_files(self):
+        with self.lock, self.connect() as con:
+            specs = [
+                (self.devices_file, "SELECT ip,hostname,platform,model,serial,mac,source,last_seen,status FROM devices ORDER BY ip"),
+                (self.aps_file, "SELECT ip,name,platform,switch_ip,switch_name,switch_port,mac,last_seen,status FROM aps ORDER BY ip"),
+                (self.neighbors_file, "SELECT local_ip,local_name,local_port,remote_name,remote_port,remote_ip FROM neighbors ORDER BY local_ip,local_port"),
+            ]
+            for path, sql in specs:
+                with open(path, "w", encoding="utf-8") as fh:
+                    for row in con.execute(sql):
+                        fh.write("|".join(str(v if v is not None else "") for v in row) + "\n")
+
+    def rows(self, sql, args=()):
+        with self.connect() as con:
+            return [dict(r) for r in con.execute(sql, args)]
+
+    def one(self, sql, args=()):
+        with self.connect() as con:
+            row = con.execute(sql, args).fetchone()
+            return dict(row) if row else None
+
+    def counts(self):
+        with self.connect() as con:
+            def c(sql):
+                return con.execute(sql).fetchone()[0]
+            return {
+                "devices": c("SELECT COUNT(*) FROM devices"),
+                "aps": c("SELECT COUNT(*) FROM aps"),
+                "neighbors": c("SELECT COUNT(*) FROM neighbors"),
+                "offline_devices": c("SELECT COUNT(*) FROM devices WHERE status='OFFLINE'"),
+                "offline_aps": c("SELECT COUNT(*) FROM aps WHERE status='OFFLINE'"),
+                "running_jobs": c("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')"),
+                "failed_jobs": c("SELECT COUNT(*) FROM jobs WHERE status='failed'"),
+            }
+
+    def epoch_from_timestamp(self, value):
+        if not value:
+            return int(time.time())
+        try:
+            return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
+        except Exception:
+            return int(time.time())
+
+    def nested(self, data, path, default=None):
+        cur = data
+        for key in path:
+            if not isinstance(cur, dict) or key not in cur:
+                return default
+            cur = cur[key]
+        return cur
+
+    def as_float(self, value):
+        try:
+            if value is None or value == "":
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    def as_int(self, value):
+        try:
+            if value is None or value == "":
+                return None
+            return int(float(value))
+        except Exception:
+            return None
+
+    def parse_job_stdout_json(self, job_id):
+        rows = self.rows("SELECT line FROM job_logs WHERE job_id=? AND stream='stdout' ORDER BY id", (job_id,))
+        text = "\n".join(r.get("line", "") for r in rows).strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                return json.loads(text[start:end + 1])
+            return None
+
+    def filtering_result(self, data):
+        dns = data.get("dns") or {}
+        conn = data.get("connectivity") or {}
+        ssl = data.get("ssl") or {}
+        issues = []
+        if dns.get("mismatch"):
+            issues.append("dns_mismatch")
+        if conn.get("tcp_443") is False:
+            issues.append("tcp_443_blocked")
+        if conn.get("https_accessible") is False:
+            issues.append("https_inaccessible")
+        issuer_status = ssl.get("issuer_status")
+        if issuer_status == "known_intercepting_proxy":
+            issues.append("ssl_intercept")
+        elif issuer_status not in (None, "", "present", "unknown"):
+            issues.append(str(issuer_status))
+        return "ok" if not issues else ",".join(issues)
+
+    def persist_diagnostic_result(self, job_id, action):
+        data = self.parse_job_stdout_json(job_id)
+        if not isinstance(data, dict):
+            return False
+        raw = json.dumps(data, separators=(",", ":"))
+        created = self.epoch_from_timestamp(data.get("timestamp"))
+        with self.connect() as con:
+            if action == "probe-target":
+                con.execute(
+                    "INSERT INTO probe_results(target,mode,created_at,packet_loss_pct,min_ms,avg_ms,max_ms,jitter_ms,raw_json) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        data.get("target") or data.get("ip"),
+                        data.get("mode"),
+                        created,
+                        self.as_float(self.nested(data, ["packets", "loss_pct"])),
+                        self.as_float(self.nested(data, ["latency_ms", "min"])),
+                        self.as_float(self.nested(data, ["latency_ms", "avg"])),
+                        self.as_float(self.nested(data, ["latency_ms", "max"])),
+                        self.as_float(self.nested(data, ["latency_ms", "jitter"])),
+                        raw,
+                    ),
+                )
+            elif action == "probe-speed":
+                con.execute(
+                    "INSERT INTO speed_tests(created_at,interface,download_mbps,upload_mbps,idle_latency_ms,loaded_down_ms,loaded_up_ms,packet_loss_pct,reliability,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        created,
+                        data.get("interface"),
+                        self.as_float(self.nested(data, ["download_mbps", "sustained"])),
+                        self.as_float(self.nested(data, ["upload_mbps", "sustained"])),
+                        self.as_float(self.nested(data, ["latency_ms", "idle"])),
+                        self.as_float(self.nested(data, ["latency_ms", "loaded_download"])),
+                        self.as_float(self.nested(data, ["latency_ms", "loaded_upload"])),
+                        self.as_float(data.get("packet_loss_pct")),
+                        self.nested(data, ["reliability", "rating"]),
+                        raw,
+                    ),
+                )
+            elif action in {"netcheck", "filtering-check"}:
+                con.execute(
+                    "INSERT INTO filtering_checks(created_at,target,result,raw_json) VALUES(?,?,?,?)",
+                    (created, data.get("target"), self.filtering_result(data), raw),
+                )
+            elif action == "interface-sample":
+                con.execute(
+                    "INSERT INTO interface_samples(created_at,device_ip,interface_name,in_bps,out_bps,utilization_pct,oper_status,raw_json) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        created,
+                        data.get("device_ip"),
+                        data.get("interface_name") or data.get("requested_interface"),
+                        self.as_int(data.get("in_bps")),
+                        self.as_int(data.get("out_bps")),
+                        self.as_float(data.get("utilization_pct")),
+                        data.get("oper_status"),
+                        raw,
+                    ),
+                )
+            else:
+                return False
+        return True
+
+    def diagnostics_payload(self, limit=80):
+        limit = max(1, min(int(limit or 80), 300))
+        probes = self.rows("SELECT id,target,mode,created_at,packet_loss_pct,min_ms,avg_ms,max_ms,jitter_ms FROM probe_results ORDER BY created_at DESC,id DESC LIMIT ?", (limit,))
+        speeds = self.rows("SELECT id,created_at,interface,download_mbps,upload_mbps,idle_latency_ms,loaded_down_ms,loaded_up_ms,packet_loss_pct,reliability FROM speed_tests ORDER BY created_at DESC,id DESC LIMIT ?", (limit,))
+        checks = self.rows("SELECT id,created_at,target,result FROM filtering_checks ORDER BY created_at DESC,id DESC LIMIT ?", (limit,))
+        samples = self.rows("SELECT id,created_at,device_ip,interface_name,in_bps,out_bps,utilization_pct,oper_status FROM interface_samples ORDER BY created_at DESC,id DESC LIMIT ?", (limit,))
+        attention = []
+        if probes and (probes[0].get("packet_loss_pct") or 0) > 0:
+            attention.append({"kind": "latency", "level": "warn", "text": f"Latest probe shows {probes[0]['packet_loss_pct']}% loss"})
+        if speeds and speeds[0].get("reliability") in {"medium", "low"}:
+            attention.append({"kind": "speed", "level": "warn", "text": f"Latest speed reliability is {speeds[0]['reliability']}"})
+        if checks and checks[0].get("result") != "ok":
+            attention.append({"kind": "filtering", "level": "bad", "text": f"Latest filtering check: {checks[0]['result']}"})
+        if samples and (samples[0].get("utilization_pct") or 0) >= 80:
+            attention.append({"kind": "interface", "level": "warn", "text": f"Latest interface utilization is {samples[0]['utilization_pct']}%"})
+        return {
+            "summary": {
+                "latest_probe": probes[0] if probes else None,
+                "latest_speed": speeds[0] if speeds else None,
+                "latest_filtering": checks[0] if checks else None,
+                "latest_interface": samples[0] if samples else None,
+                "attention": attention,
+                "counts": {"probes": len(probes), "speed_tests": len(speeds), "filtering_checks": len(checks), "interface_samples": len(samples)},
+            },
+            "probes": list(reversed(probes)),
+            "speed_tests": list(reversed(speeds)),
+            "filtering_checks": checks,
+            "interface_samples": list(reversed(samples)),
+        }
+
+    def attention_payload(self, limit=80):
+        limit = max(1, min(int(limit or 80), 300))
+        health = self.rows("SELECT entity_type,entity_id,name,platform,status,last_seen,last_failed,outage_started_at,flap_count,switch_ip,switch_port FROM health_state WHERE status='OFFLINE' OR flap_count>=3 OR (last_seen IS NOT NULL AND last_seen < strftime('%s','now') - 86400) ORDER BY status,flap_count DESC,last_seen LIMIT ?", (limit,))
+        topology = self.rows("SELECT * FROM topology_events ORDER BY created_at DESC,id DESC LIMIT ?", (limit,))
+        moves = self.rows("SELECT * FROM ap_move_events ORDER BY created_at DESC,id DESC LIMIT ?", (limit,))
+        backups = self.rows("SELECT * FROM backup_history ORDER BY created_at DESC,id DESC LIMIT ?", (limit,))
+        items = []
+        for row in health:
+            items.append({"kind": "health", "level": "danger" if row.get("status") == "OFFLINE" else "warning", "title": row.get("name") or row.get("entity_id"), "text": f"{row.get('entity_type')} {row.get('status')} flaps={row.get('flap_count')}", "row": row})
+        for row in topology[:20]:
+            items.append({"kind": "topology", "level": "warning", "title": row.get("event_type"), "text": f"{row.get('local_ip')} {row.get('local_port')} -> {row.get('remote_name')}", "row": row})
+        for row in moves[:20]:
+            items.append({"kind": "ap_move", "level": "warning", "title": row.get("ap_name") or row.get("ap_ip"), "text": f"{row.get('previous_switch_ip')}/{row.get('previous_switch_port')} -> {row.get('current_switch_ip')}/{row.get('current_switch_port')}", "row": row})
+        for row in backups[:20]:
+            if row.get("status") not in {"saved", "unchanged"}:
+                items.append({"kind": "backup", "level": "warning", "title": row.get("hostname") or row.get("device_ip"), "text": row.get("message") or row.get("status"), "row": row})
+        return {"items": items[:limit], "health": health, "topology_changes": topology, "ap_moves": moves, "backups": backups}
+
+    def workflows_payload(self):
+        return [
+            {"id": "morning-check", "action": "workflow-morning-check", "label": "Morning check", "description": "Health, topology, filtering, and attention summary."},
+            {"id": "refresh-inventory", "action": "workflow-refresh-inventory", "label": "Refresh inventory", "description": "Fast health, AP discovery, neighbor discovery, and SQLite sync."},
+            {"id": "ap-audit", "action": "workflow-ap-audit", "label": "AP audit", "description": "Refresh AP records and surface AP moves/offline records."},
+        ]
+
+    def backups_payload(self, limit=100):
+        limit = max(1, min(int(limit or 100), 300))
+        return self.rows("SELECT * FROM backup_history ORDER BY created_at DESC,id DESC LIMIT ?", (limit,))
+
+    def topology_changes_payload(self, limit=100):
+        limit = max(1, min(int(limit or 100), 300))
+        return self.rows("SELECT * FROM topology_events ORDER BY created_at DESC,id DESC LIMIT ?", (limit,))
+
+    def setting_get(self, key, default=None):
+        row = self.one("SELECT value FROM settings WHERE key=?", (key,))
+        return row["value"] if row else default
+
+    def setting_put(self, key, value):
+        with self.connect() as con:
+            con.execute("INSERT OR REPLACE INTO settings(key,value,updated_at) VALUES(?,?,?)", (key, str(value), int(time.time())))
+
+    def profile_template(self, profile_id):
+        for profile in AUTOMATION_PROFILES:
+            if profile["id"] == profile_id:
+                return dict(profile)
+        return None
+
+    def automation_profiles(self):
+        now = int(time.time())
+        running = {r["action"] for r in self.rows("SELECT DISTINCT action FROM jobs WHERE status IN ('queued','running')")}
+        profiles = []
+        for base in AUTOMATION_PROFILES:
+            profile = dict(base)
+            prefix = "automation." + profile["id"] + "."
+            enabled = self.setting_get(prefix + "enabled", "false") == "true"
+            interval = int(self.setting_get(prefix + "interval_minutes", profile["interval_minutes"]) or profile["interval_minutes"])
+            last_run = int(self.setting_get(prefix + "last_run", "0") or 0)
+            args_raw = self.setting_get(prefix + "args", "")
+            args = dict(profile.get("args") or {})
+            if args_raw:
+                try:
+                    args.update(json.loads(args_raw))
+                except Exception:
+                    pass
+            profile.update({
+                "enabled": enabled,
+                "interval_minutes": interval,
+                "last_run": last_run or None,
+                "next_run": (last_run + interval * 60) if enabled and last_run else (now if enabled else None),
+                "running": profile["action"] in running,
+                "args": args,
+            })
+            profiles.append(profile)
+        return profiles
+
+    def ui_options(self):
+        config = self.read_config()
+        public = config.get("public", {}) if isinstance(config, dict) else {}
+        seen = set()
+        targets = []
+        def add_target(label, value, kind):
+            value = str(value or "").strip()
+            if not value or value in seen:
+                return
+            seen.add(value)
+            targets.append({"label": label, "value": value, "kind": kind})
+        add_target("Localhost", "127.0.0.1", "local")
+        add_target("Core", public.get("core_switch_ip"), "configured")
+        add_target("Cisco WLC", public.get("cisco_wlc_ip"), "configured")
+        add_target("Ruckus vSZ", public.get("ruckus_vsz_ip"), "configured")
+        for row in self.rows("SELECT ip, COALESCE(NULLIF(hostname,''), ip) AS label, platform FROM devices WHERE status='ONLINE' ORDER BY last_seen DESC, hostname LIMIT 8"):
+            label = row.get("label") or row.get("ip")
+            platform = row.get("platform")
+            if platform and platform not in str(label):
+                label = f"{label} ({platform})"
+            add_target(label, row.get("ip"), "inventory")
+        return {
+            "targets": targets[:12],
+            "domains": [
+                {"label": "Google", "value": "google.com"},
+                {"label": "Cloudflare", "value": "cloudflare.com"},
+                {"label": "Example", "value": "example.com"},
+            ],
+            "speed_runs": ["2", "3", "4", "5"],
+            "status_filters": ["", "ONLINE", "OFFLINE"],
+            "quick_actions": [
+                {"id": "db-import", "label": "Sync SQLite"},
+                {"id": "discover-fast-health", "label": "Fast health"},
+                {"id": "discover-update", "label": "Discover"},
+                {"id": "discover-aps", "label": "AP refresh"},
+                {"id": "discover-neighbors", "label": "Topology refresh"},
+            ],
+        }
+
+    def update_automation_profile(self, profile_id, patch):
+        base = self.profile_template(profile_id)
+        if not base:
+            raise ValueError("unknown automation profile")
+        prefix = "automation." + profile_id + "."
+        if "enabled" in patch:
+            self.setting_put(prefix + "enabled", "true" if bool(patch.get("enabled")) else "false")
+        if "interval_minutes" in patch:
+            interval = int(patch.get("interval_minutes") or base["interval_minutes"])
+            interval = max(5, min(interval, 1440))
+            self.setting_put(prefix + "interval_minutes", interval)
+        if isinstance(patch.get("args"), dict):
+            merged = dict(base.get("args") or {})
+            for key, value in patch["args"].items():
+                if value is not None:
+                    merged[str(key)] = str(value)
+            self.setting_put(prefix + "args", json.dumps(merged, separators=(",", ":")))
+        return next(p for p in self.automation_profiles() if p["id"] == profile_id)
+
+    def run_automation_profile(self, profile_id):
+        profile = next((p for p in self.automation_profiles() if p["id"] == profile_id), None)
+        if not profile:
+            raise ValueError("unknown automation profile")
+        job = self.create_job(profile["action"], profile.get("args") or {})
+        self.setting_put("automation." + profile_id + ".last_run", int(time.time()))
+        return job
+
+    def scheduler_loop(self):
+        while True:
+            time.sleep(15)
+            try:
+                now = int(time.time())
+                for profile in self.automation_profiles():
+                    if not profile.get("enabled") or profile.get("running"):
+                        continue
+                    last_run = profile.get("last_run") or 0
+                    interval = max(5, int(profile.get("interval_minutes") or 60)) * 60
+                    if last_run and now - last_run < interval:
+                        continue
+                    self.run_automation_profile(profile["id"])
+            except Exception:
+                pass
+
+    def command_for(self, action, args):
+        args = args or {}
+        def tool(name):
+            return os.path.join(self.install_dir, name)
+        if action == "discover-update":
+            cmd = [tool("netops-discovery"), "--update"]
+            networks = str(args.get("networks", "")).strip()
+            if networks:
+                cmd.append(networks)
+            return cmd, True, True
+        if action == "discover-fast-health":
+            cmd = [tool("netops-discovery"), "--fast-health"]
+            networks = str(args.get("networks", "")).strip()
+            if networks:
+                cmd.append(networks)
+            return cmd, True, True
+        if action == "discover-deep":
+            cmd = [tool("netops-discovery"), "--deep"]
+            networks = str(args.get("networks", "")).strip()
+            if networks:
+                cmd.append(networks)
+            return cmd, True, True
+        if action == "discover-aps":
+            return [tool("netops-discovery"), "--discover-aps"], True, True
+        if action == "discover-neighbors":
+            return [tool("netops-discovery"), "--discover-neighbors"], True, True
+        if action == "probe-speed":
+            runs = str(args.get("runs", "3"))
+            if runs not in {"2", "3", "4", "5"}:
+                runs = "3"
+            return [tool("netops-probe"), "-s", "--speed-runs", runs, "--json"], True, True
+        if action == "probe-target":
+            target = str(args.get("target", "")).strip()
+            if not target:
+                raise ValueError("probe-target requires target")
+            count = str(args.get("count", "5")).strip() or "5"
+            return [tool("netops-probe"), target, "-c", count, "--json"], True, True
+        if action in {"netcheck", "filtering-check"}:
+            target = str(args.get("target", "")).strip()
+            cmd = [tool("netops"), "check", "--json"]
+            if target:
+                cmd.append(target)
+            return cmd, True, True
+        if action == "memory-switch":
+            target = str(args.get("target", "")).strip()
+            if not target:
+                raise ValueError("memory-switch requires target")
+            return [tool("netops"), "memory", "switch", target, "--json"], True, False
+        if action == "interface-sample":
+            device = str(args.get("device", "")).strip()
+            iface = str(args.get("interface", "")).strip()
+            if not device or not iface:
+                raise ValueError("interface-sample requires device and interface")
+            interval = str(args.get("interval", "2")).strip() or "2"
+            if interval not in {"1", "2", "3", "5", "10"}:
+                interval = "2"
+            return [tool("netops"), "interface", device, "on", iface, "--json", "--once", "-i", interval], True, True
+        if action == "db-import":
+            return [tool("netops"), "db", "import"], True, True
+        if action == "db-export":
+            return [tool("netops"), "db", "export"], True, True
+        if action == "backup-online":
+            target = str(args.get("target", "")).strip()
+            if not target:
+                raise ValueError("backup-online requires target")
+            return [tool("netops-control"), "backup", target, "--online-only", "--changed-only", "--summary"], True, True
+        if action == "workflow-morning-check":
+            return [tool("netops"), "workflow", "morning-check"], True, True
+        if action == "workflow-refresh-inventory":
+            return [tool("netops"), "workflow", "refresh-inventory"], True, True
+        if action == "workflow-ap-audit":
+            return [tool("netops"), "workflow", "ap-audit"], True, True
+        if action in {"control-config", "control-vlan"}:
+            raise PermissionError("Config-changing GUI execution is intentionally blocked in v1. Use preview plus terminal launch.")
+        raise ValueError(f"Unknown action: {action}")
+
+    def add_job_log(self, job_id, stream, line):
+        item = {"created_at": int(time.time()), "stream": stream, "line": line}
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is not None:
+                job.setdefault("logs", []).append(item)
+            q = self.log_queues.get(job_id)
+            if q is not None:
+                q.put(item)
+        with self.connect() as con:
+            con.execute("INSERT INTO job_logs(job_id,created_at,stream,line) VALUES(?,?,?,?)", (job_id, item["created_at"], stream, line))
+
+    def set_job_status(self, job_id, status, exit_code=None):
+        now = int(time.time())
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job:
+                job["status"] = status
+                if status == "running":
+                    job["started_at"] = now
+                if status in {"completed", "failed", "cancelled"}:
+                    job["finished_at"] = now
+                    job["exit_code"] = exit_code
+        with self.connect() as con:
+            if status == "running":
+                con.execute("UPDATE jobs SET status=?, started_at=? WHERE id=?", (status, now, job_id))
+            elif status in {"completed", "failed", "cancelled"}:
+                con.execute("UPDATE jobs SET status=?, finished_at=?, exit_code=? WHERE id=?", (status, now, exit_code, job_id))
+            else:
+                con.execute("UPDATE jobs SET status=? WHERE id=?", (status, job_id))
+
+    def create_job(self, action, args):
+        cmd, read_only, writes_local = self.command_for(action, args)
+        job_id = uuid.uuid4().hex[:12]
+        command_text = shlex.join(cmd)
+        job = {"id": job_id, "action": action, "command": command_text, "status": "queued", "created_at": int(time.time()), "started_at": None, "finished_at": None, "exit_code": None, "read_only": read_only, "writes_local": writes_local, "logs": [], "process": None}
+        with self.lock:
+            self.jobs[job_id] = job
+            self.log_queues[job_id] = queue.Queue()
+        with self.connect() as con:
+            con.execute("INSERT INTO jobs(id,action,command,status,read_only) VALUES(?,?,?,?,?)", (job_id, action, command_text, "queued", 1 if read_only else 0))
+        threading.Thread(target=self.run_job, args=(job_id, cmd, action, read_only), daemon=True).start()
+        return self.public_job(job)
+
+    def read_stream(self, job_id, pipe, stream):
+        try:
+            for raw in iter(pipe.readline, ""):
+                line = raw.rstrip("\n")
+                if line:
+                    self.add_job_log(job_id, stream, line)
+        finally:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+
+    def run_job(self, job_id, cmd, action, read_only):
+        with self.sem:
+            self.set_job_status(job_id, "running")
+            proc = None
+            try:
+                self.add_job_log(job_id, "system", "started: " + shlex.join(cmd))
+                proc = subprocess.Popen(cmd, cwd=self.install_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+                with self.lock:
+                    if job_id in self.jobs:
+                        self.jobs[job_id]["process"] = proc
+                t1 = threading.Thread(target=self.read_stream, args=(job_id, proc.stdout, "stdout"), daemon=True)
+                t2 = threading.Thread(target=self.read_stream, args=(job_id, proc.stderr, "stderr"), daemon=True)
+                t1.start(); t2.start()
+                code = proc.wait()
+                t1.join(timeout=1); t2.join(timeout=1)
+                if action in {"discover-update", "discover-fast-health", "discover-deep", "discover-aps", "discover-neighbors", "db-import", "backup-online", "workflow-morning-check", "workflow-refresh-inventory", "workflow-ap-audit"}:
+                    self.import_flat_files()
+                    self.add_job_log(job_id, "system", "sqlite inventory refreshed")
+                if action == "db-export":
+                    self.export_flat_files()
+                if action in {"probe-target", "probe-speed", "netcheck", "filtering-check", "memory-switch", "interface-sample"}:
+                    try:
+                        if self.persist_diagnostic_result(job_id, action):
+                            self.add_job_log(job_id, "system", "diagnostic result persisted")
+                    except Exception as exc:
+                        self.add_job_log(job_id, "stderr", "diagnostic persistence failed: " + str(exc))
+                status = "completed" if code == 0 else "failed"
+                self.set_job_status(job_id, status, code)
+                with self.connect() as con:
+                    con.execute("INSERT INTO command_history(created_at,action,command,exit_code,read_only) VALUES(?,?,?,?,?)", (int(time.time()), action, shlex.join(cmd), code, 1 if read_only else 0))
+                self.add_job_log(job_id, "system", f"finished with exit code {code}")
+            except Exception as exc:
+                if proc and proc.poll() is None:
+                    proc.kill()
+                self.add_job_log(job_id, "stderr", str(exc))
+                self.set_job_status(job_id, "failed", 1)
+            finally:
+                with self.lock:
+                    if job_id in self.jobs:
+                        self.jobs[job_id]["process"] = None
+                    q = self.log_queues.get(job_id)
+                    if q is not None:
+                        q.put(None)
+
+    def public_job(self, job):
+        return {k: v for k, v in job.items() if k not in {"process"}}
+
+    def jobs_list(self):
+        db_jobs = self.rows("SELECT id,action,command,status,started_at,finished_at,exit_code,read_only FROM jobs ORDER BY COALESCE(started_at, rowid) DESC LIMIT 100")
+        with self.lock:
+            mem = {jid: self.public_job(j) for jid, j in self.jobs.items()}
+        for j in db_jobs:
+            if j["id"] in mem:
+                j.update({k: v for k, v in mem[j["id"]].items() if k != "logs"})
+                j["log_count"] = len(mem[j["id"]].get("logs", []))
+        return db_jobs
+
+STATE = None
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "NetOpsServe/0.1"
+
+    def log_message(self, fmt, *args):
+        return
+
+    def send_json(self, obj, status=200):
+        data = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def read_body_json(self):
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            return {}
+        return json.loads(self.rfile.read(length).decode("utf-8"))
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        qs = parse_qs(parsed.query)
+        try:
+            if path == "/":
+                self.send_html()
+            elif not path.startswith("/api/") and self.send_static(path):
+                return
+            elif path == "/api/health":
+                self.send_json({"ok": True, "version": "5.5.0", "paths": {"db": STATE.db_path, "cache_dir": STATE.cache_dir, "config_file": STATE.config_file}, "counts": STATE.counts(), "config": STATE.read_config()})
+            elif path == "/api/devices":
+                q = (qs.get("q", [""])[0] or "").lower()
+                rows = STATE.rows("SELECT * FROM devices ORDER BY status DESC, hostname, ip")
+                if q:
+                    rows = [r for r in rows if q in json.dumps(r).lower()]
+                self.send_json(rows)
+            elif path == "/api/aps":
+                self.send_json(STATE.rows("SELECT * FROM aps ORDER BY status DESC, name, ip"))
+            elif path == "/api/neighbors":
+                self.send_json(STATE.rows("SELECT * FROM neighbors ORDER BY local_name, local_port"))
+            elif path == "/api/topology":
+                self.send_json({"nodes": self.topology_nodes(), "edges": STATE.rows("SELECT * FROM neighbors ORDER BY local_name, local_port")})
+            elif path == "/api/topology/changes":
+                limit = int((qs.get("limit", ["100"])[0] or "100"))
+                self.send_json(STATE.topology_changes_payload(limit))
+            elif path == "/api/history":
+                limit = int((qs.get("limit", ["100"])[0] or "100"))
+                q = (qs.get("q", [""])[0] or "").lower()
+                rows = STATE.rows("SELECT * FROM inventory_history ORDER BY created_at DESC,id DESC LIMIT ?", (limit,))
+                if q:
+                    rows = [r for r in rows if q in json.dumps(r).lower()]
+                self.send_json(rows)
+            elif path == "/api/memory/switch":
+                target = (qs.get("target", qs.get("q", [""]))[0] or "").strip()
+                if not target:
+                    self.send_json({"ok": False, "error": "missing target"}, 400)
+                else:
+                    proc = subprocess.run([tool("netops"), "memory", "switch", target, "--json"], text=True, capture_output=True, timeout=20)
+                    if proc.returncode == 0:
+                        self.send_json(json.loads(proc.stdout or "{}"))
+                    else:
+                        self.send_json({"ok": False, "error": proc.stderr.strip() or proc.stdout.strip()}, 500)
+            elif path == "/api/attention":
+                limit = int((qs.get("limit", ["80"])[0] or "80"))
+                self.send_json(STATE.attention_payload(limit))
+            elif path == "/api/backups":
+                limit = int((qs.get("limit", ["100"])[0] or "100"))
+                self.send_json(STATE.backups_payload(limit))
+            elif path == "/api/workflows":
+                self.send_json(STATE.workflows_payload())
+            elif path == "/api/diagnostics":
+                limit = int((qs.get("limit", ["80"])[0] or "80"))
+                self.send_json(STATE.diagnostics_payload(limit))
+            elif path == "/api/automation":
+                self.send_json(STATE.automation_profiles())
+            elif path == "/api/jobs":
+                self.send_json(STATE.jobs_list())
+            elif path.startswith("/api/jobs/") and path.endswith("/events"):
+                job_id = path.split("/")[3]
+                self.send_events(job_id)
+            elif path.startswith("/api/jobs/"):
+                job_id = path.split("/")[3]
+                with STATE.lock:
+                    job = STATE.jobs.get(job_id)
+                    if job:
+                        self.send_json(STATE.public_job(job))
+                        return
+                row = STATE.one("SELECT * FROM jobs WHERE id=?", (job_id,))
+                if not row:
+                    self.send_json({"error": "job not found"}, 404)
+                else:
+                    row["logs"] = STATE.rows("SELECT created_at,stream,line FROM job_logs WHERE job_id=? ORDER BY id", (job_id,))
+                    self.send_json(row)
+            elif path == "/api/options":
+                self.send_json(STATE.ui_options())
+            elif path == "/api/commands":
+                self.send_json(COMMANDS)
+            elif path == "/api/settings":
+                self.send_json(STATE.read_config())
+            else:
+                self.send_json({"error": "not found"}, 404)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 500)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        try:
+            if path == "/api/jobs":
+                body = self.read_body_json()
+                job = STATE.create_job(body.get("action", ""), body.get("args", {}))
+                self.send_json(job, 201)
+            elif path == "/api/preview":
+                body = self.read_body_json()
+                try:
+                    cmd, read_only, writes_local = STATE.command_for(body.get("action", ""), body.get("args", {}))
+                    self.send_json({"command": shlex.join(cmd), "read_only": read_only, "writes_local": writes_local, "blocked": False})
+                except PermissionError as exc:
+                    self.send_json({"blocked": True, "reason": str(exc), "read_only": False, "writes_local": False}, 200)
+            elif path.startswith("/api/automation/"):
+                parts = path.strip("/").split("/")
+                profile_id = parts[2] if len(parts) >= 3 else ""
+                if len(parts) == 4 and parts[3] == "run":
+                    self.send_json(STATE.run_automation_profile(profile_id), 201)
+                else:
+                    self.send_json(STATE.update_automation_profile(profile_id, self.read_body_json()))
+            elif path.startswith("/api/jobs/") and path.endswith("/cancel"):
+                job_id = path.split("/")[3]
+                with STATE.lock:
+                    job = STATE.jobs.get(job_id)
+                    proc = job.get("process") if job else None
+                if proc and proc.poll() is None:
+                    proc.terminate()
+                    STATE.set_job_status(job_id, "cancelled", -signal.SIGTERM)
+                    self.send_json({"ok": True})
+                else:
+                    self.send_json({"ok": False, "error": "job is not running"}, 409)
+            else:
+                self.send_json({"error": "not found"}, 404)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 400)
+
+    def topology_nodes(self):
+        seen = {}
+        for row in STATE.rows("SELECT local_ip,local_name,remote_ip,remote_name FROM neighbors"):
+            if row.get("local_ip"):
+                seen[row["local_ip"]] = row.get("local_name") or row["local_ip"]
+            rip = row.get("remote_ip")
+            if rip and rip != "?.?.?.?":
+                seen[rip] = row.get("remote_name") or rip
+        return [{"id": ip, "label": name} for ip, name in sorted(seen.items(), key=lambda x: x[1].lower())]
+
+    def send_events(self, job_id):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        sent = 0
+        def emit(obj):
+            self.wfile.write(("data: " + json.dumps(obj, separators=(",", ":")) + "\n\n").encode("utf-8"))
+            self.wfile.flush()
+        with STATE.lock:
+            job = STATE.jobs.get(job_id)
+            if job:
+                for item in job.get("logs", []):
+                    emit(item); sent += 1
+        q = STATE.log_queues.get(job_id)
+        if q is None:
+            for item in STATE.rows("SELECT created_at,stream,line FROM job_logs WHERE job_id=? ORDER BY id", (job_id,)):
+                emit(item)
+            return
+        while True:
+            try:
+                item = q.get(timeout=20)
+            except queue.Empty:
+                emit({"stream": "system", "line": "heartbeat", "created_at": int(time.time())})
+                continue
+            if item is None:
+                break
+            emit(item)
+
+    def send_static(self, path):
+        root = os.path.join(STATE.install_dir, "webui", "dist")
+        if not os.path.isdir(root):
+            return False
+        rel = os.path.normpath(path.lstrip("/"))
+        if not rel or rel.startswith("..") or os.path.isabs(rel):
+            return False
+        full = os.path.join(root, rel)
+        if os.path.isdir(full):
+            full = os.path.join(full, "index.html")
+        if not os.path.isfile(full):
+            return False
+        with open(full, "rb") as fh:
+            data = fh.read()
+        ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+        return True
+
+    def send_html(self):
+        built = os.path.join(STATE.install_dir, "webui", "dist", "index.html")
+        if os.path.isfile(built):
+            with open(built, "rb") as fh:
+                data = fh.read()
+        else:
+            data = HTML.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+HTML = r'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NetOps Studio</title>
+<style>
+:root{color-scheme:light;--bg:#f7f8fa;--line:#e3e6ea;--text:#1f2937;--muted:#667085;--accent:#4263eb}*{box-sizing:border-box}body{margin:0;min-height:100dvh;background:var(--bg);color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{max-width:860px;margin:0 auto;padding:48px 20px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--line);padding-bottom:18px}.brand{display:flex;align-items:center;gap:10px;font-weight:700}.mark{width:30px;height:30px;display:grid;place-items:center;border:1px solid var(--line);border-radius:6px;background:#fff}.section{padding:22px 0;border-bottom:1px solid var(--line)}h1{font-size:22px;line-height:1.2;margin:0 0 8px}p{margin:0;color:var(--muted)}code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;color:var(--text)}a{color:var(--accent)}</style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="top"><div class="brand"><span class="mark">N</span><span>NetOps Studio</span></div><span>Fallback</span></div>
+    <section class="section"><h1>WebUI build not found</h1><p>The service is running, but <code>webui/dist/index.html</code> is missing. Run <code>npm run build</code> inside <code>webui</code>, then refresh this page.</p></section>
+    <section class="section"><p>API endpoints are still available under <code>/api</code>.</p></section>
+  </main>
+</body>
+</html>'''
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", default="8787", type=int)
+    parser.add_argument("--install-dir", required=True)
+    args = parser.parse_args()
+    global STATE
+    STATE = State(args.install_dir)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"NetOps cockpit: http://{args.host}:{args.port}", flush=True)
+    server.serve_forever()
+
+if __name__ == "__main__":
+    main()
+PY_SERVER
+    chmod 700 "$serve_py"
+    echo "Starting NetOps cockpit on http://${host}:${port}"
+    exec python3 "$serve_py" --host "$host" --port "$port" --install-dir "$INSTALL_DIR"
+}
+
+if [[ "${1:-}" == "--version" || "${1:-}" == "version" ]]; then
+    echo "NetOps ${VERSION}"
+    exit 0
+fi
+
+if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    show_help
+    exit 0
+fi
+
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+    discover|discovery) exec "${INSTALL_DIR}/netops-discovery" "$@" ;;
+    connect)  exec "${INSTALL_DIR}/netops-connect" "$@" ;;
+    control)  exec "${INSTALL_DIR}/netops-control" "$@" ;;
+    probe)    exec "${INSTALL_DIR}/netops-probe" "$@" ;;
+    db)       netops_db "$@" ;;
+    serve)    netops_serve "$@" ;;
+    check)    netops_check "$@" ;;
+    interface) netops_interface "$@" ;;
+    health)   netops_health "$@" ;;
+    commands) netops_commands "$@" ;;
+    run)      netops_run "$@" ;;
+    workflow) netops_workflow "$@" ;;
+    topology) netops_topology "$@" ;;
+    history|archive) netops_history "$@" ;;
+    memory)   netops_memory "$@" ;;
+    ask)      exec "${INSTALL_DIR}/netops" ask "$@" ;;
+    --wizard)
+        source "${INSTALL_DIR}/netops-lib.sh"
+        run_config_wizard
+        ;;
+    *)
+        echo "Unknown command: $COMMAND" >&2
+        show_help
+        exit 1
+        ;;
+esac

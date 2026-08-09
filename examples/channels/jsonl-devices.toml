@@ -1,0 +1,24 @@
+schema_version = 1
+
+[channel]
+name = "jsonl-devices"
+kind = "jsonl"
+enabled = true
+entity_kind = "device"
+source_id_field = "id"
+observed_at_field = "observed_at"
+
+[reader]
+path = "../data/devices.jsonl"
+completeness = "partial"
+confidence = 85
+
+[fields]
+ip = "ip"
+hostname = "hostname"
+platform = "platform"
+status = "status"
+
+[provenance]
+owner = "network-operations"
+source_system = "event-export"
