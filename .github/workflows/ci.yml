@@ -73,6 +73,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: netops-platform-dist
+          include-hidden-files: true
           path: |
             dist/*
             .release/*

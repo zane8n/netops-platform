@@ -41,6 +41,8 @@
 
 - The WebUI lockfile now resolves patched PostCSS and Nano ID releases, and CI
   rejects future high or critical npm advisory findings.
+- Release CI explicitly retains the hidden checksum, SBOM, and provenance
+  directory in its downloadable artifact.
 - Device SSH now requires and validates a profile SSH username before opening
   the vault, passes login and host as separate OpenSSH arguments, and preserves
   `ssh_user` through profile migration and shell configuration writes.
