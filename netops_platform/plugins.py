@@ -1,4 +1,4 @@
-"""Trusted, explicitly enabled Python plugin discovery for NetOps."""
+"""Trusted, explicitly enabled Python plugin discovery for Netrune."""
 
 from __future__ import annotations
 
@@ -17,11 +17,18 @@ from netops_platform.contracts import PluginDescriptorV1
 
 PLUGIN_API_VERSION = "1"
 PLUGIN_GROUPS = (
+    "netrune.ingest",
+    "netrune.device_drivers",
+    "netrune.parsers",
+    "netrune.exporters",
+)
+LEGACY_PLUGIN_GROUPS = (
     "netops.ingest",
     "netops.device_drivers",
     "netops.parsers",
     "netops.exporters",
 )
+DISCOVERY_PLUGIN_GROUPS = PLUGIN_GROUPS + LEGACY_PLUGIN_GROUPS
 PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
@@ -83,14 +90,14 @@ class PluginManager:
     @staticmethod
     def _split_plugin_id(plugin_id: str) -> tuple[str, str]:
         group, separator, name = str(plugin_id).partition(":")
-        if not separator or group not in PLUGIN_GROUPS or not PLUGIN_NAME_RE.fullmatch(name):
+        if not separator or group not in DISCOVERY_PLUGIN_GROUPS or not PLUGIN_NAME_RE.fullmatch(name):
             raise ValueError("plugin id must be <supported-group>:<entry-point-name>")
         return group, name
 
     def _entry_points(self) -> list[Any]:
         discovered = metadata.entry_points()
         rows: list[Any] = []
-        for group in PLUGIN_GROUPS:
+        for group in DISCOVERY_PLUGIN_GROUPS:
             if hasattr(discovered, "select"):
                 rows.extend(discovered.select(group=group))
             else:  # pragma: no cover - compatibility for old importlib.metadata
@@ -181,7 +188,9 @@ class PluginManager:
 
     @staticmethod
     def _api_version(implementation: Any) -> str:
-        value = getattr(implementation, "NETOPS_PLUGIN_API_VERSION", None)
+        value = getattr(implementation, "NETRUNE_PLUGIN_API_VERSION", None)
+        if value is None:
+            value = getattr(implementation, "NETOPS_PLUGIN_API_VERSION", None)
         if value is None and hasattr(implementation, "plugin_descriptor"):
             descriptor = implementation.plugin_descriptor()
             value = descriptor.get("api_version") if isinstance(descriptor, dict) else getattr(descriptor, "api_version", None)
@@ -189,28 +198,28 @@ class PluginManager:
 
     @staticmethod
     def _capabilities(implementation: Any) -> tuple[str, ...]:
-        value = getattr(implementation, "NETOPS_PLUGIN_CAPABILITIES", ())
+        value = getattr(implementation, "NETRUNE_PLUGIN_CAPABILITIES", None)
+        if value is None:
+            value = getattr(implementation, "NETOPS_PLUGIN_CAPABILITIES", ())
         if callable(value):
             value = value()
         return tuple(str(item) for item in (value or ()))
 
     @staticmethod
     def _validate_interface(group: str, implementation: Any) -> None:
-        required = {
-            "netops.ingest": "read_records",
-            "netops.parsers": "parse",
-            "netops.exporters": "export",
-        }
-        if group in required and not callable(getattr(implementation, required[group], None)):
-            raise RuntimeError(f"{group} plugin must expose {required[group]}()")
-        if group == "netops.device_drivers":
+        kind = group.partition(".")[2]
+        required = {"ingest": "read_records", "parsers": "parse", "exporters": "export"}
+        if kind in required and not callable(getattr(implementation, required[kind], None)):
+            raise RuntimeError(f"{group} plugin must expose {required[kind]}()")
+        if kind == "device_drivers":
             from netops_platform.devices import DeviceDriver
 
-            if not isinstance(implementation, DeviceDriver) and not callable(getattr(implementation, "netops_device_drivers", None)):
-                raise RuntimeError("netops.device_drivers plugin must expose netops_device_drivers() or one DeviceDriver")
+            provider = getattr(implementation, "netrune_device_drivers", None) or getattr(implementation, "netops_device_drivers", None)
+            if not isinstance(implementation, DeviceDriver) and not callable(provider):
+                raise RuntimeError("netrune.device_drivers plugin must expose netrune_device_drivers() or one DeviceDriver")
 
     def load_enabled(self, group: str = "") -> list[LoadedPlugin]:
-        if group and group not in PLUGIN_GROUPS:
+        if group and group not in DISCOVERY_PLUGIN_GROUPS:
             raise ValueError(f"unsupported plugin group: {group}")
         enabled = self._enabled()
         descriptors = self.discover()

@@ -1,6 +1,6 @@
 # Profiles, Ingest, Plugins, and Drivers
 
-NetOps customization is profile-scoped and data-driven. Most operators should
+Netrune customization is profile-scoped and data-driven. Most operators should
 not need to fork the project.
 
 ## Ingest Contract
@@ -13,12 +13,12 @@ hash, and deterministic idempotency key.
 Place channel TOML files in the active profile's `channels` directory:
 
 ```bash
-netops profile paths
-netops ingest validate
-netops ingest channels
-netops ingest run csv-devices
-netops ingest history
-netops ingest rejects
+netrune profile paths
+netrune ingest validate
+netrune ingest channels
+netrune ingest run csv-devices
+netrune ingest history
+netrune ingest rejects
 ```
 
 CSV, JSON, JSONL, HTTPS JSON, NetBox, stdin NDJSON, and fixture-gated SNMPv3
@@ -41,9 +41,9 @@ Manifests accept only `vault:`, `env:`, or permission-validated `file:` secret
 references. Literal secrets are rejected. Prefer named secrets:
 
 ```bash
-netops secrets set ingest/netbox/token
-netops secrets status ingest/netbox/token
-netops secrets list
+netrune secrets set ingest/netbox/token
+netrune secrets status ingest/netbox/token
+netrune secrets list
 ```
 
 Secret values are prompted through the terminal and never returned by list,
@@ -54,20 +54,20 @@ status, config export, support bundle, or logs.
 Plugins use standard Python entry points:
 
 ```toml
-[project.entry-points."netops.parsers"]
+[project.entry-points."netrune.parsers"]
 example = "example_package.parser:plugin"
 ```
 
-Groups are `netops.ingest`, `netops.device_drivers`, `netops.parsers`, and
-`netops.exporters`. Discovery records package source and version without
+Groups are `netrune.ingest`, `netrune.device_drivers`, `netrune.parsers`, and
+`netrune.exporters`. Discovery records package source and version without
 importing disabled code. Enable only reviewed packages:
 
 ```bash
-netops plugin list
-netops plugin groups
-netops plugin enable netops.parsers:example
-netops plugin check netops.parsers
-netops plugin disable netops.parsers:example
+netrune plugin list
+netrune plugin groups
+netrune plugin enable netrune.parsers:example
+netrune plugin check netrune.parsers
+netrune plugin disable netrune.parsers:example
 ```
 
 API-incompatible, colliding, or failed plugins are isolated and reported.
@@ -76,18 +76,18 @@ Python code and are not a security sandbox.
 
 ### Plugin Runtime Protocol
 
-Every plugin object must expose `NETOPS_PLUGIN_API_VERSION = "1"`. Optional
-`NETOPS_PLUGIN_CAPABILITIES` values are normalized and checked; any write,
+Every plugin object must expose `NETRUNE_PLUGIN_API_VERSION = "1"`. Optional
+`NETRUNE_PLUGIN_CAPABILITIES` values are normalized and checked; any write,
 shell, subprocess, process, exec, execute, or system claim is rejected.
 
 The group-specific interfaces are:
 
 | Group | Required object interface | Runtime use in 8.5 |
 |---|---|---|
-| `netops.ingest` | `read_records(channel, reader, secrets)` returning an iterable of mappings | Selected by a `plugin` channel's `reader.provider` |
-| `netops.device_drivers` | One `DeviceDriver`, or `netops_device_drivers()` returning drivers | Revalidated and loaded into only the selected profile's registry clone |
-| `netops.parsers` | Callable `parse()` method | Loaded into the internal parser extension registry |
-| `netops.exporters` | Callable `export()` method | Loaded into the internal exporter extension registry |
+| `netrune.ingest` | `read_records(channel, reader, secrets)` returning an iterable of mappings | Selected by a `plugin` channel's `reader.provider` |
+| `netrune.device_drivers` | One `DeviceDriver`, or `netrune_device_drivers()` returning drivers | Revalidated and loaded into only the selected profile's registry clone |
+| `netrune.parsers` | Callable `parse()` method | Loaded into the internal parser extension registry |
+| `netrune.exporters` | Callable `export()` method | Loaded into the internal exporter extension registry |
 
 An ingest provider is configured with a normal channel manifest:
 

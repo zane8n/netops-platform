@@ -3,22 +3,14 @@ import io
 import json
 import os
 from pathlib import Path
-import runpy
 import stat
-import subprocess
 import tempfile
-import tomllib
 import unittest
 from unittest import mock
 
-
 import netops_core as netops
-from netops_platform.preferences import PreferenceStore
-from netops_platform.service import NetOpsService
-
 
 ROOT = Path(__file__).resolve().parents[1]
-
 
 class NetOpsV8Test(unittest.TestCase):
     def setUp(self):
@@ -39,114 +31,20 @@ class NetOpsV8Test(unittest.TestCase):
         )
         self.env.start()
         self.app = netops.App(ROOT)
-        self.service = NetOpsService(self.app)
 
     def tearDown(self):
-        self.app.shutdown_jobs(wait=0.1)
         self.env.stop()
         self.temp.cleanup()
 
-    def add_device(self, ip="192.0.2.1", hostname="SW1", platform="Cisco IOS XE 17.9"):
+    def add_device(self, ip="192.0.2.1", hostname="SW1", platform="Cisco IOS XE 17.9", serial="SERIAL", model="C9300"):
         self.app.state.execute(
             "INSERT INTO devices(ip,hostname,platform,model,serial,mac,source,last_seen,status) VALUES(?,?,?,?,?,?,?,?,?)",
-            (ip, hostname, platform, "C9300", "SERIAL", "", "test", 1_700_000_000, "ONLINE"),
+            (ip, hostname, platform, model, serial, "", "test", 1_700_000_000, "ONLINE"),
         )
-
-    def test_registry_is_fully_enriched_for_generated_forms(self):
-        registry = self.service.registry()
-        self.assertGreaterEqual(len(registry), 90)
-        required = {"id", "label", "description", "domain", "arg_schema", "safety_class", "output_view", "capability", "confirmation_policy"}
-        for command in registry:
-            with self.subTest(command=command["id"]):
-                self.assertTrue(required.issubset(command))
-                for field in command["arg_schema"]:
-                    self.assertIn("help", field)
-                    self.assertIn("group", field)
-                    self.assertIn("default", field)
-
-    def test_tui_help_is_side_effect_free_and_open_is_a_supported_alias(self):
-        from netops_platform.tui.main import parse_tui_args
-
-        with mock.patch.object(netops.App, "__init__", side_effect=AssertionError("help initialized runtime state")), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
-            rc = netops.main(["tui", "--help"])
-        self.assertEqual(rc, netops.SUCCESS)
-        self.assertIn("netops tui", output.getvalue())
-        self.assertEqual(parse_tui_args([]), ("operations", ""))
-        self.assertEqual(parse_tui_args(["--view", "inventory", "--target", "SW1"]), ("inventory", "SW1"))
-        scripts = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["scripts"]
-        self.assertEqual(scripts["netop"], scripts["netops"])
-        core = object()
-        with mock.patch.dict(os.environ, {"TERM": "xterm-256color"}), \
-             mock.patch.object(netops.sys.stdin, "isatty", return_value=True), \
-             mock.patch.object(netops.sys.stdout, "isatty", return_value=True), \
-             mock.patch.object(netops, "App", return_value=core), \
-             mock.patch("netops_platform.tui.main.launch_tui", return_value=0) as launch:
-            rc = netops.main(["tui", "open", "--view", "inventory"])
-        self.assertEqual(rc, netops.SUCCESS)
-        launch.assert_called_once_with(core, ["--view", "inventory"])
-
-    def test_source_launcher_hands_tui_to_managed_runtime_and_tui_import_is_lazy(self):
-        system_python = Path("/usr/bin/python3")
-        managed_python = ROOT / ".venv" / "bin" / "python"
-        if not system_python.is_file() or not managed_python.is_file():
-            self.skipTest("source-runtime handoff requires the local synchronized environment")
-        environment = dict(os.environ)
-        environment["PYTHONPATH"] = str(ROOT)
-        imported = subprocess.run(
-            [str(system_python), "-c", "import netops_platform.tui.main; print('lazy-ok')"],
-            cwd=ROOT, env=environment, text=True, capture_output=True, timeout=10,
-        )
-        self.assertEqual(imported.returncode, 0, imported.stderr)
-        self.assertIn("lazy-ok", imported.stdout)
-        with mock.patch("sys.argv", [str(ROOT / "netops"), "--no-color", "tui"]), \
-             mock.patch.object(netops.sys, "prefix", "/usr"), \
-             mock.patch("importlib.util.find_spec", return_value=None), \
-             mock.patch("os.execve", side_effect=RuntimeError("managed handoff")) as execute:
-            with self.assertRaisesRegex(RuntimeError, "managed handoff"):
-                runpy.run_path(str(ROOT / "netops"), run_name="netops_bootstrap_test")
-        self.assertEqual(Path(execute.call_args.args[0]), managed_python)
-        self.assertEqual(execute.call_args.args[1][1:], [str(ROOT / "netops"), "--no-color", "tui"])
-        launched = subprocess.run(
-            [str(system_python), str(ROOT / "netops"), "tui", "--help"],
-            cwd=ROOT, env=environment, text=True, capture_output=True, timeout=10,
-        )
-        self.assertEqual(launched.returncode, 0, launched.stderr)
-        self.assertIn("command-first local operator console", launched.stdout)
-        self.assertNotIn("No module named 'textual'", launched.stderr)
 
     def test_version_falls_back_to_installed_distribution_metadata(self):
         with mock.patch.object(Path, "read_text", side_effect=OSError), mock.patch.object(netops, "distribution_version", return_value="8.5.0b1"):
             self.assertEqual(netops.resolved_version(), "8.5.0b1")
-
-    def test_preferences_are_normalized_private_and_atomic(self):
-        path = self.base / "preferences" / "tui.json"
-        store = PreferenceStore(path)
-        store.save(
-            {
-                "theme": "invalid",
-                "density": "comfortable",
-                "saved_filters": {"inventory": "offline"},
-                "pinned_actions": ["health-check"],
-                "visible_columns": {"inventory": ["name", "ip"]},
-            }
-        )
-        loaded = store.load()
-        self.assertEqual(loaded["theme"], "auto")
-        self.assertEqual(loaded["preferences_version"], 2)
-        self.assertEqual(loaded["density"], "comfortable")
-        self.assertEqual(loaded["saved_filters"], {"inventory": "offline"})
-        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
-        self.assertEqual(list(path.parent.glob(".tui.*.tmp")), [])
-
-    def test_legacy_default_tui_preferences_migrate_to_neutral_action_hub(self):
-        path = self.base / "preferences" / "legacy-tui.json"
-        path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({"theme": "netops-dark", "last_view": "overview"}), encoding="utf-8")
-        loaded = PreferenceStore(path).load()
-        self.assertEqual(loaded["preferences_version"], 2)
-        self.assertEqual(loaded["theme"], "auto")
-        self.assertEqual(loaded["last_view"], "operations")
 
     def test_ssh_trust_enrollment_requires_matching_fingerprint_and_is_audited(self):
         self.add_device()
@@ -175,20 +73,14 @@ class NetOpsV8Test(unittest.TestCase):
         self.assertEqual(rc, netops.AUTH)
         self.assertFalse(self.app.paths.ssh_known_hosts_file.exists())
 
-    def test_vlan_preview_and_service_confirmation_are_bound_to_exact_intent(self):
+    def test_vlan_preview_is_bound_to_exact_intent_and_stays_confirm_gated(self):
         args = {"target":"SW1", "interface":"Gi1/0/7", "vlan_mode":"access", "vlan":"131"}
-        preview = self.service.preview("vlan-set", args)
-        self.assertFalse(preview.blocked)
-        self.assertIn("--access 131 --confirm", preview.command)
-        self.assertEqual(preview.confirmation_phrase, "APPLY SW1 Gi1/0/7")
-        with self.assertRaises(PermissionError):
-            self.service.submit("vlan-set", args, reason="approved", ticket="CHG-1", preview_hash=preview.preview_hash, typed_confirmation="APPLY SOMETHING ELSE")
-        with mock.patch.object(self.app, "create_job", return_value={"id":"job1", "action":"vlan-set"}) as create:
-            result = self.service.submit("vlan-set", args, reason="approved", ticket="CHG-1", preview_hash=preview.preview_hash, typed_confirmation=preview.confirmation_phrase)
-        self.assertEqual(result["id"], "job1")
-        context = create.call_args.kwargs["context"]
-        self.assertEqual(context["ticket"], "CHG-1")
-        self.assertEqual(context["typed_confirmation"], preview.confirmation_phrase)
+        preview = self.app.preview_for_action("vlan-set", args)
+        self.assertEqual(preview["validation_error"], "")
+        self.assertIn("--access 131 --confirm", preview["command"])
+        self.assertEqual(preview["safety_class"], "config-write")
+        self.assertTrue(preview["requires_confirmation"])
+        self.assertFalse(preview["read_only"])
 
     def test_vlan_change_runs_preflight_backup_apply_and_verification(self):
         self.add_device()
@@ -220,6 +112,335 @@ class NetOpsV8Test(unittest.TestCase):
         self.assertEqual(capture.call_count, 2)
         self.assertEqual(json.loads(output.getvalue())["status"], "BLOCKED")
 
+    def test_parse_vlan_set_tokens_accepts_access_and_trunk_forms(self):
+        self.assertEqual(
+            self.app._parse_vlan_set_tokens(["SW1", "Gi1/0/7", "--access", "120"]),
+            {"target": "SW1", "interface": "Gi1/0/7", "vlan_mode": "access", "vlan": "120"},
+        )
+        self.assertEqual(
+            self.app._parse_vlan_set_tokens(["SW1", "Gi1/0/48", "--trunk", "10-20", "--native", "1", "--replace"]),
+            {"target": "SW1", "interface": "Gi1/0/48", "vlan_mode": "trunk", "vlan": "10-20", "native_vlan": "1", "replace": True},
+        )
+
+    def test_parse_vlan_set_tokens_rejects_missing_and_unknown_options(self):
+        with self.assertRaises(ValueError):
+            self.app._parse_vlan_set_tokens(["SW1"])
+        with self.assertRaises(ValueError):
+            self.app._parse_vlan_set_tokens(["SW1", "Gi1/0/7", "--bogus"])
+
+    def test_vlan_batch_file_runs_each_line_independently(self):
+        self.add_device(ip="192.0.2.1", hostname="SW1")
+        self.add_device(ip="192.0.2.2", hostname="SW2")
+        file_path = self.base / "vlan_changes.txt"
+        file_path.write_text("SW1 Gi1/0/7 --access 120\nSW2 Gi1/0/8 --access 130\n", encoding="utf-8")
+        responses = [
+            (0, "Interface Gi1/0/7 switchport enabled", ""),
+            (0, "Backup saved", ""),
+            (0, "Config applied", ""),
+            (0, "[192.0.2.1] SW1 -> DEFINED\nAccess Ports: Gi1/0/7\nTrunk Ports: none\n", ""),
+            (0, "Interface Gi1/0/8 switchport enabled", ""),
+            (0, "Backup saved", ""),
+            (0, "Config applied", ""),
+            (0, "[192.0.2.2] SW2 -> DEFINED\nAccess Ports: Gi1/0/8\nTrunk Ports: none\n", ""),
+        ]
+        with mock.patch.object(self.app, "capture", side_effect=responses) as capture, mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.cmd_vlan(["set", "--file", str(file_path)], netops.GlobalOptions(confirm=True, json=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["counts"], {"total": 2, "success": 2, "attention": 0, "blocked": 0, "failed": 0, "skipped": 0})
+        self.assertEqual(capture.call_count, 8)
+        audits = self.app.state.rows("SELECT action,result FROM audit_events WHERE action='vlan-set' ORDER BY id")
+        self.assertEqual(len(audits), 2)
+
+    def test_vlan_batch_aborts_before_touching_any_device_when_a_line_does_not_resolve(self):
+        self.add_device(ip="192.0.2.1", hostname="SW1")
+        file_path = self.base / "vlan_changes.txt"
+        file_path.write_text("SW1 Gi1/0/7 --access 120\nGHOST Gi1/0/8 --access 130\n", encoding="utf-8")
+        with mock.patch.object(self.app, "capture") as capture, mock.patch("sys.stdout", new_callable=io.StringIO):
+            rc = self.app.cmd_vlan(["set", "--file", str(file_path)], netops.GlobalOptions(confirm=True, json=True))
+        self.assertEqual(rc, netops.VALIDATION)
+        capture.assert_not_called()
+
+    def test_vlan_batch_skip_unverified_continues_past_a_bad_line(self):
+        self.add_device(ip="192.0.2.1", hostname="SW1")
+        file_path = self.base / "vlan_changes.txt"
+        file_path.write_text("SW1 Gi1/0/7 --access 120\nGHOST Gi1/0/8 --access 130\n", encoding="utf-8")
+        responses = [
+            (0, "Interface Gi1/0/7 switchport enabled", ""),
+            (0, "Backup saved", ""),
+            (0, "Config applied", ""),
+            (0, "[192.0.2.1] SW1 -> DEFINED\nAccess Ports: Gi1/0/7\nTrunk Ports: none\n", ""),
+        ]
+        with mock.patch.object(self.app, "capture", side_effect=responses) as capture, mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.cmd_vlan(["set", "--file", str(file_path), "--skip-unverified"], netops.GlobalOptions(confirm=True, json=True))
+        payload = json.loads(output.getvalue())
+        # A batch with anything skipped is reported PARTIAL even when every
+        # line that did run succeeded -- something in the file still wasn't
+        # done, same semantics as apply_device_config_batch.
+        self.assertEqual(rc, netops.PARTIAL)
+        self.assertEqual(payload["counts"]["skipped"], 1)
+        self.assertEqual(payload["counts"]["success"], 1)
+        self.assertEqual(capture.call_count, 4)
+
+    def test_device_config_comma_targets_run_as_a_batch_and_dedupe_by_device(self):
+        self.add_device(ip="192.0.2.1", hostname="SW1", serial="SER-SW1")
+        self.add_device(ip="192.0.2.2", hostname="SW2", serial="SER-SW2")
+        with mock.patch.object(self.app, "capture") as capture, mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.cmd_device(["config", "SW1,SW2,192.0.2.1", "description AP"], netops.GlobalOptions(dry_run=True, json=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertEqual([row["ip"] for row in payload["devices"]], ["192.0.2.1", "192.0.2.2"])
+        self.assertEqual(payload["commands"], ["description AP"])
+        capture.assert_not_called()
+
+    def test_device_config_file_and_repeated_target_combine(self):
+        self.add_device(ip="192.0.2.1", hostname="SW1", serial="SER-SW1")
+        self.add_device(ip="192.0.2.2", hostname="SW2", serial="SER-SW2")
+        self.add_device(ip="192.0.2.3", hostname="SW3", serial="SER-SW3")
+        file_path = self.base / "devices.txt"
+        file_path.write_text("SW1\n# lab spare\n\nSW2\n", encoding="utf-8")
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.cmd_device(["config", "--file", str(file_path), "--target", "SW3", "description AP"], netops.GlobalOptions(dry_run=True, json=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertEqual([row["target"] for row in payload["devices"]], ["SW1", "SW2", "SW3"])
+        self.assertEqual(payload["commands"], ["description AP"])
+
+    def test_device_config_skip_offline_previews_which_devices_would_be_skipped(self):
+        self.add_device(ip="192.0.2.1", hostname="SW1", serial="SER-SW1")
+        self.add_device(ip="192.0.2.2", hostname="SW2", serial="SER-SW2")
+        with mock.patch.object(self.app, "ping", side_effect=lambda ip, timeout: ip == "192.0.2.1"), mock.patch.object(self.app, "capture") as capture, mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.cmd_device(["config", "SW1,SW2", "description AP", "--skip-offline"], netops.GlobalOptions(dry_run=True, json=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertEqual([row["target"] for row in payload["devices"]], ["SW1"])
+        self.assertEqual(payload["skipped"], [{"target": "SW2", "reason": "offline: no ping reply from 192.0.2.2"}])
+        capture.assert_not_called()
+
+    def test_device_config_skip_offline_never_connects_to_an_offline_device(self):
+        self.add_device(ip="192.0.2.1", hostname="SW1", serial="SER-SW1")
+        self.add_device(ip="192.0.2.2", hostname="SW2", serial="SER-SW2")
+        file_path = self.base / "devices.txt"
+        file_path.write_text("SW1\nSW2\n", encoding="utf-8")
+        responses = [
+            (0, "Backup saved to .../SW1.conf", ""),
+            (0, "Config applied.", ""),
+            (0, "Backup saved to .../SW1.conf", ""),
+        ]
+        with mock.patch.object(self.app, "ping", side_effect=lambda ip, timeout: ip == "192.0.2.1"), mock.patch.object(self.app, "capture", side_effect=responses) as capture, mock.patch("sys.stdout", new_callable=io.StringIO) as output, mock.patch("time.sleep"):
+            rc = self.app.cmd_device(["config", "--file", str(file_path), "description AP", "--skip-offline"], netops.GlobalOptions(confirm=True, json=True))
+        payload = json.loads(output.getvalue())
+        # Something in the list wasn't configured, so the batch is PARTIAL
+        # even though every device that ran succeeded.
+        self.assertEqual(rc, netops.PARTIAL)
+        self.assertEqual(payload["counts"]["success"], 1)
+        self.assertEqual(payload["counts"]["skipped"], 1)
+        self.assertEqual(capture.call_count, 3)
+        self.assertTrue(all("192.0.2.2" not in call.args[0] for call in capture.call_args_list))
+
+    def test_device_config_reports_unreachable_when_every_device_is_offline(self):
+        self.add_device(ip="192.0.2.1", hostname="SW1", serial="SER-SW1")
+        with mock.patch.object(self.app, "ping", return_value=False), mock.patch.object(self.app, "capture") as capture, mock.patch("sys.stdout", new_callable=io.StringIO):
+            rc = self.app.cmd_device(["config", "SW1", "description AP", "--skip-offline"], netops.GlobalOptions(confirm=True, json=True))
+        self.assertEqual(rc, netops.UNREACHABLE)
+        capture.assert_not_called()
+
+    def test_device_config_commands_file_feeds_a_device_list_batch(self):
+        self.add_device(ip="192.0.2.1", hostname="SW1", serial="SER-SW1")
+        self.add_device(ip="192.0.2.2", hostname="SW2", serial="SER-SW2")
+        devices = self.base / "devices.txt"
+        devices.write_text("SW1\nSW2\n", encoding="utf-8")
+        commands = self.base / "commands.txt"
+        commands.write_text("# baseline\ninterface Gi1/0/7\n  description AP-07\n\nntp server 198.51.100.5\n", encoding="utf-8")
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.cmd_device(["config", "--file", str(devices), "--commands-file", str(commands)], netops.GlobalOptions(dry_run=True, json=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertEqual(payload["commands"], ["interface Gi1/0/7", "description AP-07", "ntp server 198.51.100.5"])
+        self.assertEqual([row["target"] for row in payload["devices"]], ["SW1", "SW2"])
+
+    def test_device_config_commands_file_reaches_the_apply_phase_and_refuses_inline_mixing(self):
+        self.add_device(ip="192.0.2.1", hostname="SW1", serial="SER-SW1")
+        commands = self.base / "commands.txt"
+        commands.write_text("interface Gi1/0/7\nshutdown\n", encoding="utf-8")
+        responses = [
+            (0, "Backup saved to .../SW1.conf", ""),
+            (0, "Config applied.", ""),
+            (0, "Backup saved to .../SW1.conf", ""),
+        ]
+        with mock.patch.object(self.app, "capture", side_effect=responses) as capture, mock.patch("sys.stdout", new_callable=io.StringIO), mock.patch("time.sleep"):
+            rc = self.app.cmd_device(["config", "SW1", "--commands-file", str(commands)], netops.GlobalOptions(confirm=True, json=True))
+        self.assertEqual(rc, netops.SUCCESS)
+        apply_call = capture.call_args_list[1].args[0]
+        self.assertEqual(apply_call[-2:], ["interface Gi1/0/7", "shutdown"])
+
+        with mock.patch.object(self.app, "capture") as capture, mock.patch("sys.stdout", new_callable=io.StringIO), mock.patch("sys.stderr", new_callable=io.StringIO):
+            rc = self.app.cmd_device(["config", "SW1", "no shutdown", "--commands-file", str(commands)], netops.GlobalOptions(confirm=True, json=True))
+        self.assertEqual(rc, netops.VALIDATION)
+        capture.assert_not_called()
+
+    def test_device_config_unresolved_target_under_sudo_explains_the_root_profile(self):
+        with mock.patch.dict(os.environ, {"SUDO_USER": "operator"}), mock.patch("os.geteuid", return_value=0, create=True):
+            gate = self.app._device_config_gate("GHOST-SW01", netops.GlobalOptions(confirm=True))
+        self.assertFalse(gate["resolved"])
+        self.assertIn("running under sudo uses root's netrune profile, not operator's", gate["reason"])
+
+    def add_mixed_vendor_devices(self):
+        self.add_device(ip="192.0.2.1", hostname="SW1", serial="SER-SW1")
+        self.add_device(ip="192.0.2.2", hostname="ARUBA1", platform="HPE Aruba JL261A 2930F-24G-PoE+", model="JL261A", serial="SER-ARUBA1")
+        self.add_device(ip="192.0.2.3", hostname="ICX1", platform="RUCKUS ICX7150 FastIron 08.0.95", model="ICX7150-48P", serial="SER-ICX1")
+
+    def test_device_config_vendor_filter_previews_only_matching_devices(self):
+        self.add_mixed_vendor_devices()
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.cmd_device(["config", "SW1,ARUBA1,ICX1", "description AP", "--cisco"], netops.GlobalOptions(dry_run=True, json=True))
+        payload = json.loads(output.getvalue())
+        # The RUCKUS switch isn't approved for writes, but the filter removes
+        # it before the approval gate, so it doesn't refuse the batch.
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertEqual([row["target"] for row in payload["devices"]], ["SW1"])
+        self.assertEqual([row["target"] for row in payload["filtered"]], ["ARUBA1", "ICX1"])
+        self.assertIn("aruba-aos-switch is not cisco", payload["filtered"][0]["reason"])
+
+    def test_device_config_vendor_flags_combine(self):
+        self.add_mixed_vendor_devices()
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.cmd_device(["config", "SW1,ARUBA1,ICX1", "description AP", "--cisco", "--aruba"], netops.GlobalOptions(dry_run=True, json=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertEqual([row["target"] for row in payload["devices"]], ["SW1", "ARUBA1"])
+        self.assertEqual([row["target"] for row in payload["filtered"]], ["ICX1"])
+
+    def test_device_config_vendor_filtered_devices_do_not_make_the_batch_partial(self):
+        self.add_mixed_vendor_devices()
+        responses = [
+            (0, "Backup saved to .../SW1.conf", ""),
+            (0, "Config applied.", ""),
+            (0, "Backup saved to .../SW1.conf", ""),
+        ]
+        with mock.patch.object(self.app, "capture", side_effect=responses) as capture, mock.patch("sys.stdout", new_callable=io.StringIO) as output, mock.patch("time.sleep"):
+            rc = self.app.cmd_device(["config", "SW1,ARUBA1", "description AP", "--cisco"], netops.GlobalOptions(confirm=True, json=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertEqual(payload["counts"]["filtered"], 1)
+        self.assertEqual(capture.call_count, 3)
+        self.assertTrue(all("192.0.2.2" not in call.args[0] for call in capture.call_args_list))
+
+    def test_device_config_vendor_filter_with_no_match_is_a_validation_error(self):
+        self.add_mixed_vendor_devices()
+        with mock.patch.object(self.app, "capture") as capture, mock.patch("sys.stdout", new_callable=io.StringIO), mock.patch("sys.stderr", new_callable=io.StringIO):
+            rc = self.app.cmd_device(["config", "ARUBA1,ICX1", "description AP", "--cisco"], netops.GlobalOptions(confirm=True, json=True))
+        self.assertEqual(rc, netops.VALIDATION)
+        capture.assert_not_called()
+
+    def test_device_config_vendor_filter_still_applies_the_write_gate(self):
+        self.add_mixed_vendor_devices()
+        with mock.patch.object(self.app, "capture") as capture, mock.patch("sys.stdout", new_callable=io.StringIO):
+            rc = self.app.cmd_device(["config", "SW1,ICX1", "description AP", "--ruckus"], netops.GlobalOptions(confirm=True, json=True))
+        self.assertEqual(rc, netops.UNSUPPORTED)
+        capture.assert_not_called()
+
+    def test_device_config_refuses_an_unknown_option_instead_of_sending_it(self):
+        self.add_device(ip="192.0.2.1", hostname="SW1", serial="SER-SW1")
+        with mock.patch.object(self.app, "capture") as capture, mock.patch.object(self.app, "run_subprocess") as run_subprocess, mock.patch("sys.stdout", new_callable=io.StringIO), mock.patch("sys.stderr", new_callable=io.StringIO):
+            rc = self.app.cmd_device(["config", "SW1", "description AP", "--skip-ofline"], netops.GlobalOptions(confirm=True, json=True))
+        self.assertEqual(rc, netops.USAGE)
+        capture.assert_not_called()
+        run_subprocess.assert_not_called()
+
+    def test_device_config_runs_backup_apply_and_verify_and_is_audited(self):
+        self.add_device()
+        device, _ = self.app.resolve_device_record("SW1")
+        responses = [
+            (0, "Backup saved to .../SW1.conf", ""),
+            (0, "Config applied.", ""),
+            (0, "Backup saved to .../SW1.conf", ""),
+        ]
+        with mock.patch.object(self.app, "capture", side_effect=responses) as capture, mock.patch("sys.stdout", new_callable=io.StringIO) as output, mock.patch("time.sleep"):
+            rc = self.app.apply_device_config_change(device, "192.0.2.1", ["interface Gi1/0/7", "shutdown"], netops.GlobalOptions(confirm=True, json=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertTrue(payload["changed"])
+        self.assertEqual([row["phase"] for row in payload["phases"]], ["backup", "apply", "verify"])
+        self.assertEqual(capture.call_count, 3)
+        backup_call, apply_call, verify_call = capture.call_args_list
+        self.assertIn("backup", backup_call.args[0])
+        self.assertIn("config", apply_call.args[0])
+        self.assertIn("interface Gi1/0/7", apply_call.args[0])
+        self.assertIn("backup", verify_call.args[0])
+        audit = self.app.state.one("SELECT event_type,action,target,result FROM audit_events ORDER BY id DESC LIMIT 1")
+        self.assertEqual(audit, {"event_type": "device_config_finished", "action": "device-config", "target": "192.0.2.1", "result": "success"})
+
+    def test_device_config_stops_and_does_not_apply_when_backup_fails(self):
+        self.add_device()
+        device, _ = self.app.resolve_device_record("SW1")
+        with mock.patch.object(self.app, "capture", side_effect=[(1, "", "backup failed")]) as capture, mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.apply_device_config_change(device, "192.0.2.1", ["reload"], netops.GlobalOptions(confirm=True, json=True))
+        self.assertEqual(rc, netops.PARTIAL)
+        self.assertEqual(capture.call_count, 1)
+        self.assertEqual(json.loads(output.getvalue())["status"], "BLOCKED")
+        self.assertIsNone(self.app.state.one("SELECT 1 FROM audit_events WHERE event_type='device_config_finished'"))
+
+    def test_device_config_reports_attention_when_nothing_actually_changed(self):
+        self.add_device()
+        device, _ = self.app.resolve_device_record("SW1")
+        responses = [
+            (0, "Backup saved", ""),
+            (0, "Config applied.", ""),
+            (0, "Backup unchanged; skipped write.", ""),
+        ]
+        with mock.patch.object(self.app, "capture", side_effect=responses), mock.patch("sys.stdout", new_callable=io.StringIO) as output, mock.patch("time.sleep"):
+            rc = self.app.apply_device_config_change(device, "192.0.2.1", ["show run"], netops.GlobalOptions(confirm=True, json=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.PARTIAL)
+        self.assertEqual(payload["status"], "ATTENTION")
+        self.assertFalse(payload["changed"])
+        audit = self.app.state.one("SELECT result FROM audit_events WHERE event_type='device_config_finished'")
+        self.assertEqual(audit["result"], "attention")
+
+    def test_device_config_verify_retries_once_after_a_transient_ssh_failure_then_succeeds(self):
+        # Every phase opens its own fresh SSH session; reconnecting for
+        # verify immediately after apply's "write memory" + "exit" can race
+        # a device that's still settling (transport-level SSH failure, not
+        # a real problem). A retry after a brief pause should recover.
+        self.add_device()
+        device, _ = self.app.resolve_device_record("SW1")
+        responses = [
+            (0, "Backup saved", ""),
+            (0, "Config applied.", ""),
+            (255, "", "SSH transport failed (exit 255)"),
+            (0, "Backup saved to .../SW1.conf", ""),
+        ]
+        with mock.patch.object(self.app, "capture", side_effect=responses) as capture, mock.patch("sys.stdout", new_callable=io.StringIO) as output, mock.patch("time.sleep") as sleep:
+            rc = self.app.apply_device_config_change(device, "192.0.2.1", ["show run"], netops.GlobalOptions(confirm=True, json=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertEqual(payload["status"], "SUCCESS")
+        self.assertTrue(payload["changed"])
+        self.assertEqual(capture.call_count, 4)
+        self.assertEqual(sleep.call_count, 2)  # settle pause, then the retry backoff
+
+    def test_device_config_verify_reports_unverified_when_the_retry_also_fails(self):
+        self.add_device()
+        device, _ = self.app.resolve_device_record("SW1")
+        responses = [
+            (0, "Backup saved", ""),
+            (0, "Config applied.", ""),
+            (255, "", "SSH transport failed (exit 255)"),
+            (255, "", "SSH transport failed (exit 255)"),
+        ]
+        with mock.patch.object(self.app, "capture", side_effect=responses) as capture, mock.patch("sys.stdout", new_callable=io.StringIO) as output, mock.patch("time.sleep"):
+            rc = self.app.apply_device_config_change(device, "192.0.2.1", ["show run"], netops.GlobalOptions(confirm=True, json=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.PARTIAL)
+        self.assertEqual(payload["status"], "UNVERIFIED")
+        self.assertFalse(payload["changed"])
+        self.assertIn("could not reconnect", payload["rollback"])
+        self.assertEqual(capture.call_count, 4)
+        audit = self.app.state.one("SELECT result FROM audit_events WHERE event_type='device_config_finished'")
+        self.assertEqual(audit["result"], "unverified")
+
     def test_large_trunk_change_is_sampled_and_never_claimed_fully_verified(self):
         self.add_device()
         request = self.app.vlan_change_request({"target":"SW1", "interface":"Gi1/0/48", "vlan_mode":"trunk", "vlan":"100-120"})
@@ -236,34 +457,72 @@ class NetOpsV8Test(unittest.TestCase):
         self.assertFalse(payload["verified"])
         self.assertEqual(payload["status"], "ATTENTION")
 
+    def workflow_steps(self, name="morning-check"):
+        # Read the manifest rather than hard-coding a count, so adding a step
+        # does not fail a test that is about failure policy.
+        return len(self.app.workflow_manifest(name)["steps"])
+
+    def run_workflow(self, responses, name="morning-check"):
+        with mock.patch.object(self.app, "capture_streamed", side_effect=responses) as capture, \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.cmd_workflow([name], netops.GlobalOptions(json=True))
+        return rc, json.loads(output.getvalue()), capture
+
     def test_workflow_emits_one_structured_summary_and_continues_by_policy(self):
+        total = self.workflow_steps()
         responses = [(0, '{"ok":true,"status":"PASS"}', ""), (4, '{"ok":false,"status":"DOWN"}', "")]
-        responses.extend((0, '{"ok":true}', "") for _ in range(4))
-        with mock.patch.object(self.app, "capture_streamed", side_effect=responses) as capture, mock.patch("sys.stdout", new_callable=io.StringIO) as output:
-            rc = self.app.cmd_workflow(["morning-check"], netops.GlobalOptions(json=True))
-        payload = json.loads(output.getvalue())
+        responses.extend((0, '{"ok":true}', "") for _ in range(total - 2))
+        rc, payload, capture = self.run_workflow(responses)
         self.assertEqual(rc, netops.PARTIAL)
         self.assertEqual(payload["status"], "PARTIAL")
-        self.assertEqual(payload["completed_steps"], 6)
+        self.assertEqual(payload["completed_steps"], total)
         self.assertEqual(payload["failed_steps"], 1)
-        self.assertEqual(capture.call_count, 6)
+        self.assertEqual(capture.call_count, total)
 
-    def test_job_results_are_adapted_to_dynamic_datasets(self):
-        self.app.state.execute(
-            "INSERT INTO jobs(id,action,command,status,created_at,started_at,finished_at,exit_code,read_only,writes_local,result_json,summary,duration_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("job-v8", "diagnose-speed", "netops diagnose speed", "partial", 100, 101, 102, 3, 1, 1, json.dumps({"status":"PARTIAL", "rows":[{"status":"WARN", "target":"internet"}], "findings":[{"severity":"warning", "code":"LOW_CONFIDENCE", "message":"Only one server completed"}]}), "PARTIAL", 1200),
-        )
-        self.app.state.execute(
-            "INSERT INTO job_logs(job_id,created_at,stream,line,event_type,payload_json) VALUES(?,?,?,?,?,?)",
-            ("job-v8", 101, "system", "started", "log", "{}"),
-        )
-        envelope = self.service.job_result("job-v8")
-        self.assertIsNotNone(envelope)
-        self.assertEqual(envelope.status, "partial")
-        self.assertIn("rows", {dataset.id for dataset in envelope.datasets})
-        self.assertIn("job_events", {dataset.id for dataset in envelope.datasets})
-        self.assertGreaterEqual(len(envelope.findings), 2)
+    def test_a_step_that_reports_findings_has_not_failed(self):
+        """`health attention` exits PARTIAL exactly when it has something to show.
 
+        Calling that a failure put a red row on every healthy morning, which is
+        how an operator learns to stop reading the summary.
+        """
+        total = self.workflow_steps()
+        responses = [(0, '{"ok":true}', "") for _ in range(total - 1)]
+        responses.append((netops.PARTIAL, '{"ok":true,"rows":[{"kind":"health"}]}', ""))
+        rc, payload, _ = self.run_workflow(responses)
+        self.assertEqual(payload["failed_steps"], 0)
+        self.assertEqual(payload["attention_steps"], 1)
+        self.assertEqual(payload["status"], "ATTENTION")
+        self.assertEqual(payload["steps"][-1]["status"], "ATTENTION")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(rc, netops.PARTIAL)
+
+    def test_findings_do_not_stop_a_workflow_that_stops_on_failure(self):
+        # on_failure="stop" must react to a broken step, not to a step that
+        # found something worth reporting.
+        manifest = self.app.workflow_manifest("morning-check")
+        total = len(manifest["steps"])
+        responses = [(netops.PARTIAL, '{"ok":true}', "") for _ in range(total)]
+        with mock.patch.object(self.app, "workflow_manifest", return_value={
+            **manifest,
+            "steps": [{**item, "on_failure": "stop"} for item in manifest["steps"]],
+        }):
+            _, payload, capture = self.run_workflow(responses)
+        self.assertEqual(capture.call_count, total)
+        self.assertFalse(payload["stopped"])
+
+    def test_a_clean_morning_reports_success(self):
+        total = self.workflow_steps()
+        _, payload, _ = self.run_workflow([(0, '{"ok":true}', "") for _ in range(total)])
+        self.assertEqual(payload["status"], "SUCCESS")
+        self.assertEqual(payload["attention_steps"], 0)
+
+    def test_morning_check_refreshes_topology_before_reviewing_it(self):
+        """Reviewing recorded changes without scanning reports yesterday."""
+        steps = [item["id"] for item in self.app.workflow_manifest("morning-check")["steps"]]
+        self.assertIn("topology-scan", steps)
+        self.assertLess(steps.index("topology-scan"), steps.index("topology"))
+        # Reachability first, so the scan has fresh status to skip offline by.
+        self.assertLess(steps.index("health"), steps.index("topology-scan"))
 
 if __name__ == "__main__":
     unittest.main()

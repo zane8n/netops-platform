@@ -1,69 +1,65 @@
-# NetOps 8.5 Architecture
+# Netrune 8.5 Architecture
 
 ## Purpose
 
-NetOps 8.5 is a local-first, profile-scoped network operations application. A
+Netrune 8.5 is a local-first, profile-scoped network operations application. A
 single policy core remains responsible for inventory, chronological state,
 transport policy, diagnostics, command construction, and guarded execution.
-The platform package gives the CLI, terminal console, jobs, ingest channels,
-plugins, path inspection, exports, and future clients versioned contracts.
+The platform package gives the CLI, jobs, ingest channels, plugins, path
+inspection, and exports versioned contracts. The full-screen Textual console
+and its headless `service.py` boundary were removed (see
+[ADR 0001](adr/0001-local-first-operator-console.md), "Superseded"); every
+operator interface is the CLI.
 
 ## Runtime layers
 
 ```text
 Operator
   |
-  +-- Textual console -----------+
-  +-- noun-first CLI ------------+---- netops_platform.core.App
-  +-- localhost API / WebUI -----+        |
+  +-- noun-first CLI ------------+---- netrune.core.App
+  +-- traffic collector ---------+        |
                                           +-- SQLite canonical state
-netops_platform                              +-- job and audit lifecycle
+netrune                              +-- job and audit lifecycle
   +-- contracts.py                          +-- policy and command registry
   +-- profiles.py                           +-- profile-scoped XDG paths
   +-- ingest.py                             +-- observations and provenance
   +-- plugins.py                            +-- trusted entry-point lifecycle
   +-- path_inspector.py                     +-- bounded L2/L3 evidence graph
   +-- privacy.py / release.py               +-- publication and artifacts
-  +-- service.py                            +-- helper process supervision
-  +-- preferences.py                        +-- shell/vendor adapters
-  +-- tui/
+  +-- traffic*.py                           +-- watchlist poller, exposition,
+                                                stack provisioning
 ```
 
 ### Core
 
-The canonical core implementation is `netops_platform/core.py`; temporary
-flat modules such as `netops_core.py` alias their canonical package modules to
-preserve imports and helper entry points through the v8 release line. The core
-owns target resolution, schema migration, the command
-registry, command construction, process groups, jobs, audit records, SSH trust,
-configuration gates, and compatibility dispatch. Shell helpers remain adapter
+The canonical core implementation is `netops_platform/core.py`; the top-level
+flat modules (`netops_core.py` and siblings) and the `netrune` package alias
+it to preserve imports and helper entry points through the v8 compatibility
+window (see [migration-netrune.md](migration-netrune.md)). The core owns
+target resolution, schema migration, the command registry, command
+construction, process groups, jobs, audit records, SSH trust, configuration
+gates, and compatibility dispatch. Shell helpers remain adapter
 implementations, not public policy boundaries.
 
 ### Contracts
 
-`netops_platform/contracts.py` defines schema version 1 for:
+`netops_platform/contracts.py` defines schema version 1 for the types actually
+consumed elsewhere in the tree:
 
-- `ResultEnvelopeV1`: status, summary, metrics, datasets, findings,
-  provenance, raw evidence, and timing.
-- `DatasetV1` and `ColumnSpec`: table identity, stable columns, row keys,
-  sorting metadata, and row actions.
-- `Finding`: severity, stable code, message, target, remediation, and evidence.
-- `ActionPreviewV1`: normalized arguments, exact command, effects, targets,
-  missing fields, policy state, preview hash, and confirmation phrase.
-- `OperatorContext`: actor, UID, session, reason, and ticket.
-- `JobEventV1`: ordered event ID, UTC timestamp, stream, phase, progress, and
-  structured payload.
 - `ObservationV1`, `IngestChannelV1`, and `IngestRunV1`: idempotent source
   observations, channel configuration, provenance, and run outcomes.
-- `PluginDescriptorV1` and `DeviceDriverV1`: trusted extension identity,
-  compatibility, source, support level, and capability declarations.
+- `PluginDescriptorV1`: trusted extension identity, compatibility, source,
+  and capability declarations.
 - `CapabilityEvidenceV1`: timestamped semantic evidence independent of vendor
   command syntax.
 - `PathRequestV1`, `PathHopV1`, `PathFindingV1`, and `PathResultV1`: bounded
   Ghoster requests, hop evidence, confidence, age, findings, and outcomes.
 
 Consumers must tolerate additive fields. Breaking field removal or semantic
-changes require a new schema version and an adapter period.
+changes require a new schema version and an adapter period. A wider set of
+result/dataset/job-event/action-preview envelope types existed here for the
+removed TUI/service layer; they were dropped rather than kept as unused
+surface once nothing referenced them.
 
 ## Profile and configuration boundary
 
@@ -110,12 +106,12 @@ and prohibited capabilities. Plugins are trusted local code, not a sandbox.
 Shell and network-write capabilities are rejected.
 
 An enabled ingest provider implements
-`read_records(channel, reader, secrets)` and returns mapping objects. NetOps
+`read_records(channel, reader, secrets)` and returns mapping objects. Netrune
 resolves only manifest-declared secret references, passes values in memory,
 redacts provider exceptions, and records distribution provenance. Parser and
 exporter entry points implement `parse()` and `export()` respectively; they are
 registered as internal extension APIs in 8.5. A device-driver entry point
-returns one `DeviceDriver` or exposes `netops_device_drivers()`.
+returns one `DeviceDriver` or exposes `netrune_device_drivers()`.
 
 Declarative device drivers add read command templates and parser identifiers.
 They cannot define configuration, save, reload, erase, or VLAN-write actions.
@@ -131,63 +127,15 @@ hop through read-only semantic capabilities. The hard limits are depth 16 and
 prove their semantics. Runs, hops, and findings are append-only chronological
 records.
 
-### Application service
+## Audit trail
 
-`netops_platform/service.py` is the headless boundary used by the TUI. It:
-
-- converts canonical state into view envelopes;
-- enriches registry entries into generated-form metadata;
-- validates previews and confirmation evidence;
-- submits jobs with an authenticated local operator context;
-- adapts job output back into datasets and findings;
-- exports only the currently materialized rows.
-
-The TUI must not construct helper commands, write SQLite directly, or weaken a
-core policy. A future GUI should consume this service or an equivalent API
-adapter rather than duplicate command logic.
-
-## Query flow
-
-1. A view requests a `QuerySpec` from `NetOpsService`.
-2. The service reads bounded canonical state from the core.
-3. Rows become one or more `DatasetV1` objects with stable IDs.
-4. The service derives metrics, findings, and provenance.
-5. The console renders the envelope without transport access.
-6. Filtering and sorting occur against the loaded dataset; refresh is explicit.
-
-Opening the console is local-read-only. A mount or navigation event must never
-start SNMP, SSH, ping, speed-test traffic, discovery, or configuration.
-
-## Action flow
-
-1. The operator selects an action from the registry or row context.
-2. `ActionForm` is generated from `arg_schema`; no per-command form is required.
-3. `service.preview()` normalizes arguments and asks the core for the exact
-   bounded command and effects.
-4. Read-only actions may run when required arguments are present.
-5. Active actions require an operator reason.
-6. Config actions additionally require a ticket, matching preview hash, and the
-   exact typed phrase.
-7. `service.submit()` re-previews the action and rejects stale or altered
-   confirmation evidence.
-8. The core creates a job and records operator context in job and audit data.
-
-Interactive SSH is terminal-only. The console suspends itself and delegates to
-the managed `device ssh` path rather than trying to emulate a terminal session.
-
-## Job flow
-
-Jobs use one lifecycle:
-
-```text
-queued -> running -> completed | partial | failed | cancelled | stale
-                    running -> cancelling -> cancelled | completed
-```
-
-Events have monotonic database IDs and explicit stream/phase fields. Live
-stderr progress is shown in the Activity pane while the final structured result
-remains a clean workbench dataset. Cancellation is explicit. Exiting with jobs
-active requires the operator to stay, open Jobs, or cancel them.
+Every command runs synchronously in its own process; there is no background
+job queue or progress stream (see ADR 0006, "job half superseded" -- that
+machinery was written for the removed TUI/API console and nothing in the
+CLI-only architecture ever called it). Safety-significant actions still write
+an audit event as they run: actor, target, result, and a JSON detail blob,
+never pruned (see "Configuration transaction boundary" below). `netrune db
+status` reports table counts; there is nothing else to poll.
 
 ## Configuration transaction boundary
 
@@ -199,16 +147,15 @@ validated preview -> confirmation binding -> preflight -> backup -> apply
 ```
 
 A preflight or backup failure blocks apply. A verification failure produces a
-partial result with captured rollback evidence; NetOps does not claim an
-automatic transactional rollback. Arbitrary `device config` remains preview
-only in generated/background interfaces.
+partial result with captured rollback evidence; Netrune does not claim an
+automatic transactional rollback.
 
 Access and trunk requests of up to eight VLAN IDs verify every requested VLAN.
 Larger trunk sets sample deterministic boundaries and return partial with
 `verification_complete=false`; sampled evidence is never reported as full
 success.
 
-Direct `netops-control config` and `netops-control vlan` execution is denied
+Direct `netrune-control config` and `netrune-control vlan` execution is denied
 unless the core supplies the internal audited-confirmation marker. This marker
 is an implementation capability and is not a supported operator override.
 
@@ -234,13 +181,10 @@ For a new action:
    validators.
 2. Assign safety class, risk level, effects, capability, output view,
    confirmation policy, and help for every field.
-3. Decide whether the action is job-safe, terminal-only, or preview-only.
+3. Decide whether the action is job-safe or preview-only.
 4. Return structured JSON with stable status and evidence whenever practical.
-5. Add a service adapter only when generic row/finding adaptation is
-   insufficient.
-6. Add service policy tests, parser/adapter tests, TUI interaction tests where
-   behavior changes, and shell lifecycle tests for helper changes.
-7. Update documentation and migration notes.
+5. Add unit and shell-lifecycle tests for the new or changed behavior.
+6. Update documentation and migration notes.
 
-Do not add a TUI button that bypasses the registry, a second source of command
-templates, or an unversioned result shape.
+Do not add a second source of command templates or an unversioned result
+shape.

@@ -1,8 +1,8 @@
-# NetOps Platform Maturity Roadmap
+# Netrune Platform Maturity Roadmap
 
 ## Objective
 
-Develop NetOps as a neutral, evidence-led network operations platform without
+Develop Netrune as a neutral, evidence-led network operations platform without
 turning incomplete vendor compatibility into broad support claims. Correctness,
 provenance, privacy, and rollback remain prerequisites for convenience or new
 writes.
@@ -16,9 +16,9 @@ Status: implemented for the 8.5 beta branch; release gates remain in progress.
 - Estate behavior exported to an ignored `legacy-local` profile.
 - Neutral defaults, RFC 5737 examples, synthetic locally administered MACs,
   Apache-2.0, security/contribution/support policies, and third-party notices.
-- `netops init`, XDG profile paths, Linux/WSL2 installation, migration, and
+- `netrune init`, XDG profile paths, Linux/WSL2 installation, migration, and
   isolated-wheel smoke tooling.
-- One command registry generates CLI help source, Markdown, JSON, `netops(1)`,
+- One command registry generates CLI help source, Markdown, JSON, `netrune(1)`,
   and Bash/Zsh/Fish completions; drift is a CI failure.
 - Privacy scanner, private denylist support, clean public-export utility, and
   tracked-source/archive/history checks.
@@ -68,7 +68,7 @@ evidence and named-secret migration/rollback rehearsal on clean Linux and WSL2.
 Status: bounded path engine and semantic capabilities implemented; real-lab
 path evidence remains required.
 
-- `netops path inspect` and `netops ghoster` resolve endpoint identity and plan
+- `netrune path inspect` and `netrune ghoster` resolve endpoint identity and plan
   from cached topology before optional bounded live validation.
 - Defaults are depth 8 and 64 nodes; hard limits are 16 and 256.
 - Results are `COMPLETE`, `BLOCKED`, `PARTIAL`, or `UNKNOWN`, with hop evidence,
@@ -88,7 +88,7 @@ known blocker.
 
 ### 8.5 Beta and Stable
 
-Status: `8.5.0b2` publication candidate. The owner-approved beta refinement
+Status: `8.5.0b3` publication candidate. The owner-approved beta refinement
 adds reversible manual device lifecycle merges and removes quadratic identity
 read behavior; other feature scope remains frozen.
 
@@ -99,7 +99,7 @@ read behavior; other feature scope remains frozen.
 - Wheel and source distributions include the reproducible WebUI production
   assets; isolated install tests verify console entry points, profiles, static
   asset placement, and the localhost server path.
-- Distribution name `netops-platform`; console commands `netops` and `netop`.
+- Distribution name `netrune`; console commands `netrune` and `netrune`.
 - Localhost API/WebUI remains experimental, loopback-only, and single-user.
 
 Stable promotion requires:

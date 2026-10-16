@@ -1,12 +1,12 @@
 # Ghoster Path Inspector
 
-`netops path inspect` reconstructs and validates the bounded path of an endpoint
-on a VLAN. `netops ghoster` is an alias.
+`netrune path inspect` reconstructs and validates the bounded path of an endpoint
+on a VLAN. `netrune ghoster` is an alias.
 
 ```bash
-netops path inspect 02:00:00:00:00:25 --vlan 120
-netops ghoster 192.0.2.25 --vlan 120 --from SITE-A-CORE-01 --explain
-netops path inspect endpoint-25 --vlan 120 --cached
+netrune path inspect 02:00:00:00:00:25 --vlan 120
+netrune ghoster 192.0.2.25 --vlan 120 --from SITE-A-CORE-01 --explain
+netrune path inspect endpoint-25 --vlan 120 --cached
 ```
 
 ## Operating Modes
@@ -42,8 +42,8 @@ confidence, evidence age, RFC 3339 timestamps, and focused findings. Every run,
 hop, and finding is stored chronologically:
 
 ```bash
-netops path history
-netops path show <run-id>
+netrune path history
+netrune path show <run-id>
 ```
 
 Ghoster is an evidence tool, not a packet capture or forwarding simulator.

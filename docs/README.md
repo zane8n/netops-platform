@@ -1,7 +1,7 @@
-# NetOps 8.5 Engineering Documentation
+# Netrune 8.5 Engineering Documentation
 
 This directory records the platform architecture, safety decisions, operating
-procedures, and extension contracts that must remain true as NetOps evolves.
+procedures, and extension contracts that must remain true as Netrune evolves.
 The root handbook is the complete learning path; the generated command
 reference is canonical for syntax and registry metadata.
 
@@ -10,9 +10,8 @@ reference is canonical for syntax and registry metadata.
 | Document | Purpose | Authority |
 |---|---|---|
 | `architecture-v8.md` | Runtime layers, contracts, data flow, safety boundaries, and extension process | Normative for v8 application code |
-| `operator-console.md` | Zero-to-productive TUI operating guide | Normative for console behavior |
-| `ui-design-system.md` | Layout, status, interaction, responsive, and accessibility rules | Normative for TUI changes |
 | `migration-v8.md` | Upgrade, validation, rollback, and behavior changes from v7.3 | Normative for deployment |
+| `migration-netrune.md` | Non-destructive product-name, command, environment, plugin, and XDG state migration | Normative for the 8.5.0b3 rename |
 | `device-support.md` | Device-driver architecture, Cisco/Aruba/RUCKUS matrix, ingest, identity, MAC registry, and extension procedure | Normative for device support |
 | `maturity-roadmap.md` | Ordered compatibility, provider, security, and extensibility work with promotion gates | Normative planning baseline |
 | `installation.md` | Clean Linux/WSL2 installation, profiles, migration, uninstall, and rollback | Normative deployment guide |
@@ -25,11 +24,10 @@ reference is canonical for syntax and registry metadata.
 
 ## Reading order
 
-New operators should read `installation.md`, the handbook safety and first-run
-chapters, then `operator-console.md`. Maintainers should read
-`architecture-v8.md`, `extensibility.md`, every accepted ADR, and
-`ui-design-system.md`. Device work additionally requires `device-support.md`,
-`ghoster.md`, and `maturity-roadmap.md`.
+New operators should read `installation.md` and the handbook safety and
+first-run chapters. Maintainers should read `architecture-v8.md`,
+`extensibility.md`, and every accepted ADR. Device work additionally requires
+`device-support.md`, `ghoster.md`, and `maturity-roadmap.md`.
 
 ## Documentation rule
 

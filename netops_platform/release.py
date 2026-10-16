@@ -52,7 +52,7 @@ def _requirement_component(requirement: str) -> dict[str, Any]:
         "type": "library",
         "name": name,
         "version": installed,
-        "properties": [{"name": "netops:declared-requirement", "value": requirement}],
+        "properties": [{"name": "netrune:declared-requirement", "value": requirement}],
     }
 
 
@@ -80,10 +80,10 @@ def release_metadata(version: str, artifacts: Iterable[Path]) -> dict[str, Any]:
     subjects = [{"name": path.name, "digest": {"sha256": sha256(path)}, "size": path.stat().st_size} for path in files]
     requirements = []
     try:
-        distribution = importlib.metadata.distribution("netops-platform")
+        distribution = importlib.metadata.distribution("netrune")
         requirements = list(distribution.requires or [])
     except importlib.metadata.PackageNotFoundError:
-        requirements = ["rich>=14,<16", "textual==8.2.8"]
+        requirements = ["rich>=14,<16"]
     epoch = int(os.environ.get("SOURCE_DATE_EPOCH") or time.time())
     timestamp = _rfc3339(epoch)
     subject_fingerprint = "|".join(item["digest"]["sha256"] for item in subjects)
@@ -93,7 +93,7 @@ def release_metadata(version: str, artifacts: Iterable[Path]) -> dict[str, Any]:
         "specVersion": "1.5",
         "serialNumber": f"urn:uuid:{serial}",
         "version": 1,
-        "metadata": {"timestamp": timestamp, "component": {"type": "application", "name": "netops-platform", "version": version}},
+        "metadata": {"timestamp": timestamp, "component": {"type": "application", "name": "netrune", "version": version}},
         "components": [_requirement_component(requirement) for requirement in requirements],
     }
     provenance = {
@@ -103,12 +103,12 @@ def release_metadata(version: str, artifacts: Iterable[Path]) -> dict[str, Any]:
         "predicate": {
             "buildDefinition": {
                 "buildType": "https://github.com/pypa/build",
-                "externalParameters": {"distribution": "netops-platform", "version": version},
+                "externalParameters": {"distribution": "netrune", "version": version},
                 "internalParameters": {"python": platform.python_version(), "platform": platform.platform()},
                 "resolvedDependencies": _source_material(),
             },
             "runDetails": {
-                "builder": {"id": "netops-platform/local-release"},
+                "builder": {"id": "netrune/local-release"},
                 "metadata": {
                     "invocationId": os.environ.get("GITHUB_RUN_ID", "local"),
                     "startedOn": timestamp,
@@ -126,9 +126,9 @@ def write_release_metadata(version: str, artifacts: Iterable[Path], output_dir: 
     metadata = release_metadata(version, artifacts)
     checksum_path = output_dir / "SHA256SUMS"
     checksum_path.write_text("".join(f"{item['digest']['sha256']}  {item['name']}\n" for item in metadata["subjects"]), encoding="utf-8")
-    sbom_path = output_dir / f"netops-platform-{version}.sbom.cdx.json"
+    sbom_path = output_dir / f"netrune-{version}.sbom.cdx.json"
     sbom_path.write_text(json.dumps(metadata["sbom"], indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    provenance_path = output_dir / f"netops-platform-{version}.provenance.json"
+    provenance_path = output_dir / f"netrune-{version}.provenance.json"
     provenance_path.write_text(json.dumps(metadata["provenance"], indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return {"checksums": checksum_path, "sbom": sbom_path, "provenance": provenance_path}
 

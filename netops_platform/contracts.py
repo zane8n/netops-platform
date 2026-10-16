@@ -1,4 +1,4 @@
-"""Versioned contracts shared by the CLI, TUI, jobs, and API adapters."""
+"""Versioned contracts shared by the CLI, jobs, ingest, and path-inspection adapters."""
 
 from __future__ import annotations
 
@@ -6,168 +6,10 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 
 SCHEMA_VERSION = "1"
-
-
-@dataclass(frozen=True)
-class ColumnSpec:
-    key: str
-    label: str
-    kind: str = "text"
-    unit: str = ""
-    priority: int = 50
-    sortable: bool = True
-    filterable: bool = True
-    hidden: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class DatasetV1:
-    id: str
-    title: str
-    rows: list[dict[str, Any]] = field(default_factory=list)
-    columns: list[ColumnSpec] = field(default_factory=list)
-    row_key: str = ""
-    default_sort: str = ""
-    default_descending: bool = False
-    row_actions: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = asdict(self)
-        payload["columns"] = [column.to_dict() for column in self.columns]
-        return payload
-
-
-@dataclass(frozen=True)
-class Finding:
-    severity: str
-    code: str
-    message: str
-    target: str = ""
-    remediation: str = ""
-    evidence: Mapping[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class Provenance:
-    source: str = "sqlite"
-    observed_at: int | None = None
-    observed_at_iso: str = ""
-    complete: bool | None = None
-    freshness: str = "unknown"
-    parser_version: str = ""
-    driver: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class ResultEnvelopeV1:
-    action_id: str
-    status: str
-    title: str
-    summary: str = ""
-    metrics: dict[str, Any] = field(default_factory=dict)
-    datasets: list[DatasetV1] = field(default_factory=list)
-    findings: list[Finding] = field(default_factory=list)
-    provenance: Provenance = field(default_factory=Provenance)
-    raw: dict[str, Any] = field(default_factory=dict)
-    started_at: int | None = None
-    finished_at: int | None = None
-    schema_version: str = SCHEMA_VERSION
-
-    @property
-    def ok(self) -> bool:
-        return self.status in {"success", "partial"}
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "schema_version": self.schema_version,
-            "action_id": self.action_id,
-            "status": self.status,
-            "ok": self.ok,
-            "title": self.title,
-            "summary": self.summary,
-            "metrics": self.metrics,
-            "datasets": [dataset.to_dict() for dataset in self.datasets],
-            "findings": [finding.to_dict() for finding in self.findings],
-            "provenance": self.provenance.to_dict(),
-            "raw": self.raw,
-            "started_at": self.started_at,
-            "finished_at": self.finished_at,
-        }
-
-
-@dataclass(frozen=True)
-class OperatorContext:
-    actor: str
-    uid: int
-    session_id: str
-    reason: str = ""
-    ticket: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class ActionPreviewV1:
-    action_id: str
-    args: Mapping[str, Any]
-    command: str
-    safety_class: str
-    state_effects: Sequence[str]
-    resolved_targets: Sequence[str]
-    missing_args: Sequence[str]
-    blocked: bool
-    reason: str
-    requires_confirmation: bool
-    preview_hash: str
-    confirmation_phrase: str = ""
-    validation_error: str = ""
-    schema_version: str = SCHEMA_VERSION
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class JobEventV1:
-    id: int
-    job_id: str
-    created_at: int
-    created_at_iso: str
-    event_type: str
-    stream: str
-    phase: str
-    message: str
-    progress_current: int | None = None
-    progress_total: int | None = None
-    payload: Mapping[str, Any] = field(default_factory=dict)
-    schema_version: str = SCHEMA_VERSION
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class QuerySpec:
-    query: str = ""
-    limit: int = 200
-    offset: int = 0
-    sort_by: str = ""
-    descending: bool = False
-    filters: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _canonical_hash(payload: Mapping[str, Any]) -> str:
@@ -296,31 +138,6 @@ class PluginDescriptorV1:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["capabilities"] = list(self.capabilities)
-        return payload
-
-
-@dataclass(frozen=True)
-class DeviceDriverV1:
-    family: str
-    vendor: str
-    operating_system: str
-    device_kind: str
-    support_level: str
-    capabilities: Mapping[str, str]
-    firmware_profiles: Sequence[str] = field(default_factory=tuple)
-    source: str = "built-in"
-    read_only: bool = True
-    schema_version: str = SCHEMA_VERSION
-
-    def __post_init__(self) -> None:
-        if not all(value.strip() for value in (self.family, self.vendor, self.operating_system, self.device_kind, self.support_level)):
-            raise ValueError("device driver identity and support level are required")
-        if self.source != "built-in" and not self.read_only:
-            raise ValueError("external device drivers must be read-only")
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = asdict(self)
-        payload["firmware_profiles"] = list(self.firmware_profiles)
         return payload
 
 
@@ -474,38 +291,3 @@ class PathResultV1:
             "started_at_iso": _rfc3339(self.started_at),
             "finished_at_iso": _rfc3339(self.finished_at),
         }
-
-
-def infer_column_kind(key: str, values: Iterable[Any]) -> str:
-    lowered = key.lower()
-    if lowered.endswith(("_at", "_seen", "_failed")) or lowered in {"created_at", "updated_at"}:
-        return "timestamp"
-    if lowered in {"status", "state", "result", "severity", "level", "reliability"}:
-        return "status"
-    if lowered.endswith(("_pct", "_mbps", "_ms", "_bps", "_bytes", "_count")):
-        return "number"
-    nonempty = [value for value in values if value not in (None, "")]
-    if nonempty and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in nonempty):
-        return "number"
-    return "text"
-
-
-def columns_for_rows(rows: Sequence[Mapping[str, Any]], preferred: Sequence[str] = ()) -> list[ColumnSpec]:
-    keys: list[str] = []
-    for key in preferred:
-        if any(key in row for row in rows):
-            keys.append(key)
-    for row in rows:
-        for key in row:
-            if key not in keys and not key.endswith("_iso") and key not in {"raw_json", "attrs_json", "previous_json", "current_json"}:
-                keys.append(key)
-    return [
-        ColumnSpec(
-            key=key,
-            label=key.replace("_", " ").title(),
-            kind=infer_column_kind(key, (row.get(key) for row in rows)),
-            priority=index,
-            hidden=index >= 12,
-        )
-        for index, key in enumerate(keys)
-    ]

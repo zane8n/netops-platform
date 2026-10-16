@@ -157,7 +157,7 @@ wheels = [
 ]
 
 [[package]]
-name = "netops-platform"
+name = "netrune"
 source = { editable = "." }
 dependencies = [
     { name = "rich" },

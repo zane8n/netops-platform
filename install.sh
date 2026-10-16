@@ -2,8 +2,8 @@
 set -euo pipefail
 
 python_bin="${PYTHON:-python3}"
-runtime="${NETOPS_INSTALL_ROOT:-$HOME/.local/share/netops/runtime}"
-bin_dir="${NETOPS_BIN_DIR:-$HOME/.local/bin}"
+runtime="${NETRUNE_INSTALL_ROOT:-${NETOPS_INSTALL_ROOT:-$HOME/.local/share/netrune/runtime}}"
+bin_dir="${NETRUNE_BIN_DIR:-${NETOPS_BIN_DIR:-$HOME/.local/bin}}"
 action="install"
 source_spec="."
 
@@ -46,11 +46,11 @@ if [[ "$action" == "rollback" ]]; then
     fi
     current_target=$(readlink -f "$runtime/current")
     previous_target=$(readlink -f "$runtime/previous")
-    [[ -x "$previous_target/bin/netops" ]] || { printf 'Error: previous release is incomplete.\n' >&2; exit 1; }
+    [[ -x "$previous_target/bin/netrune" ]] || { printf 'Error: previous Netrune release is incomplete.\n' >&2; exit 1; }
     atomic_link "$current_target" "$runtime/previous"
     atomic_link "$previous_target" "$runtime/current"
-    printf 'Rolled back NetOps to %s\n' "$previous_target"
-    "$runtime/current/bin/netops" --no-tui version
+    printf 'Rolled back Netrune to %s\n' "$previous_target"
+    "$runtime/current/bin/netrune" version
     exit 0
 fi
 
@@ -78,20 +78,20 @@ trap cleanup EXIT
 
 "$python_bin" -m venv "$release"
 "$release/bin/python" -m pip install "$source_spec"
-installed_version=$("$release/bin/python" -c 'from importlib.metadata import version; print(version("netops-platform"))')
-printf '%s\n' "$installed_version" > "$release/NETOPS_VERSION"
-"$release/bin/netops" --no-tui version >/dev/null
+installed_version=$("$release/bin/python" -c 'from importlib.metadata import version; print(version("netrune"))')
+printf '%s\n' "$installed_version" > "$release/NETRUNE_VERSION"
+"$release/bin/netrune" version >/dev/null
 
-if [[ -n "$old_current" && -x "$old_current/bin/netops" ]]; then
+if [[ -n "$old_current" && -x "$old_current/bin/netrune" ]]; then
     atomic_link "$old_current" "$runtime/previous"
 fi
 atomic_link "$release" "$runtime/current"
-for command in netops netop; do
+for command in netrune netops netop; do
     atomic_link "$runtime/current/bin/$command" "$bin_dir/$command"
 done
 
 set +e
-"$runtime/current/bin/netops" --no-tui init
+"$runtime/current/bin/netrune" init
 init_status=$?
 set -e
 if [[ $init_status -ne 0 && $init_status -ne 3 ]]; then
@@ -100,7 +100,7 @@ if [[ $init_status -ne 0 && $init_status -ne 3 ]]; then
         atomic_link "$old_current" "$runtime/current"
     else
         rm -f -- "$runtime/current"
-        for command in netops netop; do
+        for command in netrune netops netop; do
             [[ -L "$bin_dir/$command" ]] && rm -f -- "$bin_dir/$command"
         done
     fi
@@ -108,9 +108,9 @@ if [[ $init_status -ne 0 && $init_status -ne 3 ]]; then
 fi
 
 cleanup_release=false
-printf 'Installed NetOps %s into %s\n' "$installed_version" "$release"
+printf 'Installed Netrune %s into %s\n' "$installed_version" "$release"
 printf 'Current release: %s/current\n' "$runtime"
-printf 'Console links: %s/netops and %s/netop\n' "$bin_dir" "$bin_dir"
+printf 'Console links: %s/netrune (canonical), %s/netops, and %s/netop\n' "$bin_dir" "$bin_dir" "$bin_dir"
 if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
     printf 'Add %s to PATH before using the console commands.\n' "$bin_dir"
 fi

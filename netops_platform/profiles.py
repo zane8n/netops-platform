@@ -1,4 +1,4 @@
-"""Profile-scoped paths and neutral configuration for NetOps.
+"""Profile-scoped paths and neutral configuration for Netrune.
 
 Profiles are intentionally data-only.  They isolate inventory, trust, aliases,
 ingest channels, and policy without allowing configuration to execute code.
@@ -23,6 +23,14 @@ PROFILE_SCHEMA_VERSION = 1
 DEFAULT_PROFILE = "default"
 PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 LEGACY_PUBLIC_ENV_KEYS = frozenset({"ssh_user"})
+
+
+def environment_value(primary: str, legacy: str = "", default: str = "") -> str:
+    if primary in os.environ:
+        return os.environ[primary]
+    if legacy and legacy in os.environ:
+        return os.environ[legacy]
+    return default
 
 
 def profile_name(value: Any) -> str:
@@ -135,6 +143,71 @@ def _sqlite_snapshot(source: Path, destination: Path) -> None:
         Path(str(staged) + "-shm").unlink(missing_ok=True)
 
 
+def _copy_renamed_root(source: Path, destination: Path) -> dict[str, Any]:
+    """Atomically copy one legacy NetOps XDG root into its Netrune root."""
+    if not source.is_dir():
+        return {"action": "source-not-found", "source": str(source), "destination": str(destination)}
+    if destination.exists():
+        return {"action": "skipped-existing-destination", "source": str(source), "destination": str(destination)}
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staged = destination.with_name(f".{destination.name}.{os.getpid()}.{time.time_ns()}.migration")
+    copied_databases: list[str] = []
+    try:
+        shutil.copytree(
+            source,
+            staged,
+            symlinks=True,
+            ignore=shutil.ignore_patterns("netops.sqlite3", "netops.sqlite3-wal", "netops.sqlite3-shm"),
+        )
+        for database in source.rglob("netops.sqlite3"):
+            relative = database.relative_to(source)
+            target = staged / relative.parent / "netrune.sqlite3"
+            _sqlite_snapshot(database, target)
+            copied_databases.append(str(relative))
+        os.replace(staged, destination)
+    finally:
+        if staged.exists():
+            shutil.rmtree(staged)
+    return {
+        "action": "copied",
+        "source": str(source),
+        "destination": str(destination),
+        "sqlite_backups": copied_databases,
+    }
+
+
+def migrate_netops_xdg_roots(home: Path) -> dict[str, Any]:
+    """Perform the one-time, non-destructive NetOps-to-Netrune state copy."""
+    if environment_value("NETRUNE_DISABLE_LEGACY_STATE_MIGRATION", default="").lower() in {"1", "true", "yes"}:
+        return {"action": "disabled", "roots": []}
+    explicit = any(
+        os.environ.get(name, "").strip()
+        for name in (
+            "NETRUNE_CONFIG_DIR", "NETRUNE_STATE_DIR", "NETRUNE_CACHE_DIR", "NETRUNE_DATA_DIR",
+            "NETOPS_CONFIG_DIR", "NETOPS_STATE_DIR", "NETOPS_CACHE_DIR", "NETOPS_DATA_DIR",
+        )
+    )
+    if explicit:
+        return {"action": "explicit-paths", "roots": []}
+    roots = []
+    for variable in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
+        roots.append(_copy_renamed_root(_xdg(home, variable, "netops"), _xdg(home, variable, "netrune")))
+    copied = [row for row in roots if row["action"] == "copied"]
+    if copied:
+        state_root = _xdg(home, "XDG_STATE_HOME", "netrune")
+        state_root.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "schema_version": 1,
+            "migration": "netops-to-netrune",
+            "recorded_at": int(time.time()),
+            "recorded_at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "source_files_unchanged": True,
+            "roots": roots,
+        }
+        _atomic_write(state_root / "migration-from-netops.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return {"action": "copied" if copied else "not-needed", "roots": roots}
+
+
 def _migration_backup_path(database: Path) -> Path:
     backup_dir = database.parent / "migration-backups"
     backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -241,6 +314,10 @@ ssh_user = ""
 strip_prefixes = []
 ap_similarity_threshold = 85
 switch_similarity_threshold = 75
+continuity_window_days = 14
+continuity_confidence_floor = 55
+continuity_cluster_min_members = 3
+continuity_attention_ttl_days = 30
 
 [discovery]
 cisco_wlc_ip = ""
@@ -259,7 +336,7 @@ vault_expiry_warning_hours = 12
 """
 
 
-COMPAT_CONFIG = """# NetOps profile compatibility configuration
+COMPAT_CONFIG = """# Netrune profile compatibility configuration
 subnets=""
 core_switch_ip=""
 core_iperf_server=""
@@ -296,23 +373,23 @@ class ProfileLayout:
     @classmethod
     def resolve(cls, selected: str = "", home: Path | None = None) -> "ProfileLayout":
         home = Path(home or Path.home())
-        explicit_config = os.environ.get("NETOPS_CONFIG_DIR", "").strip()
-        explicit_cache = os.environ.get("NETOPS_CACHE_DIR", "").strip()
-        selected = selected or os.environ.get("NETOPS_PROFILE", "")
-        config_root = _xdg(home, "XDG_CONFIG_HOME", "netops")
+        explicit_config = environment_value("NETRUNE_CONFIG_DIR", "NETOPS_CONFIG_DIR").strip()
+        explicit_cache = environment_value("NETRUNE_CACHE_DIR", "NETOPS_CACHE_DIR").strip()
+        selected = selected or environment_value("NETRUNE_PROFILE", "NETOPS_PROFILE")
+        config_root = _xdg(home, "XDG_CONFIG_HOME", "netrune")
         active_file = config_root / "active_profile"
         if not selected and active_file.is_file():
             selected = active_file.read_text(encoding="utf-8", errors="ignore").strip()
         name = profile_name(selected or DEFAULT_PROFILE)
         if explicit_config or explicit_cache:
             config_dir = Path(explicit_config or config_root).expanduser()
-            cache_dir = Path(explicit_cache or _xdg(home, "XDG_CACHE_HOME", "netops")).expanduser()
-            state_dir = Path(os.environ.get("NETOPS_STATE_DIR", str(cache_dir))).expanduser()
-            data_dir = Path(os.environ.get("NETOPS_DATA_DIR", str(state_dir))).expanduser()
+            cache_dir = Path(explicit_cache or _xdg(home, "XDG_CACHE_HOME", "netrune")).expanduser()
+            state_dir = Path(environment_value("NETRUNE_STATE_DIR", "NETOPS_STATE_DIR", str(cache_dir))).expanduser()
+            data_dir = Path(environment_value("NETRUNE_DATA_DIR", "NETOPS_DATA_DIR", str(state_dir))).expanduser()
             return cls(name, home, config_dir, state_dir, cache_dir, data_dir, config_dir, state_dir, cache_dir, data_dir, True)
-        state_root = _xdg(home, "XDG_STATE_HOME", "netops")
-        cache_root = _xdg(home, "XDG_CACHE_HOME", "netops")
-        data_root = _xdg(home, "XDG_DATA_HOME", "netops")
+        state_root = _xdg(home, "XDG_STATE_HOME", "netrune")
+        cache_root = _xdg(home, "XDG_CACHE_HOME", "netrune")
+        data_root = _xdg(home, "XDG_DATA_HOME", "netrune")
         return cls(
             name,
             home,
@@ -334,6 +411,7 @@ class ProfileLayout:
 class ProfileStore:
     def __init__(self, home: Path | None = None):
         self.home = Path(home or Path.home())
+        self.rename_migration = migrate_netops_xdg_roots(self.home)
         self.base = ProfileLayout.resolve(home=self.home)
 
     @property
@@ -432,7 +510,7 @@ class ProfileStore:
                 merged = {**existing, **imported}
             else:
                 merged = {**imported, **existing}
-            lines = ["# NetOps profile compatibility configuration migrated from legacy state"]
+            lines = ["# Netrune profile compatibility configuration migrated from legacy state"]
             lines.extend(f'{key}="{str(value).replace(chr(34), chr(92) + chr(34))}"' for key, value in sorted(merged.items()))
             rendered = "\n".join(lines) + "\n"
             if not target_compat.is_file() or target_compat.read_text(encoding="utf-8", errors="replace") != rendered:
@@ -466,7 +544,7 @@ class ProfileStore:
                         copied_file.chmod(0o700 if copied_file.is_dir() else 0o600)
                     copied.append(str(item))
         source_db = legacy_cache / "netops.sqlite3"
-        destination_db = target.state_dir / "netops.sqlite3"
+        destination_db = target.state_dir / "netrune.sqlite3"
         database_migration = _migrate_legacy_database(source_db, destination_db)
         if database_migration["action"] in {"copied", "replaced-schema-only-destination"}:
             copied.append(str(source_db))
@@ -497,15 +575,17 @@ class ProfileStore:
 
 
 def profile_environment(layout: ProfileLayout) -> dict[str, str]:
-    return {
-        "NETOPS_PROFILE": layout.name,
-        "NETOPS_CONFIG_DIR": str(layout.config_dir),
-        "NETOPS_STATE_DIR": str(layout.state_dir),
-        "NETOPS_CACHE_DIR": str(layout.cache_dir),
-        "NETOPS_DATA_DIR": str(layout.data_dir),
-        "NETOPS_SQLITE_DB": str(layout.state_dir / "netops.sqlite3"),
-        "NETOPS_SSH_KNOWN_HOSTS_FILE": str(layout.config_dir / "known_hosts"),
-        "NETOPS_SECRETS_FILE": str(layout.data_dir / "secrets.gpg"),
-        "NETOPS_AI_ALIASES": str(layout.config_dir / "aliases.yaml"),
-        "NETOPS_AUTO_CONFIGURE": "false",
+    canonical = {
+        "NETRUNE_PROFILE": layout.name,
+        "NETRUNE_CONFIG_DIR": str(layout.config_dir),
+        "NETRUNE_STATE_DIR": str(layout.state_dir),
+        "NETRUNE_CACHE_DIR": str(layout.cache_dir),
+        "NETRUNE_DATA_DIR": str(layout.data_dir),
+        "NETRUNE_SQLITE_DB": str(layout.state_dir / "netrune.sqlite3"),
+        "NETRUNE_SSH_KNOWN_HOSTS_FILE": str(layout.config_dir / "known_hosts"),
+        "NETRUNE_SECRETS_FILE": str(layout.data_dir / "secrets.gpg"),
+        "NETRUNE_AI_ALIASES": str(layout.config_dir / "aliases.yaml"),
+        "NETRUNE_AUTO_CONFIGURE": "false",
     }
+    compatibility = {key.replace("NETRUNE_", "NETOPS_", 1): value for key, value in canonical.items()}
+    return {**compatibility, **canonical}

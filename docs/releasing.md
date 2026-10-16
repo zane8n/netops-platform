@@ -6,34 +6,35 @@
 tests, documentation, packaging, or compatibility evidence but may not add new
 scope. Stable promotion uses the same feature set.
 
-The current public-beta publication candidate is `8.5.0b2`.
+The current public-beta publication candidate is `8.5.0b3`.
+
+On 2026-08-09, the exact PyPI project API for `netrune` and the GitHub API for
+`zane8n/netrune` both returned `404`, indicating that those project/repository
+names were not allocated at that time. Namespace availability can change and
+does not establish trademark or company-name rights. `netrune.com` is already
+registered/in use and must not be represented as this project's domain.
 
 ## Build
 
 ```bash
-python generate_reference.py --check
-python privacy_check.py --root .
+python scripts/generate_reference.py --check
+python scripts/privacy_check.py --root .
 python -m pytest
 python -m build
 python -m twine check dist/*
-python privacy_check.py --root . dist/*.whl dist/*.tar.gz
+python scripts/privacy_check.py --root . dist/*.whl dist/*.tar.gz
 bash scripts/smoke_wheel.sh dist/*.whl
 bash scripts/smoke_install.sh dist/*.whl
-python build_release.py dist --output .release
+python scripts/build_release.py dist --output .release
 python -m pip_audit --strict .
 ```
-
-Before packaging, run `npm ci && npm run build` under `webui/` and require
-`git diff --exit-code -- webui/dist`. The source distribution includes the
-frontend source and compiled output; the wheel installs the compiled files
-under `share/netops-platform/webui/dist`. The isolated wheel smoke starts the
-loopback server and fetches both the page and its JavaScript asset.
 
 Audit the project path, not the current editable environment. Strict
 environment audits attempt to resolve the unpublished beta distribution itself
 and fail before assessing its dependencies.
 
-`build_release.py` emits SHA-256 checksums, an SBOM, and provenance metadata.
+`scripts/build_release.py` emits SHA-256 checksums, an SBOM, and provenance
+metadata.
 When a release signing identity is configured, add detached signatures without
 placing private-key material in the repository or command arguments.
 
@@ -44,10 +45,13 @@ placing private-key material in the repository or command arguments.
 - Accepted read fixtures for every advertised device family.
 - One authorized real-lab Ghoster path with retained redacted evidence.
 - XDG and named-secret migration rehearsal, rollback, and idempotency proof.
-- TUI snapshots in light and monochrome modes and loopback WebUI build tests.
 - Generated-reference drift, dependency audit, SBOM, checksums, provenance, and
   archive privacy checks all pass.
 - Documentation examples are executed or fixture-verified.
+- Owner/legal review confirms that the Netrune name can be published and used
+  in intended jurisdictions; engineering checks do not establish trademark
+  clearance.
 
-The localhost API/WebUI remains experimental and loopback-only. Authenticated
-remote and multi-user service operation is not part of 8.5.
+Every operator interface is the CLI. The one listener Netrune runs -- the
+traffic metrics exposition endpoint -- is loopback-only by default and stays
+behind `--confirm` for anything wider; see [poller-arch.md](poller-arch.md).

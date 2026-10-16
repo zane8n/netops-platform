@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic identity reconciliation for NetOps inventory."""
+"""Deterministic identity reconciliation for Netrune inventory."""
 
 from __future__ import annotations
 
@@ -9,6 +9,10 @@ import ipaddress
 import os
 import re
 from typing import Any, Dict, List, Sequence, Tuple
+
+
+def _environment(primary: str, legacy: str, default: Any = "") -> Any:
+    return os.environ.get(primary, os.environ.get(legacy, default))
 
 
 def normalize_mac(value: Any) -> str:
@@ -38,7 +42,7 @@ def _configured_prefixes(configuration: str) -> Tuple[str, ...]:
 def _strip_org_prefixes(value: str, configuration: str | None = None) -> str:
     text = value
     prefixes = _configured_prefixes(
-        os.environ.get("NETOPS_IDENTITY_STRIP_PREFIXES", "")
+        _environment("NETRUNE_IDENTITY_STRIP_PREFIXES", "NETOPS_IDENTITY_STRIP_PREFIXES", "")
         if configuration is None else configuration
     )
     changed = True
@@ -73,7 +77,7 @@ def normalize_location_label(value: Any) -> str:
     """Normalize common site words while retaining meaningful qualifiers."""
     return _normalize_location_text(
         str(value or ""),
-        os.environ.get("NETOPS_IDENTITY_STRIP_PREFIXES", ""),
+        _environment("NETRUNE_IDENTITY_STRIP_PREFIXES", "NETOPS_IDENTITY_STRIP_PREFIXES", ""),
     )
 
 
@@ -121,7 +125,7 @@ def normalize_asset_name(value: Any) -> str:
     """Normalize naming variants while preserving role and asset ID."""
     return _normalize_asset_text(
         str(value or ""),
-        os.environ.get("NETOPS_IDENTITY_STRIP_PREFIXES", ""),
+        _environment("NETRUNE_IDENTITY_STRIP_PREFIXES", "NETOPS_IDENTITY_STRIP_PREFIXES", ""),
     )
 
 
@@ -131,6 +135,32 @@ def _asset_role_number(value: Any) -> Tuple[str, str]:
     if not match:
         return "", ""
     return match.group(1), str(int(match.group(2)))
+
+
+def _asset_location_prefix(value: Any) -> str:
+    """Return the location portion of a name, the device-side analog of
+    `ap_name_evidence`'s `location_key` -- everything before the role+number.
+    """
+    text = normalize_asset_name(value)
+    match = re.search(r"(AP|SW)0*(\d{1,5})(?!\d)", text)
+    if not match:
+        return ""
+    return normalize_location_label(text[:match.start()])
+
+
+def _host_label(value: Any) -> str:
+    """Drop a DNS domain suffix so names are compared on the host label alone.
+
+    Every switch in one site shares a long suffix like `.example.corp.com`,
+    which on its own lifts two unrelated `*-SW01` names over the similarity
+    threshold. Only a trailing all-alphabetic TLD counts as a domain, so a
+    dotted name like `SITE.OFC.AP12` keeps its meaningful segments.
+    """
+    text = str(value or "").strip().rstrip(".")
+    host, _, domain = text.partition(".")
+    if host and domain and not _valid_ip(text) and re.fullmatch(r"[A-Za-z]{2,63}", domain.rsplit(".", 1)[-1]):
+        return host
+    return text
 
 
 def _meaningful_serial(value: Any) -> str:
@@ -149,16 +179,17 @@ def identity_match_evidence(
     Conflicting physical identifiers always block an automatic merge.
     """
     kind = "ap" if str(entity_type).lower() in {"ap", "access-point", "access_point"} else "switch"
-    key = "NETOPS_AP_SIMILARITY_THRESHOLD" if kind == "ap" else "NETOPS_SWITCH_SIMILARITY_THRESHOLD"
+    key = "NETRUNE_AP_SIMILARITY_THRESHOLD" if kind == "ap" else "NETRUNE_SWITCH_SIMILARITY_THRESHOLD"
+    legacy_key = key.replace("NETRUNE_", "NETOPS_", 1)
     default = 85 if kind == "ap" else 75
     try:
-        threshold = max(50, min(100, int(os.environ.get(key, default))))
+        threshold = max(50, min(100, int(_environment(key, legacy_key, default))))
     except (TypeError, ValueError):
         threshold = default
     left_name = left.get("name") or left.get("hostname") or ""
     right_name = right.get("name") or right.get("hostname") or ""
-    left_key = normalize_asset_name(left_name)
-    right_key = normalize_asset_name(right_name)
+    left_key = normalize_asset_name(_host_label(left_name))
+    right_key = normalize_asset_name(_host_label(right_name))
     similarity = int(round(difflib.SequenceMatcher(None, left_key, right_key).ratio() * 100)) if left_key and right_key else 0
     left_mac, right_mac = normalize_mac(left.get("mac")), normalize_mac(right.get("mac"))
     left_serial, right_serial = _meaningful_serial(left.get("serial")), _meaningful_serial(right.get("serial"))
@@ -225,6 +256,173 @@ def identity_match_evidence(
     }
 
 
+def continuity_match_evidence(
+    old: Dict[str, Any],
+    new: Dict[str, Any],
+    entity_type: str,
+    *,
+    window_days: int = 14,
+) -> Dict[str, Any]:
+    """Score whether `new` plausibly continues `old`'s identity after a swap.
+
+    This is deliberately not `identity_match_evidence`: there, a MAC/serial
+    difference blocks a match outright, because that function answers "is
+    this the same observation of one device." Here a MAC/serial difference is
+    the expected case -- the whole point is a hardware swap -- so it is never
+    scored as a conflict, just left unscored.
+
+    Temporal proximity alone can never produce a candidate: at least one
+    structural signal (attachment continuity, or a location+role match, or a
+    bare role-number match) must hold first, so two unrelated devices that
+    happen to churn on the same day never pair up on coincidence alone.
+    """
+    kind = "ap" if str(entity_type).lower() in {"ap", "access-point", "access_point"} else "switch"
+    old_role, old_number = _asset_role_number(old.get("name"))
+    new_role, new_number = _asset_role_number(new.get("name"))
+    old_location = _asset_location_prefix(old.get("name"))
+    new_location = _asset_location_prefix(new.get("name"))
+    same_role_number = bool(old_role and old_role == new_role and old_number and old_number == new_number)
+    same_location_and_role = bool(same_role_number and old_location and old_location == new_location)
+    same_role_number_only = bool(same_role_number and not same_location_and_role)
+    same_attachment_transition = bool(
+        kind == "ap"
+        and switch_learned_attachment(old)
+        and switch_learned_attachment(new)
+        and str(old.get("switch_ip") or old.get("switch_name") or "").strip().lower()
+        == str(new.get("switch_ip") or new.get("switch_name") or "").strip().lower()
+        and str(old.get("switch_port") or "").strip().lower() == str(new.get("switch_port") or "").strip().lower()
+    )
+    same_model = bool(old.get("model") and str(old.get("model")).lower() == str(new.get("model") or "").lower())
+    signals: Dict[str, Any] = {
+        "same_attachment_transition": same_attachment_transition,
+        "same_location_and_role_number": same_location_and_role,
+        "same_role_number_only": same_role_number_only,
+        "same_model": same_model,
+    }
+    structural = same_attachment_transition or same_location_and_role or same_role_number_only
+    score = 0
+    if structural:
+        score += 45 if same_attachment_transition else 0
+        score += 35 if same_location_and_role else 0
+        score += 15 if same_role_number_only else 0
+        score += 10 if same_model else 0
+        try:
+            old_last_seen = int(old.get("last_seen") or 0)
+            new_first_seen = int(new.get("first_seen") or new.get("last_seen") or 0)
+        except (TypeError, ValueError):
+            old_last_seen = new_first_seen = 0
+        gap_days = max(0.0, (new_first_seen - old_last_seen) / 86400.0) if (old_last_seen and new_first_seen) else float(window_days)
+        proximity = max(0.0, 1.0 - (gap_days / window_days)) if window_days > 0 else 0.0
+        signals["temporal_gap_days"] = round(gap_days, 2)
+        score += round(20 * proximity)
+    return {
+        "candidate": structural,
+        "confidence": min(100, score) if structural else 0,
+        "entity_type": kind,
+        "signals": signals,
+    }
+
+
+def identity_continuity_candidates(
+    old_pool: Sequence[Dict[str, Any]],
+    new_pool: Sequence[Dict[str, Any]],
+    entity_type: str,
+    *,
+    window_days: int = 14,
+) -> List[Dict[str, Any]]:
+    """Pair disappeared identities against newly-appeared ones.
+
+    Bucketed by shared attachment / location+role / role-only keys first
+    (mirroring `reconcile_ap_rows`'s own strategy) so this stays proportional
+    to what actually shares a signal rather than comparing every pair.
+    """
+    if not old_pool or not new_pool:
+        return []
+    kind = "ap" if str(entity_type).lower() in {"ap", "access-point", "access_point"} else "switch"
+
+    def buckets(rows: Sequence[Dict[str, Any]]) -> Tuple[Dict[Any, List[int]], Dict[Any, List[int]], Dict[Any, List[int]]]:
+        attachment: Dict[Any, List[int]] = {}
+        location_role: Dict[Any, List[int]] = {}
+        role_only: Dict[Any, List[int]] = {}
+        for index, row in enumerate(rows):
+            if kind == "ap" and switch_learned_attachment(row):
+                key = (str(row.get("switch_ip") or row.get("switch_name") or "").strip().lower(),
+                       str(row.get("switch_port") or "").strip().lower())
+                attachment.setdefault(key, []).append(index)
+            role, number = _asset_role_number(row.get("name"))
+            if role and number:
+                location = _asset_location_prefix(row.get("name"))
+                if location:
+                    location_role.setdefault((location, role, number), []).append(index)
+                role_only.setdefault((role, number), []).append(index)
+        return attachment, location_role, role_only
+
+    old_attachment, old_location_role, old_role_only = buckets(old_pool)
+    new_attachment, new_location_role, new_role_only = buckets(new_pool)
+    pairs: set[Tuple[int, int]] = set()
+    for old_buckets, new_buckets in ((old_attachment, new_attachment), (old_location_role, new_location_role), (old_role_only, new_role_only)):
+        for key, old_indexes in old_buckets.items():
+            for new_index in new_buckets.get(key, []):
+                for old_index in old_indexes:
+                    pairs.add((old_index, new_index))
+
+    results: List[Dict[str, Any]] = []
+    for old_index, new_index in sorted(pairs):
+        assessment = continuity_match_evidence(old_pool[old_index], new_pool[new_index], kind, window_days=window_days)
+        if not assessment["candidate"]:
+            continue
+        results.append({
+            "old": old_pool[old_index],
+            "new": new_pool[new_index],
+            "confidence": assessment["confidence"],
+            "signals": assessment["signals"],
+            "entity_type": kind,
+        })
+    results.sort(key=lambda item: -item["confidence"])
+    return results
+
+
+def cluster_rename_candidates(
+    candidate_rows: Sequence[Dict[str, Any]],
+    *,
+    min_members: int = 3,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Group candidates that share an old->new location mapping and asset number.
+
+    A whole-site rename shows up as many candidates that all preserve the same
+    role+number but move from one location prefix to another; collapsing those
+    into one cluster is what lets an operator confirm a pattern once instead of
+    reviewing N unrelated-looking rows. Pairs that don't cluster pass through
+    unchanged as singles. Returns (clusters, singles).
+    """
+    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    singles: List[Dict[str, Any]] = []
+    for row in candidate_rows:
+        old = row.get("old") or {}
+        new = row.get("new") or {}
+        old_role, old_number = _asset_role_number(old.get("name"))
+        new_role, new_number = _asset_role_number(new.get("name"))
+        old_prefix = _asset_location_prefix(old.get("name"))
+        new_prefix = _asset_location_prefix(new.get("name"))
+        same_asset = bool(old_role and old_role == new_role and old_number and old_number == new_number)
+        if old_prefix and new_prefix and old_prefix != new_prefix and same_asset:
+            groups.setdefault((old_prefix, new_prefix), []).append(row)
+        else:
+            singles.append(row)
+    clusters: List[Dict[str, Any]] = []
+    for (old_prefix, new_prefix), members in groups.items():
+        if len(members) >= min_members:
+            clusters.append({
+                "old_location_prefix": old_prefix,
+                "new_location_prefix": new_prefix,
+                "member_count": len(members),
+                "members": members,
+            })
+        else:
+            singles.extend(members)
+    return clusters, singles
+
+
 @functools.lru_cache(maxsize=8192)
 def _valid_ip_text(value: str) -> bool:
     try:
@@ -271,6 +469,23 @@ def _row_score(row: Dict[str, Any]) -> Tuple[int, int, int, int, int, int]:
         1 if row.get("platform") else 0,
         seen,
     )
+
+
+def switch_learned_attachment(row: Dict[str, Any]) -> bool:
+    """Report whether a row names a real switch port rather than a controller."""
+    return bool(
+        (row.get("switch_ip") or row.get("switch_name"))
+        and str(row.get("switch_port") or "").strip().lower()
+        not in {"", "n/a", "wireless", "not-joined", "not joined", "unjoined", "nonjoined"}
+    )
+
+
+def _attachment_score(row: Dict[str, Any]) -> Tuple[int, int]:
+    try:
+        seen = int(row.get("last_seen") or 0)
+    except (TypeError, ValueError):
+        seen = 0
+    return (1 if switch_learned_attachment(row) else 0, seen)
 
 
 def reconcile_ap_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -378,6 +593,21 @@ def reconcile_ap_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         member_evidence = [evidence[index] for index in indexes]
         best = max(members, key=_row_score)
         row = dict(best)
+        # Attachment is a different fact from identity. A wireless controller
+        # knows an AP's address and name but reports its port as "wireless";
+        # only the switch knows the physical port. Take the port from whichever
+        # member actually learned it rather than from whichever row won on
+        # identity, so a controller record can no longer erase it.
+        attachment = max(members, key=_attachment_score)
+        if switch_learned_attachment(attachment):
+            row["switch_ip"] = attachment.get("switch_ip") or ""
+            row["switch_name"] = attachment.get("switch_name") or ""
+            row["switch_port"] = attachment.get("switch_port") or ""
+            row["attachment_source"] = "switch"
+        elif switch_learned_attachment(row):
+            row["attachment_source"] = "switch"
+        elif row.get("switch_ip") or row.get("switch_name"):
+            row["attachment_source"] = "controller"
         aliases = sorted({str(item.get("name") or "").strip() for item in members if item.get("name")})
         addresses = sorted({str(item.get("ip") or "").strip() for item in members if _valid_ip(item.get("ip"))})
         if addresses and not _valid_ip(row.get("ip")):

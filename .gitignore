@@ -1,5 +1,3 @@
-webui/node_modules/
-webui/.vite/
 __pycache__/
 *.py[cod]
 .pytest_cache/

@@ -23,5 +23,5 @@ preview-only outside the synchronous guarded CLI.
 - A changed form invalidates prior approval.
 - Backup or preflight failure prevents apply.
 - Verification failure is reported as partial with manual rollback evidence.
-- Additional write actions must implement the same lifecycle before becoming
-  runnable from the console or job API.
+- Additional write actions must implement the same lifecycle before gaining
+  confirmed execution from the CLI.

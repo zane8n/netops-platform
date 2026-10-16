@@ -1,6 +1,17 @@
 # ADR 0002: Versioned Result Contract
 
-- Status: Accepted
+> **Superseded 2026-08-25.** `ResultEnvelopeV1`, `DatasetV1`, `ColumnSpec`, and
+> the other envelope types this ADR describes were written for the "one
+> workbench" (TUI/API) client ADR 0001 superseded; the CLI's `self.emit()`
+> renders raw dicts directly and never adopted them. They had zero callers
+> outside `contracts.py` itself and were removed. `contracts.py` keeps the
+> versioned types that are actually consumed: `ObservationV1`,
+> `IngestChannelV1`, `IngestRunV1`, `PluginDescriptorV1`,
+> `CapabilityEvidenceV1`, and the `PathRequestV1`/`PathHopV1`/
+> `PathFindingV1`/`PathResultV1` family -- the additive-schema, new-version-for
+> -breaking-changes discipline below still applies to those.
+
+- Status: Superseded 2026-08-25
 - Date: 2026-08-02
 
 ## Context

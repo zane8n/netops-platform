@@ -13,7 +13,7 @@ import os
 import re
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
@@ -96,7 +96,7 @@ class IeeeMacRegistry:
         *,
         opener: Callable[..., Any] = urlopen,
         clock: Callable[[], float] = time.time,
-        user_agent: str = "NetOps-MAC-Registry/1.0",
+        user_agent: str = "Netrune-MAC-Registry/1.0",
     ) -> None:
         self.cache_dir = Path(cache_dir)
         self.opener = opener

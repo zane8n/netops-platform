@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Secure speedtest-cli backend used by NetOps diagnostics.
+"""Secure speedtest-cli backend used by Netrune diagnostics.
 
 The distro speedtest-cli module is retained because it is already deployed on
 the operator host.  This wrapper adds structured output and, on WSL, combines
@@ -65,7 +65,7 @@ Get-ChildItem Cert:\LocalMachine\Root, Cert:\LocalMachine\CA | ForEach-Object {
 
 def _ca_bundle(explicit: str = "") -> Tuple[Optional[str], str, Optional[str]]:
     """Return bundle path, human-readable source, and temporary path."""
-    requested = explicit or os.environ.get("NETOPS_SPEED_CA_FILE", "")
+    requested = explicit or os.environ.get("NETRUNE_SPEED_CA_FILE", os.environ.get("NETOPS_SPEED_CA_FILE", ""))
     if requested:
         path = Path(requested).expanduser()
         if not path.is_file():
@@ -336,7 +336,7 @@ def run_server_pair(server_id: int, timeout: int, bind: str, ca_file: str) -> Di
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description="Secure structured backend for NetOps Internet speed diagnostics")
+    root = argparse.ArgumentParser(description="Secure structured backend for Netrune Internet speed diagnostics")
     root.add_argument("--timeout", type=int, default=30, help="per-request timeout in seconds")
     root.add_argument("--bind", default="", help="optional source IP address")
     root.add_argument("--ca-file", default="", help="additional trusted PEM bundle")

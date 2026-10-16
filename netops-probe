@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# NetOps Advanced Probe
-source "$(dirname "$(realpath "$0")")/netops-lib.sh"
+# Netrune Advanced Probe
+source "$(dirname "$(realpath "$0")")/netrune-lib.sh"
 set -o pipefail
 
 
@@ -33,12 +33,12 @@ terminate_probe_tree() {
 # --- Help Function ---
 show_help() {
     cat <<EOF
-${CYAN}${BOLD}NetOps ${NETOPS_VERSION} Advanced Probe${NC}
+${CYAN}${BOLD}Netrune ${NETOPS_VERSION} Advanced Probe${NC}
 Network diagnostic tool with intelligent device detection
 
 ${BOLD}USAGE:${NC}
-  netops diagnose latency <target> [options]
-  netops diagnose speed [--profile quick|balanced|thorough] [--runs <1-5>] [--ca-file <pem>] [--json]
+  netrune diagnose latency <target> [options]
+  netrune diagnose speed [--profile quick|balanced|thorough] [--runs <1-5>] [--ca-file <pem>] [--json]
 
 ${BOLD}TARGET:${NC}
   IP address, hostname, or pattern (resolves from cache/DNS)
@@ -69,32 +69,32 @@ ${BOLD}FEATURES:${NC}
 
 ${BOLD}EXAMPLES:${NC}
   ${CYAN}# Basic ICMP probe${NC}
-  netops diagnose latency 192.0.2.5
+  netrune diagnose latency 192.0.2.5
 
   ${CYAN}# Probe with 10 packets and timestamps${NC}
-  netops diagnose latency core-switch -c 10 -t
+  netrune diagnose latency core-switch -c 10 -t
 
   ${CYAN}# TCP port probe (e.g., SSH)${NC}
-  netops diagnose latency 192.0.2.5 -p 22 -c 5
+  netrune diagnose latency 192.0.2.5 -p 22 -c 5
 
   ${CYAN}# Force traceroute and beep on loss${NC}
-  netops diagnose latency 192.0.2.5 -r -b
+  netrune diagnose latency 192.0.2.5 -r -b
 
   ${CYAN}# Probe with automatic SSH on reachable device${NC}
-  netops diagnose latency 192.0.2.5
+  netrune diagnose latency 192.0.2.5
   Press 'C' when prompted to SSH directly
 
   ${CYAN}# Continuous monitoring with timestamps${NC}
-  netops diagnose latency core-switch -t
+  netrune diagnose latency core-switch -t
 
   ${CYAN}# Balanced speed test with loaded latency${NC}
-  netops diagnose speed
+  netrune diagnose speed
 
   ${CYAN}# Faster single-server speed test with confidence metadata${NC}
-  netops diagnose speed --profile quick
+  netrune diagnose speed --profile quick
 
   ${CYAN}# Machine-readable speed test${NC}
-  netops diagnose speed --profile balanced --json
+  netrune diagnose speed --profile balanced --json
 
 ${BOLD}OUTPUT:${NC}
   • Real-time: [HH:MM:SS] seq=1     12.34 ms ████████
@@ -129,14 +129,14 @@ ${BOLD}DIAGNOSTICS:${NC}
   • Red TIMEOUT:  Packet loss detected (beeps if -b enabled)
 
 ${BOLD}SEE ALSO:${NC}
-  netops help diagnose   Diagnostic commands
-  netops device ssh      Interactive device connection
-  netops inventory scan  Network discovery
-  netops --version       Installed release
+  netrune help diagnose   Diagnostic commands
+  netrune device ssh      Interactive device connection
+  netrune inventory scan  Network discovery
+  netrune --version       Installed release
 EOF
 }
 
-# Reliable Internet-path measurement from the machine running NetOps. The
+# Reliable Internet-path measurement from the machine running Netrune. The
 # Python backend handles verified WSL/Windows enterprise trust and emits one
 # stable JSON contract regardless of the distro speedtest-cli executable.
 run_speed_test() (
@@ -171,7 +171,7 @@ run_speed_test() (
     [[ -f "$speed_helper" ]] || { echo "Error: secure speed backend is missing: $speed_helper" >&2; return 1; }
 
     local tmp
-    tmp=$(mktemp -d /tmp/netops-speed.XXXXXX) || return 1
+    tmp=$(mktemp -d /tmp/netrune-speed.XXXXXX) || return 1
     speed_cleanup() {
         local rc=$? pid
         local -a pids=()
@@ -299,8 +299,8 @@ run_speed_test() (
     timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     [[ "$json" == false ]] && {
-        echo "NetOps Internet Speed Test"
-        echo "Scope: this NetOps host -> Internet"
+        echo "Netrune Internet Speed Test"
+        echo "Scope: this Netrune host -> Internet"
         echo "Profile: $profile | servers=$runs | idle-pings=$idle_count | request-timeout=${request_timeout}s"
         echo "Path: interface=$interface source=${source_ip:-unknown} gateway=${gateway:-direct} VPN-active=$vpn routed-via-VPN=$vpn_routed"
         echo "Selecting candidate servers with verified TLS..."
@@ -308,7 +308,7 @@ run_speed_test() (
     }
     local server_json="$tmp/servers.json" helper_error="$tmp/servers.err" discovery_ok=false discovery_attempt cache_used=false
     local cache_root cache_key cache_file cache_ttl cache_age cache_stage
-    cache_root="${NETOPS_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/netops}"
+    cache_root="${NETRUNE_CACHE_DIR:-${NETOPS_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/netrune}}"
     cache_ttl="${NETOPS_SPEED_CACHE_TTL_SECONDS:-21600}"
     [[ "$cache_ttl" =~ ^[0-9]+$ ]] || cache_ttl=0
     cache_key=$(printf '%s' "${interface}_${gateway:-direct}_${source_ip:-unknown}_${vpn_routed}" | tr -c 'A-Za-z0-9_.-' '_')
@@ -346,7 +346,7 @@ run_speed_test() (
         detail=$(jq -r '.error//empty' "$server_json" 2>/dev/null)
         [[ -z "$detail" ]] && detail=$(tr '\n' ' ' <"$helper_error")
         echo "Error: unable to retrieve verified speed-test servers${detail:+: $detail}" >&2
-        echo "Run 'netops diagnose doctor' to inspect TLS trust and prerequisites." >&2
+        echo "Run 'netrune diagnose doctor' to inspect TLS trust and prerequisites." >&2
         return 1
     fi
 
@@ -456,7 +456,7 @@ run_speed_test() (
             --argjson ldj "$loaded_down_jitter_mean" --argjson luj "$loaded_up_jitter_mean" \
             --argjson bd "$bytes_down" --argjson bu "$bytes_up" --argjson idleSamples "$idle_samples_total" \
             --argjson downSamples "$loaded_down_samples_total" --argjson upSamples "$loaded_up_samples_total" \
-            '{ok:true,timestamp:$timestamp,observed_at:$observed,scope:"netops-host-to-internet",backend:$backend,
+            '{ok:true,timestamp:$timestamp,observed_at:$observed,scope:"netrune-host-to-internet",backend:$backend,
               tls:{verified:true,hostname_check:true,trust_source:$trust},
               profile:$profile,
               server_discovery:{cached:$cacheUsed,cache_ttl_seconds:$cacheTtl},
@@ -489,7 +489,7 @@ run_speed_test() (
         printf 'Test scope     : %d/%d servers, %ds, %.1f MB down / %.1f MB up\n' \
             "$completed" "$attempted" "$elapsed" \
             "$(awk -v b="$bytes_down" 'BEGIN{print b/1048576}')" "$(awk -v b="$bytes_up" 'BEGIN{print b/1048576}')"
-        echo "Interpretation : this measures the machine running NetOps, not an arbitrary switch port or endpoint. Quick profile is a fast check; balanced/thorough add stronger server agreement."
+        echo "Interpretation : this measures the machine running Netrune, not an arbitrary switch port or endpoint. Quick profile is a fast check; balanced/thorough add stronger server agreement."
     fi
     [[ "$reliability" == low ]] && return 2
     return 0
@@ -500,7 +500,7 @@ run_latency_json() (
     [[ -z "$count" || "$count" == "-1" ]] && count=5
     [[ "$count" =~ ^[1-9][0-9]*$ ]] || { echo "Error: --count must be a positive integer for --json latency probes" >&2; return 6; }
     command -v jq >/dev/null 2>&1 || { echo "Error: 'jq' is required for JSON latency output" >&2; return 5; }
-    runtime=$(mktemp -d /tmp/netops-probe-json.XXXXXX) || { echo "Error: could not create probe runtime state" >&2; return 10; }
+    runtime=$(mktemp -d /tmp/netrune-probe-json.XXXXXX) || { echo "Error: could not create probe runtime state" >&2; return 10; }
     trap 'rm -rf -- "$runtime"' EXIT
     samples="$runtime/samples"
     tmp_raw="$runtime/raw"
@@ -667,7 +667,7 @@ fi
 
 # Private runtime state prevents concurrent probes from colliding and gives
 # every exit path one cleanup boundary.
-RUNTIME_DIR=$(mktemp -d /tmp/netops-probe.XXXXXX) || {
+RUNTIME_DIR=$(mktemp -d /tmp/netrune-probe.XXXXXX) || {
     echo "Error: could not create probe runtime state" >&2
     exit 10
 }
@@ -938,8 +938,8 @@ if ((PROBE_RECEIVED > 0)) && offer_ssh_handoff; then
     stop_probe_children
     show_cursor
     rm -rf -- "$RUNTIME_DIR"
-    exec "$(dirname "$(realpath "$0")")/netops-connect" "$IP"
-    echo "Error: could not start netops-connect" >&2
+    exec "$(dirname "$(realpath "$0")")/netrune-connect" "$IP"
+    echo "Error: could not start netrune-connect" >&2
     exit 5
 fi
 

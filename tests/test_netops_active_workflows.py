@@ -3,9 +3,7 @@ import io
 import json
 import os
 from pathlib import Path
-import sys
 import tempfile
-import threading
 import time
 import unittest
 from unittest import mock
@@ -69,118 +67,6 @@ class NetOpsActiveWorkflowTest(unittest.TestCase):
         self.assertEqual(row["created_at"], 1704067200)
         self.assertEqual(row["writes_local"], 0)
 
-    def test_job_sse_replays_once_and_closes_on_completion(self):
-        created_at = 1704067200
-        with self.app.state.connect() as con:
-            con.execute(
-                "INSERT INTO jobs(id,action,command,status,created_at,started_at,finished_at,exit_code,read_only,writes_local) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                ("sse-job", "db-status", "netops db status", "running", created_at, created_at, None, None, 1, 0),
-            )
-        self.app.add_job_log("sse-job", "system", "started: netops db status")
-        self.app.add_job_log("sse-job", "stdout", "Schema: 9 (expected 9)")
-        self.app.add_job_log("sse-job", "system", "finished with exit code 0")
-        self.app.set_job_status("sse-job", "completed", 0)
-
-        handler_type = self.app.make_handler()
-        handler = handler_type.__new__(handler_type)
-        handler.wfile = io.BytesIO()
-        handler.close_connection = False
-        handler.send_response = lambda status: None
-        handler.send_header = lambda name, value: None
-        handler.end_headers = lambda: None
-        handler.send_events("sse-job", 0)
-        stream = handler.wfile.getvalue().decode()
-        detail = {
-            "job": self.app.state.one("SELECT * FROM jobs WHERE id='sse-job'"),
-            "logs": self.app.state.rows("SELECT id,created_at,stream,line FROM job_logs WHERE job_id='sse-job' ORDER BY id"),
-        }
-        events = [json.loads(line[6:]) for line in stream.splitlines() if line.startswith("data: ")]
-        event_ids = [row["id"] for row in events if row.get("id")]
-        self.assertEqual(detail["job"]["status"], "completed")
-        self.assertEqual(detail["job"]["exit_code"], 0)
-        self.assertEqual(event_ids, [row["id"] for row in detail["logs"]])
-        self.assertEqual(len(event_ids), len(set(event_ids)))
-        self.assertTrue(all(row.get("created_at_iso", "").endswith("Z") for row in events))
-        self.assertEqual(events[-1]["line"], "finished with exit code 0")
-        self.assertTrue(handler.close_connection)
-
-        resumed = handler_type.__new__(handler_type)
-        resumed.wfile = io.BytesIO()
-        resumed.close_connection = False
-        resumed.send_response = lambda status: None
-        resumed.send_header = lambda name, value: None
-        resumed.end_headers = lambda: None
-        resumed.send_events("sse-job", max(event_ids))
-        self.assertEqual(resumed.wfile.getvalue(), b"")
-        self.assertTrue(resumed.close_connection)
-
-    def test_queued_job_can_be_cancelled_before_a_process_is_spawned(self):
-        marker = Path(self.temp.name) / "queued-job-ran"
-        command = [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()"]
-        spec = netops.CommandSpec("fixture", "Fixture", command, "test fixture")
-        self.app.sem = threading.Semaphore(0)
-        with mock.patch.object(self.app, "command_spec", return_value=spec), mock.patch.object(
-            self.app, "command_for_action", return_value=(command, True, False)
-        ):
-            created = self.app.create_job("fixture", {})
-        jid = created["id"]
-        done = self.app.jobs[jid]["done"]
-        cancelled, _ = self.app.cancel_job(jid)
-        self.app.sem.release()
-        self.assertTrue(done.wait(3), "queued worker did not finish after cancellation")
-        row = self.app.state.one("SELECT status,exit_code FROM jobs WHERE id=?", (jid,))
-        self.assertTrue(cancelled)
-        self.assertEqual(row, {"status": "cancelled", "exit_code": 143})
-        self.assertFalse(marker.exists())
-
-    def test_running_job_cancellation_is_not_overwritten_as_failed(self):
-        command = [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(30)"]
-        spec = netops.CommandSpec("fixture", "Fixture", command, "test fixture")
-        with mock.patch.object(self.app, "command_spec", return_value=spec), mock.patch.object(
-            self.app, "command_for_action", return_value=(command, True, False)
-        ):
-            created = self.app.create_job("fixture", {})
-        jid = created["id"]
-        deadline = time.monotonic() + 3
-        proc = None
-        while time.monotonic() < deadline:
-            with self.app.lock:
-                proc = self.app.jobs[jid].get("process")
-            if proc is not None:
-                break
-            time.sleep(0.02)
-        self.assertIsNotNone(proc, "job process never started")
-        cancelled, _ = self.app.cancel_job(jid)
-        self.assertTrue(self.app.jobs[jid]["done"].wait(5), "cancelled worker did not finish")
-        row = self.app.state.one("SELECT status,exit_code FROM jobs WHERE id=?", (jid,))
-        logs = self.app.state.rows("SELECT stream,line FROM job_logs WHERE job_id=? ORDER BY id", (jid,))
-        self.assertTrue(cancelled)
-        self.assertEqual(row, {"status": "cancelled", "exit_code": 143})
-        self.assertIsNotNone(proc.poll())
-        self.assertTrue(any("cancelled by operator" in item["line"] for item in logs))
-        self.assertFalse(any("finished with exit code" in item["line"] for item in logs))
-
-    def test_shutdown_cancels_active_jobs_and_rejects_new_work(self):
-        command = [sys.executable, "-c", "import time; time.sleep(30)"]
-        spec = netops.CommandSpec("fixture", "Fixture", command, "test fixture")
-        with mock.patch.object(self.app, "command_spec", return_value=spec), mock.patch.object(
-            self.app, "command_for_action", return_value=(command, True, False)
-        ):
-            created = self.app.create_job("fixture", {})
-            jid = created["id"]
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                with self.app.lock:
-                    if self.app.jobs[jid].get("process") is not None:
-                        break
-                time.sleep(0.02)
-            stopped = self.app.shutdown_jobs(wait=3)
-            with self.assertRaisesRegex(RuntimeError, "stopping"):
-                self.app.create_job("fixture", {})
-        row = self.app.state.one("SELECT status,exit_code FROM jobs WHERE id=?", (jid,))
-        self.assertEqual(stopped, 1)
-        self.assertEqual(row, {"status": "cancelled", "exit_code": 143})
-
     def test_new_network_dry_runs_do_not_open_transports(self):
         self.add_device("192.0.2.1", "CORE01")
         self.app.config.public["core_switch_ip"] = "192.0.2.1"
@@ -215,6 +101,50 @@ class NetOpsActiveWorkflowTest(unittest.TestCase):
         self.assertEqual(payload["counter_deltas"]["crc_errors"], 2)
         self.assertTrue(any(row.get("counter") == "crc_errors" for row in payload["findings"]))
         self.assertTrue(record["created_at"] > 0)
+
+    def test_port_health_batches_a_multi_command_template_into_one_session(self):
+        """A driver whose interface_health template has more than one command
+        used to authenticate once per command per snapshot; it must now
+        authenticate once per snapshot, the same as a single-command driver."""
+        from netops_platform.devices import DeviceDriver
+
+        self.add_device("192.0.2.1", "SW1")
+        two_command_driver = DeviceDriver(
+            family="fixture-two-command", vendor="Fixture", os_name="FixtureOS",
+            device_kind="switch", support_level="claimed",
+            command_templates={"interface_health": (
+                "show interfaces {interface}", "show interfaces brief {interface}")},
+            capabilities={"interface_health": "supported"},
+            detection_patterns={}, detection_confidence=0,
+        )
+
+        def batch_transcript(counters_body: str) -> str:
+            return ("###NETRUNE-CMD 1###\npager\n"
+                    f"###NETRUNE-CMD 2###\n{counters_body}\n"
+                    "###NETRUNE-CMD 3###\nbrief line\n")
+
+        baseline_body = ("GigabitEthernet1/0/7 is up, line protocol is up (connected)\n"
+                         "Full-duplex, 1000Mb/s\n10 input errors, 2 CRC, 0 frame, 0 overrun, 0 ignored\n"
+                         "0 output errors, 0 collisions, 0 interface resets")
+        current_body = ("GigabitEthernet1/0/7 is up, line protocol is up (connected)\n"
+                        "Full-duplex, 1000Mb/s\n11 input errors, 4 CRC, 0 frame, 0 overrun, 0 ignored\n"
+                        "0 output errors, 0 collisions, 0 interface resets")
+        responses = [
+            (0, batch_transcript(baseline_body), ""),
+            (0, batch_transcript(current_body), ""),
+        ]
+        with mock.patch.object(self.app, "driver_for", return_value=two_command_driver), \
+             mock.patch.object(self.app, "capture", side_effect=responses) as capture, \
+             mock.patch.object(self.app, "emit"):
+            rc = self.app.port_health_diagnostic("SW1", "Gi1/0/7", 0, 1000, netops.GlobalOptions())
+        self.assertEqual(rc, netops.PARTIAL)
+        # One capture() per snapshot (baseline, current), not one per command.
+        self.assertEqual(capture.call_count, 2)
+        for call in capture.call_args_list:
+            self.assertIn("show-batch", call.args[0])
+        record = self.app.state.one("SELECT * FROM diagnostic_runs WHERE kind='port-health' ORDER BY id DESC LIMIT 1")
+        payload = json.loads(record["raw_json"])
+        self.assertEqual(payload["counter_deltas"]["crc_errors"], 2)
 
     def test_port_health_skips_wait_when_baseline_cannot_be_parsed(self):
         self.add_device("192.0.2.1", "SW1")
@@ -389,6 +319,34 @@ class NetOpsActiveWorkflowTest(unittest.TestCase):
             code = self.app.cmd_path(["inspect", "02:00:00:00:00:25", "--vlan", "120", "--refresh"], options)
         self.assertEqual(code, netops.SUCCESS)
         self.assertTrue(options.refresh_neighbors)
+
+    def test_path_history_filters_and_show_accepts_alias_or_endpoint(self):
+        options = netops.GlobalOptions()
+        history_rows = [{
+            "run_id": "path-0123456789abcdef",
+            "run_ref": "path-0123456789ab",
+            "status": "COMPLETE",
+            "endpoint": "0200.0000.0025",
+            "vlan": 5,
+            "started_at": 1_700_000_000,
+        }]
+        payload = {
+            "run_id": "path-0123456789abcdef",
+            "status": "COMPLETE",
+            "summary": "fixture",
+            "confidence": 95,
+            "finished_at": 1_700_000_001,
+            "request": {"vlan": 5},
+            "hops": [],
+            "findings": [],
+        }
+        with mock.patch.object(self.app.path_inspector, "history", return_value=history_rows) as history, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.app.cmd_path(["history", "0200.0000.0025", "--vlan", "5"], options), netops.SUCCESS)
+        history.assert_called_once_with("0200.0000.0025", 5, options.limit)
+        with mock.patch.object(self.app.path_inspector, "show", return_value=payload) as show, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.app.cmd_path(["hshow", "path-0123456789ab"], options), netops.SUCCESS)
+            self.assertEqual(self.app.cmd_path(["show", "0200.0000.0025", "--vlan", "5"], options), netops.SUCCESS)
+        self.assertEqual(show.call_args_list, [mock.call("path-0123456789ab", 0), mock.call("0200.0000.0025", 5)])
 
     def test_application_driver_registry_is_profile_local(self):
         drivers = self.app.paths.config_dir / "drivers"

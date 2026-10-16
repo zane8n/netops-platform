@@ -1,4 +1,4 @@
-"""Shared NetOps application services and terminal console."""
+"""Legacy import namespace for the Netrune application services."""
 
 from __future__ import annotations
 
@@ -11,7 +11,10 @@ def version() -> str:
         return Path(__file__).resolve().parents[1].joinpath("VERSION").read_text(encoding="ascii").strip()
     except OSError:
         try:
-            return distribution_version("netops-platform")
+            try:
+                return distribution_version("netrune")
+            except PackageNotFoundError:
+                return distribution_version("netops-platform")
         except PackageNotFoundError:
             return "0.0.0+unknown"
 

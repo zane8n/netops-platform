@@ -75,6 +75,55 @@ proc terminate_child {} {
     }
 }
 
+# A prompt-match timeout produces no recognisable error line, so without the
+# raw tail the failure is indistinguishable from an unreachable host. Control
+# characters are made visible because they are usually the reason the prompt
+# pattern did not match.
+# Stale installed copies of this wrapper shadow the working tree and produce
+# failures identical to ones already fixed. Naming the running file makes that
+# immediately visible instead of costing a diagnosis round.
+proc emit_wrapper_identity {} {
+    set path [file normalize [info script]]
+    puts stderr "DIAG: wrapper $path (mtime [clock format [file mtime $path] -format {%Y-%m-%d %H:%M:%S}])"
+}
+
+proc current_buffer {} {
+    # Unset until the session yields its first byte. Reading it blind turns a
+    # clean diagnostic into a Tcl stack trace at the exact moment the operator
+    # needs the diagnostic.
+    if {[info exists ::expect_out(buffer)]} {
+        return $::expect_out(buffer)
+    }
+    return ""
+}
+
+proc emit_buffer_tail {label buffer} {
+    set visible [string map [list "\r" "<CR>" "\n" "<LF>" "\x1b" "<ESC>" "\x08" "<BS>"] $buffer]
+    set length [string length $visible]
+    set start [expr {$length > 600 ? $length - 600 : 0}]
+    puts stderr "DIAG: $label saw ${length} chars, tail: [string range $visible $start end]"
+}
+
+set debug_log_path ""
+if {[info exists env(NETOPS_ARUBA_DEBUG_LOG)] && [string trim $env(NETOPS_ARUBA_DEBUG_LOG)] ne ""} {
+    set debug_log_path $env(NETOPS_ARUBA_DEBUG_LOG)
+}
+proc raw_log {label chunk} {
+    # Diagnosing this wrapper from a 600-char failure tail means guessing at
+    # what happened in the other 59+ seconds. When NETOPS_ARUBA_DEBUG_LOG is
+    # set, log every chunk actually received, timestamped, so a real
+    # transcript replaces the guess -- opt-in and append-only so normal runs
+    # are untouched.
+    global debug_log_path
+    if {$debug_log_path eq ""} { return }
+    set visible [string map [list "\r" "<CR>" "\n" "<LF>" "\x1b" "<ESC>" "\x08" "<BS>"] $chunk]
+    catch {
+        set fh [open $debug_log_path a]
+        puts $fh "\[[clock format [clock milliseconds] -format {%H:%M:%S}].[format %03d [expr {[clock milliseconds] % 1000}]]\] $label: $visible"
+        close $fh
+    }
+}
+
 proc emit_ssh_diagnostic {buffer} {
     foreach line [split [string map [list "\r" ""] $buffer] "\n"] {
         set clean [string trim $line]
@@ -93,7 +142,7 @@ set env(TERM) dumb
 log_user 0
 
 # Spawn sshpass with ssh. The pseudo-terminal is required for long output.
-# Legacy additions are filtered against this OpenSSH client by netops-lib.sh;
+# Legacy additions are filtered against this OpenSSH client by netrune-lib.sh;
 # appending with '+' preserves the client's modern defaults.
 set ssh_command [list sshpass -e ssh -tt -o StrictHostKeyChecking=$strict_host_key -o UserKnownHostsFile=$known_hosts -o LogLevel=ERROR]
 foreach {variable option} {
@@ -117,61 +166,261 @@ sleep 1
 # Match a complete prompt line at the end of the receive buffer. Restricting
 # prompt characters prevents comparison signs in command output from ending a
 # command early while allowing common Cisco and Aruba config-mode prompts.
-set prompt_pattern {(?:^|[\r\n])[[:alnum:]_.:/()@~-]{1,160}[>#][ \t]*$}
+# AOS-S uses full-screen cursor control even with TERM=dumb. Accept bounded
+# ANSI CSI sequences around the prompt while keeping the visible prompt token
+# strict enough not to match comparison signs in command output.
+# AOS-S redraws a full 24-line screen even with TERM=dumb, and the run of
+# cursor-positioning sequences around the prompt contains partial CSI escapes
+# such as "\x1b[?" with no final byte. A pattern that only accepted complete
+# sequences could not reach the prompt token, so every command timed out with
+# the prompt plainly visible in the buffer. Each alternative below still starts
+# with ESC, so it can never consume hostname characters.
+set escape_run {(?:\x1b\[?[0-9;?]*[A-Za-z]?|[ \t])*}
+set escape_tail {(?:\x1b\[?[0-9;?]*[A-Za-z]?|[ \t\r\n])*}
+# The trailing ${escape_tail}\$ this pattern used to end with required the
+# prompt to be the literal last thing in the buffer -- true right after
+# login, but a mode-changing command (e.g. "configure") can have its fresh
+# "(config)# " arrive in the *same* read as more cursor-positioning escapes
+# still trailing it (confirmed live: a debug capture showed the prompt
+# sitting mid-buffer with `\x1b[24;1H\x1b[24;32H...` right after it). The
+# end anchor then never matched, and a catch-all added to keep the overall
+# wait timer alive during genuine redraw activity ended up consuming the
+# prompt text itself before this pattern ever got a clean shot at it. Not
+# anchoring to the end lets a real prompt match wherever it appears, with
+# whatever comes after it handled on the next read/drain instead.
+set prompt_pattern "(?:^|\[\r\n\])${escape_run}\[\[:alnum:\]_.:/()@~-\]{1,160}\[>#\]\[ \t\]*"
+# AOS-S sizes the screen by parking the cursor off-screen and issuing a Device
+# Status Report ("\x1b[1920;1920H\x1b[6n"). It will not present a usable prompt
+# until the terminal answers. An interactive terminal replies automatically,
+# which is why manual SSH works while an automated session hangs with the
+# prompt already on screen.
+# The switch sizes its output columns from this reply. AOS-S table rows such as
+# `show spanning-tree` run past 80 columns, and at 80 the final column (Edge) is
+# truncated, which silently turns every port into an edge port and drops the
+# designated bridge that topology derivation depends on.
+set report_rows 24
+set report_cols 250
+if {[info exists env(NETOPS_SSH_TERM_COLS)] && [string is integer -strict $env(NETOPS_SSH_TERM_COLS)]} {
+    if {$env(NETOPS_SSH_TERM_COLS) >= 80 && $env(NETOPS_SSH_TERM_COLS) <= 1920} {
+        set report_cols $env(NETOPS_SSH_TERM_COLS)
+    }
+}
+proc answer_cursor_report {} {
+    # spawn_id is global; without importing it here `send` does not
+    # reach the spawned session and the reply is silently lost.
+    global spawn_id report_rows report_cols
+    send "\x1b\[${report_rows};${report_cols}R"
+}
+
+# Learn the device's real prompt during login and match that literal for the
+# rest of the session. An end-anchored regex has to be re-satisfied against a
+# buffer that AOS-S keeps redrawing, which makes it unreliable exactly when the
+# prompt is on screen; a literal does not.
+set device_prompt ""
+proc remember_prompt {raw} {
+    global device_prompt
+    set clean $raw
+    regsub -all {\x1b\[[0-9;?]*[A-Za-z]} $clean "" clean
+    regsub -all {\x1b\[[0-9;?]*} $clean "" clean
+    regsub -all {\x1b} $clean "" clean
+    set clean [string map [list "\r" "" "\n" ""] $clean]
+    if {[regexp {([[:alnum:]_.:/()@~-]{1,160}[>#])[ \t]*$} $clean -> found]} {
+        set device_prompt $found
+    }
+}
+
+proc strip_escapes {text} {
+    # Same cleanup already used later on a command's final output, reused
+    # here so prompt detection works on text, not on raw interleaved escape
+    # sequences.
+    regsub -all {\x1b\[[0-9;?]*[A-Za-z]} $text "" text
+    regsub -all {\x1b\[[0-9;?]*} $text "" text
+    regsub -all {[0-9]+;[0-9]+R} $text "" text
+    regsub -all {\x1b} $text "" text
+    return $text
+}
+
+proc find_prompt {text} {
+    # A live capture of a real failure showed why matching prompt shape
+    # directly against raw bytes is fragile: AOS-S's config-mode redraw
+    # contained zero literal CR/LF characters, all cursor-positioning
+    # escapes, with the echoed command text ("configure") sitting between
+    # buffer-start and the eventual prompt -- a leading anchor requiring
+    # "(buffer-start or newline) then pure escapes" can never reach the
+    # prompt through literal echoed text, no matter how the trailing side
+    # of the pattern is written. Stripping escapes first and checking the
+    # much simpler resulting text sidesteps that whole class of failure.
+    # The echoed command can end up glued directly onto the prompt with no
+    # separator (same reason); that pollutes what gets learned as the
+    # literal prompt but doesn't affect whether "a prompt is here" is
+    # answered correctly, which is all this is used for.
+    set cleaned [strip_escapes $text]
+    if {[regexp {([[:alnum:]_.:/()@~-]{1,160}[>#])[ \t]*$} $cleaned -> found]} {
+        return $found
+    }
+    return ""
+}
+
+proc drain_until_idle {settle_timeout {required_quiet_rounds 2}} {
+    # A single quiet window is not reliable proof the redraw has finished --
+    # AOS-S's full-screen redraw can have brief internal pauses of its own
+    # (the very first fix here assumed one window was enough, and a command
+    # sent right after it still got swallowed by trailing redraw activity).
+    # Requiring several *consecutive* quiet windows, resetting the count the
+    # moment anything arrives, tolerates those pauses instead of mistaking
+    # one for "done".
+    global timeout
+    set saved_timeout $timeout
+    set timeout $settle_timeout
+    set quiet_rounds 0
+    while {$quiet_rounds < $required_quiet_rounds} {
+        expect {
+            -re {\x1b\[6n} { raw_log "drain/dsr" $expect_out(0,string); answer_cursor_report; set quiet_rounds 0 }
+            "Press any key to continue" { raw_log "drain/pak" $expect_out(0,string); send "\r"; set quiet_rounds 0 }
+            -re {[^\x00]+} { raw_log "drain" $expect_out(0,string); remember_prompt $expect_out(0,string); set quiet_rounds 0 }
+            timeout { raw_log "drain" "<quiet round $quiet_rounds/$required_quiet_rounds elapsed>"; incr quiet_rounds }
+            eof { raw_log "drain" "<eof>"; set timeout $saved_timeout; return }
+        }
+    }
+    raw_log "drain" "<idle: $required_quiet_rounds consecutive quiet rounds reached>"
+    set timeout $saved_timeout
+}
+
 expect {
+    -re {\x1b\[6n} {
+        answer_cursor_report
+        exp_continue
+    }
     "Press any key to continue" {
         send "\r"
         exp_continue
     }
-    -re $prompt_pattern {}
+    -re $prompt_pattern { remember_prompt $expect_out(0,string) }
     eof {
-        emit_ssh_diagnostic $expect_out(buffer)
+        emit_ssh_diagnostic [current_buffer]
         set code [child_exit_code 1]
         puts stderr "ERROR: SSH session ended before the initial device prompt (exit $code)"
         exit [expr {$code == 0 ? 1 : $code}]
     }
     timeout {
-        emit_ssh_diagnostic $expect_out(buffer)
-        puts stderr "ERROR: Timeout waiting for initial prompt"
+        emit_ssh_diagnostic [current_buffer]
+        emit_wrapper_identity
+        emit_buffer_tail "initial prompt" [current_buffer]
+        puts stderr "ERROR: Timeout after ${timeout}s waiting for the initial device prompt"
         terminate_child
         exit 9
     }
 }
 
+# AOS-S keeps redrawing its screen for a while after the first prompt appears.
+# A command typed into that redraw is swallowed, and the wrapper is then left
+# waiting for a reply to a command the switch never received. Drain to silence
+# first so the session is genuinely idle before anything is sent.
+set settle_timeout 2
+if {[info exists env(NETOPS_SSH_SETTLE_TIMEOUT)] && [string is integer -strict $env(NETOPS_SSH_SETTLE_TIMEOUT)]} {
+    if {$env(NETOPS_SSH_SETTLE_TIMEOUT) >= 1 && $env(NETOPS_SSH_SETTLE_TIMEOUT) <= 60} {
+        set settle_timeout $env(NETOPS_SSH_SETTLE_TIMEOUT)
+    }
+}
+drain_until_idle $settle_timeout
+# An impossible literal keeps `-ex` from matching everything when the prompt
+# could not be learned; the regex below still covers that case.
+if {$device_prompt eq ""} { set device_prompt "\x00\x00NOPROMPT\x00\x00" }
+
 # Send each command, capturing output until the next prompt
+set emit_markers 0
+if {[info exists env(NETOPS_CMD_MARKERS)] && $env(NETOPS_CMD_MARKERS) eq "1"} {
+    set emit_markers 1
+}
 set command_number 0
+set nonblank_commands 0
+foreach cmd $commands {
+    if {[string trim $cmd] ne ""} { incr nonblank_commands }
+}
 foreach cmd $commands {
     if {[string trim $cmd] eq ""} { continue }
     incr command_number
     set captured ""
+    raw_log "cmd$command_number" "<sending: $cmd>"
     send "$cmd\r"
-    expect {
-        -re {--[ ]*MORE[ ]*--|More:|Press[ ]+any[ ]+key[ ]+to[ ]+continue} {
-            append captured $expect_out(buffer)
-            send " "
-            exp_continue -continue_timer
-        }
-        -re $prompt_pattern {
-            append captured $expect_out(buffer)
-        }
-        eof {
-            append captured $expect_out(buffer)
-            emit_ssh_diagnostic $captured
-            set code [child_exit_code 1]
-            puts stderr "ERROR: SSH session ended while waiting for command $command_number (exit $code)"
-            exit [expr {$code == 0 ? 1 : $code}]
-        }
-        timeout {
-            emit_ssh_diagnostic $expect_out(buffer)
-            puts stderr "ERROR: Timeout waiting for command $command_number to finish"
-            terminate_child
-            exit 9
+    set found_prompt ""
+    while {$found_prompt eq ""} {
+        expect {
+            -re {\x1b\[6n} {
+                # The switch can re-probe the terminal at any time, including
+                # mid-command; leaving it unanswered stalls the session.
+                raw_log "cmd$command_number/dsr" $expect_out(buffer)
+                append captured $expect_out(buffer)
+                answer_cursor_report
+                exp_continue
+            }
+            -nocase -re {--[ ]*MORE[ ]*--|More:|Press[ ]+any[ ]+key[ ]+to[ ]+continue} {
+                # This wrapper is shared by every vendor's "show"-mode
+                # read command stream (netops-control routes mode=="show"
+                # through netops_ssh_prompted unconditionally, not just
+                # Aruba/Ruckus) -- Cisco's pager prompt is "--More--"
+                # while this pattern was only ever proven against Aruba's
+                # "--MORE--", so a plain (case-sensitive) match silently
+                # never fired on Cisco, stalling until the 60s timeout on
+                # any show command long enough to paginate.
+                raw_log "cmd$command_number/more" $expect_out(buffer)
+                append captured $expect_out(buffer)
+                send " "
+                exp_continue
+            }
+            -re {[^\x00]+} {
+                # Matching prompt shape directly against raw, interleaved
+                # escape bytes is what previously failed here: a live
+                # capture of a real failure showed AOS-S's config-mode
+                # redraw containing zero literal CR/LF characters, all
+                # cursor-positioning escapes, with the echoed command text
+                # ("configure") sitting where a leading "buffer-start or
+                # newline, then pure escapes" anchor could never reach
+                # through it to the prompt beyond -- no rewrite of the
+                # trailing side of that pattern could fix a leading-anchor
+                # problem. find_prompt strips escapes first and checks the
+                # much simpler resulting text instead. Every chunk, matched
+                # or not, still resets the wait via plain exp_continue, so
+                # the device gets a fresh window as long as it keeps sending
+                # anything at all -- true silence still times out below.
+                raw_log "cmd$command_number/chunk" $expect_out(buffer)
+                append captured $expect_out(buffer)
+                set found_prompt [find_prompt $captured]
+                if {$found_prompt eq ""} { exp_continue }
+                raw_log "cmd$command_number/prompt-found" $found_prompt
+                # A mode change (e.g. "configure") means the literal learned
+                # at login no longer matches anything; relearning it here
+                # (best-effort -- see find_prompt on why it can carry a
+                # leading echoed-command artifact) at least keeps it from
+                # going stale for the rest of the session.
+                remember_prompt $found_prompt
+            }
+            eof {
+                raw_log "cmd$command_number" "<eof>"
+                append captured [current_buffer]
+                emit_ssh_diagnostic $captured
+                set code [child_exit_code 1]
+                puts stderr "ERROR: SSH session ended while waiting for command $command_number (exit $code)"
+                exit [expr {$code == 0 ? 1 : $code}]
+            }
+            timeout {
+                raw_log "cmd$command_number" "<timeout, ${timeout}s elapsed>"
+                emit_ssh_diagnostic [current_buffer]
+                emit_wrapper_identity
+                emit_buffer_tail "command $command_number ($cmd)" [current_buffer]
+                puts stderr "ERROR: Timeout after ${timeout}s waiting for the prompt after command $command_number: $cmd"
+                terminate_child
+                exit 9
+            }
         }
     }
     # The output is everything up to the prompt
     set output $captured
     # Clean ANSI escape sequences and cursor reports
     regsub -all {\x1b\[[0-9;?]*[A-Za-z]} $output "" output
+    # Then any partial CSI left mid-stream. Dropping the bare ESC first would
+    # strand its "[?" tail in the text and corrupt the parsed output.
+    regsub -all {\x1b\[[0-9;?]*} $output "" output
     regsub -all {[0-9]+;[0-9]+R} $output "" output
     regsub -all {\x1b} $output "" output
     regsub -all {.\x08} $output "" output
@@ -185,7 +434,27 @@ foreach cmd $commands {
         lappend cleaned_lines [string map [list "\r" ""] $line]
     }
     set cleaned [string trim [join $cleaned_lines "\n"]]
+    # With markers on, the caller can split one session's output back into
+    # per-command results, which is what makes batching several commands into
+    # a single login possible.
+    if {$emit_markers} {
+        puts "###NETRUNE-CMD $command_number###"
+    }
     if {$cleaned ne ""} { puts $cleaned }
+
+    # AOS-S redraws its screen not only right after login but again on any
+    # prompt-level change (e.g. "configure" entering config mode) -- the same
+    # full-screen cursor-control burst documented above for the initial
+    # login. A single quiet-window drain here still let a live test lose the
+    # race (the redraw's own internal pauses fooled it into stopping early);
+    # drain_until_idle's multi-round version is what's used here now too.
+    # Draining after every command but the last, not just the first, closes
+    # the gap generally rather than special-casing "configure" -- skipped
+    # after the final command since there's no next send left to protect,
+    # only the logout sequence below (which does its own short wait anyway).
+    if {$command_number < $nonblank_commands} {
+        drain_until_idle $settle_timeout
+    }
 }
 
 # Exit sequence

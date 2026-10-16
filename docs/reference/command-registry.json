@@ -14,7 +14,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops ap list '<target>'",
+      "command": "netrune ap list '<target>'",
       "description": "Search current reconciled AP inventory.",
       "domain": "ap",
       "examples": [],
@@ -31,10 +31,76 @@
       "writes_local": false
     },
     {
+      "arg_schema": [
+        {
+          "label": "Historical AP",
+          "name": "source",
+          "placeholder": "exact AP name or IP",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Current AP",
+          "name": "target",
+          "placeholder": "exact AP name or IP",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Audit Reason",
+          "name": "reason",
+          "placeholder": "vendor replacement or correction",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "source",
+        "target",
+        "reason"
+      ],
+      "cancellable": true,
+      "command": "netrune ap merge '<source>' '<target>' --reason '<reason>' --dry-run",
+      "description": "Preview retiring an old AP into a current AP while preserving chronological evidence. Apply explicitly in the CLI with --confirm.",
+      "domain": "ap",
+      "examples": [],
+      "id": "ap-merge",
+      "label": "Preview AP identity merge",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "warning",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops ap moves",
+      "command": "netrune ap merges",
+      "description": "List active manual AP merges and their chronology.",
+      "domain": "ap",
+      "examples": [],
+      "id": "ap-merges",
+      "label": "Manual AP identity merges",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune ap moves",
       "description": "Show recorded AP attachment changes newest first.",
       "domain": "ap",
       "examples": [],
@@ -64,7 +130,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops ap on-switch '<target>'",
+      "command": "netrune ap on-switch '<target>'",
       "description": "Show canonical APs attached to a switch or site.",
       "domain": "ap",
       "examples": [],
@@ -84,7 +150,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops ap scan",
+      "command": "netrune ap scan",
       "description": "Refresh AP inventory.",
       "domain": "ap",
       "examples": [],
@@ -117,7 +183,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops ap timeline '<target>'",
+      "command": "netrune ap timeline '<target>'",
       "description": "Show AP attachment history newest first.",
       "domain": "ap",
       "examples": [],
@@ -147,7 +213,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops ap unjoined '<target>'",
+      "command": "netrune ap unjoined '<target>'",
       "description": "List AP observations that are not joined to a controller.",
       "domain": "ap",
       "examples": [],
@@ -166,6 +232,42 @@
     {
       "arg_schema": [
         {
+          "label": "Merge ID",
+          "name": "merge_id",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Revocation Reason",
+          "name": "reason",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "merge_id",
+        "reason"
+      ],
+      "cancellable": true,
+      "command": "netrune ap unmerge '<merge_id>' --reason '<reason>'",
+      "description": "Prepare restoration of a manually retired source AP. Apply explicitly in the CLI with --confirm.",
+      "domain": "ap",
+      "examples": [],
+      "id": "ap-unmerge",
+      "label": "Plan AP merge revocation",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "warning",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
           "label": "Phrase",
           "name": "phrase",
           "required": true,
@@ -176,7 +278,7 @@
         "phrase"
       ],
       "cancellable": true,
-      "command": "netops ask alias remove '<phrase>'",
+      "command": "netrune ask alias remove '<phrase>'",
       "description": "Remove a durable deterministic phrase alias.",
       "domain": "ask",
       "examples": [],
@@ -214,7 +316,7 @@
         "alias_target"
       ],
       "cancellable": true,
-      "command": "netops ask alias set '<phrase>' '<alias_target>'",
+      "command": "netrune ask alias set '<phrase>' '<alias_target>'",
       "description": "Create or update a durable deterministic phrase alias.",
       "domain": "ask",
       "examples": [],
@@ -236,7 +338,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops ask aliases",
+      "command": "netrune ask aliases",
       "description": "List deterministic phrase aliases.",
       "domain": "ask",
       "examples": [],
@@ -256,7 +358,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops ask",
+      "command": "netrune ask",
       "description": "Open the stateful Natural Ask terminal session.",
       "domain": "ask",
       "examples": [],
@@ -276,7 +378,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops ask patterns",
+      "command": "netrune ask patterns",
       "description": "List supported retrieval and command-center examples.",
       "domain": "ask",
       "examples": [],
@@ -305,11 +407,11 @@
         "question"
       ],
       "cancellable": true,
-      "command": "netops ask '<question>'",
+      "command": "netrune ask '<question>'",
       "description": "Run a deterministic question workflow over current inventory and relationship memory.",
       "domain": "ask",
       "examples": [
-        "netops ask \"How many APs are offline in ZONE10?\""
+        "netrune ask \"How many APs are offline in ZONE10?\""
       ],
       "id": "ask-query",
       "label": "Natural Ask",
@@ -337,7 +439,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops backup diff '<target>'",
+      "command": "netrune backup diff '<target>'",
       "description": "Diff latest changed backups for a target.",
       "domain": "backup",
       "examples": [],
@@ -367,7 +469,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops backup history '<target>'",
+      "command": "netrune backup history '<target>'",
       "description": "Show backup history for a target.",
       "domain": "backup",
       "examples": [],
@@ -397,7 +499,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops backup run '<target>'",
+      "command": "netrune backup run '<target>'",
       "description": "Online-only changed-only config backup.",
       "domain": "backup",
       "examples": [],
@@ -420,7 +522,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops backup verify",
+      "command": "netrune backup verify",
       "description": "Review recorded backup checksums, paths, and statuses.",
       "domain": "backup",
       "examples": [],
@@ -440,7 +542,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops commands list",
+      "command": "netrune commands list",
       "description": "List the structured command registry and safety metadata.",
       "domain": "commands",
       "examples": [],
@@ -469,7 +571,7 @@
         "action"
       ],
       "cancellable": true,
-      "command": "netops commands run '<action>' --preview",
+      "command": "netrune commands run '<action>' --preview",
       "description": "Meta-action for previewing a registry command. Ask plans the selected action directly.",
       "domain": "commands",
       "examples": [],
@@ -498,7 +600,7 @@
         "action"
       ],
       "cancellable": true,
-      "command": "netops commands show '<action>'",
+      "command": "netrune commands show '<action>'",
       "description": "Show metadata for one registry action.",
       "domain": "commands",
       "examples": [],
@@ -527,7 +629,7 @@
         "key"
       ],
       "cancellable": true,
-      "command": "netops config get '<key>'",
+      "command": "netrune config get '<key>'",
       "description": "Read one effective non-secret setting.",
       "domain": "config",
       "examples": [],
@@ -547,7 +649,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops config paths",
+      "command": "netrune config paths",
       "description": "Show global and profile configuration files.",
       "domain": "config",
       "examples": [],
@@ -583,7 +685,7 @@
         "value"
       ],
       "cancellable": true,
-      "command": "netops config set '<key>' '<value>'",
+      "command": "netrune config set '<key>' '<value>'",
       "description": "Set one non-secret profile override.",
       "domain": "config",
       "examples": [],
@@ -605,7 +707,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops config show",
+      "command": "netrune config show",
       "description": "Show effective redacted profile settings.",
       "domain": "config",
       "examples": [],
@@ -634,7 +736,7 @@
         "key"
       ],
       "cancellable": true,
-      "command": "netops config unset '<key>'",
+      "command": "netrune config unset '<key>'",
       "description": "Remove one profile override.",
       "domain": "config",
       "examples": [],
@@ -656,7 +758,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops config validate",
+      "command": "netrune config validate",
       "description": "Validate effective settings and legacy-secret state.",
       "domain": "config",
       "examples": [],
@@ -676,7 +778,27 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops db integrity",
+      "command": "netrune db history",
+      "description": "Show recorded command executions with exit codes.",
+      "domain": "db",
+      "examples": [],
+      "id": "db-history",
+      "label": "Command history",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune db integrity",
       "description": "Run SQLite integrity checks without modifying state.",
       "domain": "db",
       "examples": [],
@@ -696,7 +818,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops db migrate",
+      "command": "netrune db migrate",
       "description": "Apply SQLite schema migrations and reconcile derived state.",
       "domain": "db",
       "examples": [],
@@ -718,7 +840,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops db path",
+      "command": "netrune db path",
       "description": "Print the active SQLite database path.",
       "domain": "db",
       "examples": [],
@@ -738,7 +860,29 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops db repair",
+      "command": "netrune db prune",
+      "description": "Delete operational history past its retention window; audit events are never pruned.",
+      "domain": "db",
+      "examples": [],
+      "id": "db-prune",
+      "label": "Prune history",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune db repair",
       "description": "Reindex and repair recoverable SQLite structures, then verify integrity.",
       "domain": "db",
       "examples": [],
@@ -760,7 +904,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops db status",
+      "command": "netrune db status",
       "description": "Show database paths, schema version, file sizes, and record counts.",
       "domain": "db",
       "examples": [],
@@ -780,7 +924,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops db vacuum",
+      "command": "netrune db vacuum",
       "description": "Compact the SQLite database.",
       "domain": "db",
       "examples": [],
@@ -820,8 +964,8 @@
         "commands"
       ],
       "cancellable": true,
-      "command": "netops device config '<target>' '<commands>'",
-      "description": "Preview/confirmed config command wrapper. WebUI preview only.",
+      "command": "netrune device config '<target>' '<commands>'",
+      "description": "Preview/confirmed config command wrapper, one device or a batch (comma list, --target, or --file; --commands-file, --skip-offline, --cisco/--aruba/--ruckus). Confirmed execution stays in the CLI.",
       "domain": "device",
       "examples": [],
       "id": "device-config",
@@ -860,7 +1004,7 @@
         "target2"
       ],
       "cancellable": true,
-      "command": "netops device identity '<target>' '<target2>'",
+      "command": "netrune device identity '<target>' '<target2>'",
       "description": "Explain confidence and conflicts between two switch identity records.",
       "domain": "device",
       "examples": [],
@@ -890,7 +1034,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops device inventory '<target>'",
+      "command": "netrune device inventory '<target>'",
       "description": "Run the device inventory helper for one target.",
       "domain": "device",
       "examples": [],
@@ -928,7 +1072,7 @@
         "command"
       ],
       "cancellable": true,
-      "command": "netops device show '<target>' '<command>'",
+      "command": "netrune device show '<target>' '<command>'",
       "description": "Run a policy-checked read-only show command.",
       "domain": "device",
       "examples": [],
@@ -958,7 +1102,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops device ssh '<target>'",
+      "command": "netrune device ssh '<target>'",
       "description": "Open an interactive SSH session in a terminal.",
       "domain": "device",
       "examples": [],
@@ -988,7 +1132,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops device support '<target>'",
+      "command": "netrune device support '<target>'",
       "description": "Classify a device and show driver capability maturity for Cisco, Aruba, or Ruckus.",
       "domain": "device",
       "examples": [],
@@ -1025,7 +1169,7 @@
         "fingerprint"
       ],
       "cancellable": true,
-      "command": "netops device trust enroll '<target>' --fingerprint '<fingerprint>' --confirm",
+      "command": "netrune device trust enroll '<target>' --fingerprint '<fingerprint>' --confirm",
       "description": "Enroll only an out-of-band verified SSH host-key fingerprint.",
       "domain": "device",
       "examples": [],
@@ -1057,7 +1201,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops device trust forget '<target>' --confirm",
+      "command": "netrune device trust forget '<target>' --confirm",
       "description": "Remove a target from the managed SSH trust store.",
       "domain": "device",
       "examples": [],
@@ -1089,7 +1233,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops device trust scan '<target>'",
+      "command": "netrune device trust scan '<target>'",
       "description": "Retrieve SSH host keys and SHA-256 fingerprints without enrolling them.",
       "domain": "device",
       "examples": [],
@@ -1119,7 +1263,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops device trust status '<target>'",
+      "command": "netrune device trust status '<target>'",
       "description": "Inspect managed SSH host-key fingerprints without network access.",
       "domain": "device",
       "examples": [],
@@ -1156,7 +1300,7 @@
         "interface"
       ],
       "cancellable": true,
-      "command": "netops diagnose cable '<device>' on '<interface>'",
+      "command": "netrune diagnose cable '<device>' on '<interface>'",
       "description": "Read the last recorded copper cable/TDR result without starting a test.",
       "domain": "diagnose",
       "examples": [],
@@ -1204,7 +1348,7 @@
         "wait"
       ],
       "cancellable": true,
-      "command": "netops diagnose cable '<device>' on '<interface>' --test --dry-run",
+      "command": "netrune diagnose cable '<device>' on '<interface>' --test --dry-run",
       "description": "Preview a potentially disruptive copper TDR. Confirmed execution remains CLI-only.",
       "domain": "diagnose",
       "examples": [],
@@ -1252,11 +1396,11 @@
         "count"
       ],
       "cancellable": true,
-      "command": "netops diagnose core-ping '<target>'",
+      "command": "netrune diagnose core-ping '<target>'",
       "description": "Issue ICMP from the configured/selected core switch and store parsed latency.",
       "domain": "diagnose",
       "examples": [
-        "netops diagnose core-ping 192.0.2.50 --count 5"
+        "netrune diagnose core-ping 192.0.2.50 --count 5"
       ],
       "id": "diagnose-core-ping",
       "label": "Point-of-truth core ping",
@@ -1286,7 +1430,7 @@
         "online"
       ],
       "cancellable": true,
-      "command": "netops diagnose doctor",
+      "command": "netrune diagnose doctor",
       "description": "Audit diagnostic dependencies, routing, host limitations, trust, and core settings.",
       "domain": "diagnose",
       "examples": [],
@@ -1319,7 +1463,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops diagnose filtering '<target>'",
+      "command": "netrune diagnose filtering '<target>'",
       "description": "DNS/TLS/filtering diagnostics.",
       "domain": "diagnose",
       "examples": [],
@@ -1377,7 +1521,7 @@
         "once"
       ],
       "cancellable": true,
-      "command": "netops diagnose interface '<device>' on '<interface>'",
+      "command": "netrune diagnose interface '<device>' on '<interface>'",
       "description": "Legacy interface rate monitor; command-center jobs default to one finite sample.",
       "domain": "diagnose",
       "examples": [],
@@ -1418,7 +1562,7 @@
         "count"
       ],
       "cancellable": true,
-      "command": "netops diagnose latency '<target>'",
+      "command": "netrune diagnose latency '<target>'",
       "description": "Run latency probing.",
       "domain": "diagnose",
       "examples": [],
@@ -1475,7 +1619,7 @@
         "expected_speed"
       ],
       "cancellable": true,
-      "command": "netops diagnose port-health '<device>' on '<interface>'",
+      "command": "netrune diagnose port-health '<device>' on '<interface>'",
       "description": "Sample link negotiation and switch error-counter deltas.",
       "domain": "diagnose",
       "examples": [],
@@ -1527,8 +1671,8 @@
         "ca_file"
       ],
       "cancellable": true,
-      "command": "netops diagnose speed",
-      "description": "Measure this NetOps host's routed Internet path with verified profile-based testing.",
+      "command": "netrune diagnose speed",
+      "description": "Measure this Netrune host's routed Internet path with verified profile-based testing.",
       "domain": "diagnose",
       "examples": [],
       "id": "diagnose-speed",
@@ -1606,7 +1750,7 @@
         "bind"
       ],
       "cancellable": true,
-      "command": "netops diagnose throughput '<target>'",
+      "command": "netrune diagnose throughput '<target>'",
       "description": "Measure TCP receiver goodput between this client and a controlled iperf3 server.",
       "domain": "diagnose",
       "examples": [],
@@ -1626,10 +1770,103 @@
       "writes_local": true
     },
     {
+      "arg_schema": [
+        {
+          "label": "Workbook",
+          "name": "workbook",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "workbook"
+      ],
+      "cancellable": true,
+      "command": "netrune excel export '<workbook>'",
+      "description": "Write a new inventory, summary, and migration tracker workbook from Netrune's inventory.",
+      "domain": "excel",
+      "examples": [],
+      "id": "excel-export",
+      "label": "Export Excel tracker",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "local-write",
+      "state_effects": [
+        "workbook file",
+        "audit_events"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Workbook",
+          "name": "workbook",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "workbook"
+      ],
+      "cancellable": true,
+      "command": "netrune excel inspect '<workbook>'",
+      "description": "Match a workbook's rows to Netrune switches and report what is out of date, without writing.",
+      "domain": "excel",
+      "examples": [],
+      "id": "excel-inspect",
+      "label": "Inspect Excel workbook",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Workbook",
+          "name": "workbook",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "workbook"
+      ],
+      "cancellable": true,
+      "command": "netrune excel sync '<workbook>' --dry-run",
+      "description": "Fill and update a workbook's switch rows from Netrune's inventory. Apply explicitly in the CLI with --confirm.",
+      "domain": "excel",
+      "examples": [],
+      "id": "excel-sync",
+      "label": "Sync Excel workbook",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "warning",
+      "run_supported": false,
+      "safety_class": "local-write",
+      "state_effects": [
+        "workbook file",
+        "audit_events"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops health attention",
+      "command": "netrune health attention",
       "description": "Show health, topology, AP movement, and backup items needing review.",
       "domain": "health",
       "examples": [],
@@ -1659,7 +1896,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops health check '<target>'",
+      "command": "netrune health check '<target>'",
       "description": "Ping known/supplied devices and APs, then refresh health state.",
       "domain": "health",
       "examples": [],
@@ -1692,7 +1929,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops health offline '<target>'",
+      "command": "netrune health offline '<target>'",
       "description": "List current offline entities, optionally filtered by target.",
       "domain": "health",
       "examples": [],
@@ -1722,7 +1959,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops health status '<target>'",
+      "command": "netrune health status '<target>'",
       "description": "Read current canonical health, optionally filtered by target.",
       "domain": "health",
       "examples": [],
@@ -1752,7 +1989,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops health timeline '<target>'",
+      "command": "netrune health timeline '<target>'",
       "description": "Read health state changes newest first.",
       "domain": "health",
       "examples": [],
@@ -1772,7 +2009,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops ingest channels",
+      "command": "netrune ingest channels",
       "description": "List declarative channels in the active profile.",
       "domain": "ingest",
       "examples": [],
@@ -1794,7 +2031,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops ingest history",
+      "command": "netrune ingest history",
       "description": "Show ingest runs newest first.",
       "domain": "ingest",
       "examples": [],
@@ -1823,7 +2060,7 @@
         "channel"
       ],
       "cancellable": true,
-      "command": "netops ingest observations '<channel>'",
+      "command": "netrune ingest observations '<channel>'",
       "description": "Show append-only channel observations.",
       "domain": "ingest",
       "examples": [],
@@ -1852,7 +2089,7 @@
         "run_id"
       ],
       "cancellable": true,
-      "command": "netops ingest rejects '<run_id>'",
+      "command": "netrune ingest rejects '<run_id>'",
       "description": "Show redacted quarantine metadata.",
       "domain": "ingest",
       "examples": [],
@@ -1881,7 +2118,7 @@
         "channel"
       ],
       "cancellable": true,
-      "command": "netops ingest run '<channel>'",
+      "command": "netrune ingest run '<channel>'",
       "description": "Run one provenance-preserving ingest channel.",
       "domain": "ingest",
       "examples": [],
@@ -1903,7 +2140,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops ingest validate",
+      "command": "netrune ingest validate",
       "description": "Validate channel manifests without fetching records.",
       "domain": "ingest",
       "examples": [],
@@ -1923,7 +2160,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops init",
+      "command": "netrune init",
       "description": "Create neutral profile state and check host capabilities.",
       "domain": "init",
       "examples": [],
@@ -1955,7 +2192,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops inventory activity '<target>'",
+      "command": "netrune inventory activity '<target>'",
       "description": "Ping one or more inventory targets and report current activity.",
       "domain": "inventory",
       "examples": [],
@@ -1985,7 +2222,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops inventory details '<target>'",
+      "command": "netrune inventory details '<target>'",
       "description": "Collect detailed inventory for one target.",
       "domain": "inventory",
       "examples": [],
@@ -2005,7 +2242,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops inventory export-flat",
+      "command": "netrune inventory export-flat",
       "description": "Export SQLite inventory back to legacy flat files.",
       "domain": "inventory",
       "examples": [],
@@ -2025,10 +2262,40 @@
       "writes_local": true
     },
     {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netrune inventory forget '<target>'",
+      "description": "Drop a device's inventory and derived state so the next scan adopts it afresh. Apply explicitly in the CLI with --confirm.",
+      "domain": "inventory",
+      "examples": [],
+      "id": "inventory-forget",
+      "label": "Forget a device",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "warning",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops inventory import-flat",
+      "command": "netrune inventory import-flat",
       "description": "Import legacy flat caches into SQLite.",
       "domain": "inventory",
       "examples": [],
@@ -2061,7 +2328,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops inventory list '<target>'",
+      "command": "netrune inventory list '<target>'",
       "description": "Search current canonical device and AP inventory.",
       "domain": "inventory",
       "examples": [],
@@ -2107,7 +2374,7 @@
         "reason"
       ],
       "cancellable": true,
-      "command": "netops inventory merge '<source>' '<target>' --reason '<reason>' --dry-run",
+      "command": "netrune inventory merge '<source>' '<target>' --reason '<reason>' --dry-run",
       "description": "Preview retiring an old device into a current device while preserving chronological evidence. Apply explicitly in the CLI with --confirm.",
       "domain": "inventory",
       "examples": [],
@@ -2127,7 +2394,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops inventory merges",
+      "command": "netrune inventory merges",
       "description": "List active manual device merges and their chronology.",
       "domain": "inventory",
       "examples": [],
@@ -2157,7 +2424,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops inventory scan '<target>'",
+      "command": "netrune inventory scan '<target>'",
       "description": "Refresh switch/router inventory.",
       "domain": "inventory",
       "examples": [],
@@ -2179,36 +2446,6 @@
     {
       "arg_schema": [
         {
-          "label": "Target",
-          "name": "target",
-          "placeholder": "hostname, IP, or site token",
-          "required": true,
-          "type": "text"
-        }
-      ],
-      "args": [
-        "target"
-      ],
-      "cancellable": true,
-      "command": "netops inventory show '<target>'",
-      "description": "Search current canonical inventory only.",
-      "domain": "inventory",
-      "examples": [],
-      "id": "inventory-show",
-      "label": "Inventory show",
-      "output_type": "table",
-      "preview_supported": true,
-      "read_only": true,
-      "risk_level": "safe",
-      "run_supported": true,
-      "safety_class": "read-only",
-      "state_effects": [],
-      "timeout_seconds": 0,
-      "writes_local": false
-    },
-    {
-      "arg_schema": [
-        {
           "label": "Merge ID",
           "name": "merge_id",
           "required": true,
@@ -2226,7 +2463,7 @@
         "reason"
       ],
       "cancellable": true,
-      "command": "netops inventory unmerge '<merge_id>' --reason '<reason>'",
+      "command": "netrune inventory unmerge '<merge_id>' --reason '<reason>'",
       "description": "Prepare restoration of a manually retired source device. Apply explicitly in the CLI with --confirm.",
       "domain": "inventory",
       "examples": [],
@@ -2245,113 +2482,6 @@
     {
       "arg_schema": [
         {
-          "label": "Job Id",
-          "name": "job_id",
-          "required": true,
-          "type": "text"
-        }
-      ],
-      "args": [
-        "job_id"
-      ],
-      "cancellable": true,
-      "command": "netops jobs cancel '<job_id>'",
-      "description": "Cancel a live job through the process that owns it.",
-      "domain": "jobs",
-      "examples": [],
-      "id": "jobs-cancel",
-      "label": "Cancel job",
-      "output_type": "log",
-      "preview_supported": true,
-      "read_only": true,
-      "risk_level": "warning",
-      "run_supported": false,
-      "safety_class": "read-only",
-      "state_effects": [],
-      "timeout_seconds": 0,
-      "writes_local": false
-    },
-    {
-      "arg_schema": [],
-      "args": [],
-      "cancellable": true,
-      "command": "netops jobs list",
-      "description": "List recorded jobs newest first.",
-      "domain": "jobs",
-      "examples": [],
-      "id": "jobs-list",
-      "label": "Jobs list",
-      "output_type": "table",
-      "preview_supported": true,
-      "read_only": true,
-      "risk_level": "safe",
-      "run_supported": true,
-      "safety_class": "read-only",
-      "state_effects": [],
-      "timeout_seconds": 0,
-      "writes_local": false
-    },
-    {
-      "arg_schema": [
-        {
-          "label": "Job Id",
-          "name": "job_id",
-          "required": true,
-          "type": "text"
-        }
-      ],
-      "args": [
-        "job_id"
-      ],
-      "cancellable": true,
-      "command": "netops jobs logs '<job_id>'",
-      "description": "Show logs for one recorded job.",
-      "domain": "jobs",
-      "examples": [],
-      "id": "jobs-logs",
-      "label": "Job logs",
-      "output_type": "table",
-      "preview_supported": true,
-      "read_only": true,
-      "risk_level": "safe",
-      "run_supported": true,
-      "safety_class": "read-only",
-      "state_effects": [],
-      "timeout_seconds": 0,
-      "writes_local": false
-    },
-    {
-      "arg_schema": [
-        {
-          "label": "Job Id",
-          "name": "job_id",
-          "required": true,
-          "type": "text"
-        }
-      ],
-      "args": [
-        "job_id"
-      ],
-      "cancellable": true,
-      "command": "netops jobs show '<job_id>'",
-      "description": "Show one recorded job and its logs.",
-      "domain": "jobs",
-      "examples": [],
-      "id": "jobs-show",
-      "label": "Job details",
-      "output_type": "table",
-      "preview_supported": true,
-      "read_only": true,
-      "risk_level": "safe",
-      "run_supported": true,
-      "safety_class": "read-only",
-      "state_effects": [],
-      "timeout_seconds": 0,
-      "writes_local": false
-    },
-    {
-      "arg_schema": [
-        {
           "label": "Target",
           "name": "target",
           "placeholder": "hostname, IP, or site token",
@@ -2363,7 +2493,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops lookup core '<target>'",
+      "command": "netrune lookup core '<target>'",
       "description": "Core IP/MAC lookup cached into memory.",
       "domain": "lookup",
       "examples": [],
@@ -2403,7 +2533,7 @@
         "mac"
       ],
       "cancellable": true,
-      "command": "netops lookup mac '<target>' '<mac>'",
+      "command": "netrune lookup mac '<target>' '<mac>'",
       "description": "MAC lookup from one target or from all current switches with target=all.",
       "domain": "lookup",
       "examples": [],
@@ -2435,7 +2565,39 @@
         "mac"
       ],
       "cancellable": true,
-      "command": "netops lookup mac history '<mac>'",
+      "command": "netrune lookup mac all '<mac>'",
+      "description": "Search every online switch for a MAC and separate the access port it is attached to from the uplinks it transits.",
+      "domain": "lookup",
+      "examples": [],
+      "id": "lookup-mac-all",
+      "label": "MAC search across switches",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Mac",
+          "name": "mac",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "mac"
+      ],
+      "cancellable": true,
+      "command": "netrune lookup mac history '<mac>'",
       "description": "Show newest-first identity and switch-port events for a MAC.",
       "domain": "lookup",
       "examples": [],
@@ -2464,7 +2626,7 @@
         "mac"
       ],
       "cancellable": true,
-      "command": "netops lookup mac inspect '<mac>'",
+      "command": "netrune lookup mac inspect '<mac>'",
       "description": "Correlate cached MAC identity, location, IP, vendor, and history evidence.",
       "domain": "lookup",
       "examples": [],
@@ -2500,7 +2662,7 @@
         "scope"
       ],
       "cancellable": true,
-      "command": "netops lookup mac locate '<mac>'",
+      "command": "netrune lookup mac locate '<mac>'",
       "description": "Search switch forwarding tables without requiring an endpoint IP.",
       "domain": "lookup",
       "examples": [],
@@ -2532,7 +2694,7 @@
         "mac"
       ],
       "cancellable": true,
-      "command": "netops lookup mac online '<mac>'",
+      "command": "netrune lookup mac online '<mac>'",
       "description": "Resolve the longest authoritative IEEE MA-L/MA-M/MA-S assignment with cache provenance.",
       "domain": "lookup",
       "examples": [],
@@ -2571,7 +2733,7 @@
         "scope"
       ],
       "cancellable": true,
-      "command": "netops lookup mac profile '<mac>'",
+      "command": "netrune lookup mac profile '<mac>'",
       "description": "Locate a MAC and profile likely edge ports with interface, LLDP/CDP, PoE, device-tracking, and core evidence.",
       "domain": "lookup",
       "examples": [],
@@ -2594,7 +2756,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops lookup mac registry status",
+      "command": "netrune lookup mac registry status",
       "description": "Show cached IEEE registry files, row counts, checksums, sources, and last refresh time.",
       "domain": "lookup",
       "examples": [],
@@ -2614,7 +2776,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops lookup mac registry refresh",
+      "command": "netrune lookup mac registry refresh",
       "description": "Refresh all IEEE public MAC assignment CSV registries into the private local cache.",
       "domain": "lookup",
       "examples": [],
@@ -2646,7 +2808,7 @@
         "mac"
       ],
       "cancellable": true,
-      "command": "netops lookup mac vendor '<mac>'",
+      "command": "netrune lookup mac vendor '<mac>'",
       "description": "Resolve a MAC prefix from the locally installed OUI database.",
       "domain": "lookup",
       "examples": [],
@@ -2676,7 +2838,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops memory device '<target>'",
+      "command": "netrune memory device '<target>'",
       "description": "Show current identity relationships and history for a device.",
       "domain": "memory",
       "examples": [],
@@ -2706,7 +2868,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops memory explain '<target>'",
+      "command": "netrune memory explain '<target>'",
       "description": "Explain relationship sources, confidence, and last observations.",
       "domain": "memory",
       "examples": [],
@@ -2726,7 +2888,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops memory export --json",
+      "command": "netrune memory export --json",
       "description": "Export all current relationships as JSON.",
       "domain": "memory",
       "examples": [],
@@ -2756,7 +2918,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops memory ip '<target>'",
+      "command": "netrune memory ip '<target>'",
       "description": "Show historical ownership and relationship events for an IP.",
       "domain": "memory",
       "examples": [],
@@ -2786,7 +2948,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops memory mac '<target>'",
+      "command": "netrune memory mac '<target>'",
       "description": "Show identity and movement history for a MAC address.",
       "domain": "memory",
       "examples": [],
@@ -2823,7 +2985,7 @@
         "interface"
       ],
       "cancellable": true,
-      "command": "netops memory port '<target>' '<interface>'",
+      "command": "netrune memory port '<target>' '<interface>'",
       "description": "Show current and historical occupancy for a switch port.",
       "domain": "memory",
       "examples": [],
@@ -2843,7 +3005,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops memory prune",
+      "command": "netrune memory prune",
       "description": "Memory pruning is intentionally disabled because history is retained by default.",
       "domain": "memory",
       "examples": [],
@@ -2866,7 +3028,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops memory refresh",
+      "command": "netrune memory refresh",
       "description": "Recompute relationship memory from canonical state.",
       "domain": "memory",
       "examples": [],
@@ -2899,7 +3061,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops memory switch '<target>'",
+      "command": "netrune memory switch '<target>'",
       "description": "Show APs, neighbors, relationships, and timeline for a switch/site.",
       "domain": "memory",
       "examples": [],
@@ -2929,12 +3091,32 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops memory timeline '<target>'",
+      "command": "netrune memory timeline '<target>'",
       "description": "Search all relationship events newest first.",
       "domain": "memory",
       "examples": [],
       "id": "memory-timeline",
       "label": "Memory timeline",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune path findings",
+      "description": "Query findings across every recorded path run with a frequency summary.",
+      "domain": "path",
+      "examples": [],
+      "id": "path-findings",
+      "label": "Path findings",
       "output_type": "table",
       "preview_supported": true,
       "read_only": true,
@@ -2952,14 +3134,23 @@
           "name": "endpoint",
           "required": true,
           "type": "text"
+        },
+        {
+          "label": "Vlan",
+          "max": 4094,
+          "min": 1,
+          "name": "vlan",
+          "required": true,
+          "type": "number"
         }
       ],
       "args": [
-        "endpoint"
+        "endpoint",
+        "vlan"
       ],
       "cancellable": true,
-      "command": "netops path history '<endpoint>'",
-      "description": "Show chronological path inspections.",
+      "command": "netrune path history '<endpoint>' --vlan '<vlan>'",
+      "description": "Show chronological path inspections with reusable run references.",
       "domain": "path",
       "examples": [],
       "id": "path-history",
@@ -3047,7 +3238,7 @@
         "explain"
       ],
       "cancellable": true,
-      "command": "netops path inspect '<endpoint>' --vlan '<vlan>'",
+      "command": "netrune path inspect '<endpoint>' --vlan '<vlan>'",
       "description": "Inspect a bounded L2/L3 endpoint path with cached and live read-only evidence.",
       "domain": "path",
       "examples": [],
@@ -3068,18 +3259,27 @@
     {
       "arg_schema": [
         {
-          "label": "Run Id",
-          "name": "run_id",
+          "label": "Reference",
+          "name": "reference",
           "required": true,
           "type": "text"
+        },
+        {
+          "label": "Vlan",
+          "max": 4094,
+          "min": 1,
+          "name": "vlan",
+          "required": true,
+          "type": "number"
         }
       ],
       "args": [
-        "run_id"
+        "reference",
+        "vlan"
       ],
       "cancellable": true,
-      "command": "netops path show '<run_id>'",
-      "description": "Open one persisted path result.",
+      "command": "netrune path show '<reference>' --vlan '<vlan>'",
+      "description": "Open a path by full ID, unique prefix, endpoint/VLAN, or latest reference.",
       "domain": "path",
       "examples": [],
       "id": "path-show",
@@ -3107,7 +3307,7 @@
         "group"
       ],
       "cancellable": true,
-      "command": "netops plugin check '<group>'",
+      "command": "netrune plugin check '<group>'",
       "description": "Load enabled plugins and isolate failures.",
       "domain": "plugin",
       "examples": [],
@@ -3136,7 +3336,7 @@
         "plugin_id"
       ],
       "cancellable": true,
-      "command": "netops plugin disable '<plugin_id>'",
+      "command": "netrune plugin disable '<plugin_id>'",
       "description": "Disable one plugin in this profile.",
       "domain": "plugin",
       "examples": [],
@@ -3167,7 +3367,7 @@
         "plugin_id"
       ],
       "cancellable": true,
-      "command": "netops plugin enable '<plugin_id>'",
+      "command": "netrune plugin enable '<plugin_id>'",
       "description": "Enable one trusted entry point in this profile.",
       "domain": "plugin",
       "examples": [],
@@ -3189,7 +3389,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops plugin groups",
+      "command": "netrune plugin groups",
       "description": "List stable entry-point groups and policy.",
       "domain": "plugin",
       "examples": [],
@@ -3209,7 +3409,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops plugin list",
+      "command": "netrune plugin list",
       "description": "Discover plugins without importing disabled code.",
       "domain": "plugin",
       "examples": [],
@@ -3238,7 +3438,7 @@
         "name"
       ],
       "cancellable": true,
-      "command": "netops profile create '<name>'",
+      "command": "netrune profile create '<name>'",
       "description": "Create a neutral isolated profile.",
       "domain": "profile",
       "examples": [],
@@ -3260,8 +3460,8 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops profile list",
-      "description": "List isolated NetOps profiles.",
+      "command": "netrune profile list",
+      "description": "List isolated Netrune profiles.",
       "domain": "profile",
       "examples": [],
       "id": "profile-list",
@@ -3289,7 +3489,7 @@
         "name"
       ],
       "cancellable": true,
-      "command": "netops profile migrate-legacy '<name>'",
+      "command": "netrune profile migrate-legacy '<name>'",
       "description": "Copy legacy netsnmp state without deleting the source.",
       "domain": "profile",
       "examples": [],
@@ -3311,7 +3511,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops profile paths",
+      "command": "netrune profile paths",
       "description": "Show active profile XDG paths.",
       "domain": "profile",
       "examples": [],
@@ -3340,7 +3540,7 @@
         "name"
       ],
       "cancellable": true,
-      "command": "netops profile show '<name>'",
+      "command": "netrune profile show '<name>'",
       "description": "Show profile paths and non-secret settings.",
       "domain": "profile",
       "examples": [],
@@ -3369,7 +3569,7 @@
         "name"
       ],
       "cancellable": true,
-      "command": "netops profile use '<name>'",
+      "command": "netrune profile use '<name>'",
       "description": "Select the profile used by future commands.",
       "domain": "profile",
       "examples": [],
@@ -3400,7 +3600,7 @@
         "name"
       ],
       "cancellable": true,
-      "command": "netops secrets delete '<name>' --confirm",
+      "command": "netrune secrets delete '<name>' --confirm",
       "description": "Delete one named secret after confirmation.",
       "domain": "secrets",
       "examples": [],
@@ -3422,7 +3622,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops secrets import-ssh",
+      "command": "netrune secrets import-ssh",
       "description": "Import the legacy SSH vault into ssh/default/password.",
       "domain": "secrets",
       "examples": [],
@@ -3444,7 +3644,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops secrets list",
+      "command": "netrune secrets list",
       "description": "List named secrets without values.",
       "domain": "secrets",
       "examples": [],
@@ -3473,7 +3673,7 @@
         "name"
       ],
       "cancellable": true,
-      "command": "netops secrets set '<name>'",
+      "command": "netrune secrets set '<name>'",
       "description": "Prompt for and encrypt one named secret.",
       "domain": "secrets",
       "examples": [],
@@ -3495,7 +3695,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops secrets status",
+      "command": "netrune secrets status",
       "description": "Show named-secret store security and lock state.",
       "domain": "secrets",
       "examples": [],
@@ -3512,30 +3712,72 @@
       "writes_local": false
     },
     {
-      "arg_schema": [],
-      "args": [],
+      "arg_schema": [
+        {
+          "label": "Community",
+          "name": "community",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "community"
+      ],
       "cancellable": true,
-      "command": "netops serve",
-      "description": "Start the loopback API and WebUI server.",
-      "domain": "serve",
+      "command": "netrune setup local --community '<community>'",
+      "description": "Stand up collector, storage, and dashboards on this machine.",
+      "domain": "setup",
       "examples": [],
-      "id": "serve-run",
-      "label": "Start API server",
-      "output_type": "terminal",
+      "id": "setup-local",
+      "label": "Set up this machine",
+      "output_type": "text",
       "preview_supported": true,
       "read_only": true,
       "risk_level": "safe",
-      "run_supported": false,
-      "safety_class": "interactive-read",
-      "state_effects": [],
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
       "timeout_seconds": 0,
-      "writes_local": false
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Community",
+          "name": "community",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "community"
+      ],
+      "cancellable": true,
+      "command": "netrune setup poller --community '<community>'",
+      "description": "Stand up a machine that collects and nothing else, from a community and an identity.",
+      "domain": "setup",
+      "examples": [],
+      "id": "setup-poller",
+      "label": "Set up a collector",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
     },
     {
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops support bundle",
+      "command": "netrune support bundle",
       "description": "Create a redacted support archive without inventory, secrets, raw evidence, or backups.",
       "domain": "support",
       "examples": [],
@@ -3557,7 +3799,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops topology changes",
+      "command": "netrune topology changes",
       "description": "Show recorded topology changes newest first.",
       "domain": "topology",
       "examples": [],
@@ -3574,31 +3816,21 @@
       "writes_local": false
     },
     {
-      "arg_schema": [
-        {
-          "label": "Target",
-          "name": "target",
-          "placeholder": "hostname, IP, or site token",
-          "required": true,
-          "type": "text"
-        }
-      ],
-      "args": [
-        "target"
-      ],
+      "arg_schema": [],
+      "args": [],
       "cancellable": true,
-      "command": "netops topology neighbors '<target>'",
-      "description": "Show cached topology neighbor rows or query one target.",
+      "command": "netrune topology links",
+      "description": "Show spanning-tree derived switch links with source confidence.",
       "domain": "topology",
       "examples": [],
-      "id": "topology-neighbors",
-      "label": "Topology neighbors",
+      "id": "topology-links",
+      "label": "Topology spanning-tree links",
       "output_type": "table",
       "preview_supported": true,
       "read_only": true,
       "risk_level": "safe",
       "run_supported": true,
-      "safety_class": "network-read",
+      "safety_class": "read-only",
       "state_effects": [],
       "timeout_seconds": 0,
       "writes_local": false
@@ -3607,7 +3839,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops topology scan",
+      "command": "netrune topology scan",
       "description": "Refresh LLDP/CDP topology.",
       "domain": "topology",
       "examples": [],
@@ -3640,7 +3872,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops topology show '<target>'",
+      "command": "netrune topology show '<target>'",
       "description": "Show topology, optionally querying one target.",
       "domain": "topology",
       "examples": [],
@@ -3670,7 +3902,40 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops topology timeline '<target>'",
+      "command": "netrune topology stp '<target>'",
+      "description": "Read spanning tree from switches and derive switch links from designated-bridge addresses.",
+      "domain": "topology",
+      "examples": [],
+      "id": "topology-stp",
+      "label": "Topology spanning tree",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netrune topology timeline '<target>'",
       "description": "Show neighbor-link history newest first.",
       "domain": "topology",
       "examples": [],
@@ -3690,12 +3955,94 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops tui",
-      "description": "Open the local full-screen operator console.",
-      "domain": "tui",
+      "command": "netrune traffic backfill",
+      "description": "Import history collected before the metrics stack existed into VictoriaMetrics.",
+      "domain": "traffic",
       "examples": [],
-      "id": "tui-open",
-      "label": "Operator console",
+      "id": "traffic-backfill",
+      "label": "Import history",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune traffic daemon",
+      "description": "Collect continuously until interrupted. Runs in a terminal you keep open.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-daemon",
+      "label": "Traffic collector",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "network-read",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune traffic dashboard",
+      "description": "Print every dashboard's URL and whether the grapher is answering.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-dashboard",
+      "label": "Dashboard links",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune traffic export",
+      "description": "Print this collector's stored readings as JSONL for another install to pull.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-export",
+      "label": "Export readings",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune traffic exporter",
+      "description": "Publish collected readings as Prometheus exposition on loopback for VictoriaMetrics to scrape.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-exporter",
+      "label": "Metrics exposition",
       "output_type": "terminal",
       "preview_supported": true,
       "read_only": true,
@@ -3710,7 +4057,591 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops vault migrate",
+      "command": "netrune traffic health",
+      "description": "Show uptime, control-plane CPU, memory, temperature, and sessions for every switch with a watched port.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-health",
+      "label": "Switch health",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Device",
+          "name": "device",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "device"
+      ],
+      "cancellable": true,
+      "command": "netrune traffic interfaces '<device>'",
+      "description": "List the interfaces SNMP reports on a device.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-interfaces",
+      "label": "SNMP interface list",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Seconds",
+          "max": 300,
+          "min": 1,
+          "name": "seconds",
+          "required": false,
+          "type": "number"
+        }
+      ],
+      "args": [
+        "target",
+        "seconds"
+      ],
+      "cancellable": true,
+      "command": "netrune traffic interval '<target>' '<seconds>'",
+      "description": "Change how often a target is collected.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-interval",
+      "label": "Change collection interval",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune traffic list",
+      "description": "Show every monitored target with recent activity.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-list",
+      "label": "Monitored targets",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Name",
+          "name": "name",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target",
+        "name"
+      ],
+      "cancellable": true,
+      "command": "netrune traffic name '<target>' '<name>'",
+      "description": "Give a monitored port a name of your own for dashboards. History is unaffected.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-name",
+      "label": "Name a monitored port",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netrune traffic pause '<target>'",
+      "description": "Stop collecting a target without discarding its history.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-pause",
+      "label": "Pause monitoring",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netrune traffic ping '<target>'",
+      "description": "Start collecting round-trip time and loss to one address.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-ping",
+      "label": "Monitor reachability",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune traffic poll",
+      "description": "Collect one round from every enabled watch.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-poll",
+      "label": "Collect traffic samples",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Remote",
+          "name": "remote",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "remote"
+      ],
+      "cancellable": true,
+      "command": "netrune traffic pull --remote '<remote>'",
+      "description": "Fetch readings from a remote poller over SSH and merge them locally.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-pull",
+      "label": "Pull from a poller",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "To",
+          "name": "to",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "to"
+      ],
+      "cancellable": true,
+      "command": "netrune traffic push --to '<url>'",
+      "description": "Send this collector's readings straight into a VictoriaMetrics import endpoint.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-push",
+      "label": "Push readings to storage",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune traffic remote list",
+      "description": "List configured remote pollers and when each was last pulled.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-remote",
+      "label": "Remote pollers",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune traffic report",
+      "description": "Write a self-contained HTML report with charts for the collected window.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-report",
+      "label": "Traffic report",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netrune traffic resume '<target>'",
+      "description": "Start collecting a paused target again.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-resume",
+      "label": "Resume monitoring",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune traffic show",
+      "description": "Show throughput and latency as terminal sparklines.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-show",
+      "label": "Traffic graphs",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune traffic stack init",
+      "description": "Write the VictoriaMetrics, vmalert, and Perses provisioning files.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-stack",
+      "label": "Generate metrics stack",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune traffic status",
+      "description": "Show whether a collector is running and when each target last produced a sample.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-status",
+      "label": "Collector status",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Down",
+          "name": "down",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target",
+        "down"
+      ],
+      "cancellable": true,
+      "command": "netrune traffic subscribe '<target>' --down '<down>'",
+      "description": "Record what a service link is sold at, so utilisation is measured against the contract rather than the port's line rate.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-subscribe",
+      "label": "Record a link's subscribed rate",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netrune traffic unwatch '<target>'",
+      "description": "Stop monitoring one or more targets and discard their samples.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-unwatch",
+      "label": "Stop monitoring",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "warning",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune traffic verify",
+      "description": "Walk the metrics pipeline link by link and report where it breaks.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-verify",
+      "label": "Verify the pipeline",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Device",
+          "name": "device",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Interface",
+          "name": "interface",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "device",
+        "interface"
+      ],
+      "cancellable": true,
+      "command": "netrune traffic watch '<device>' '<interface>'",
+      "description": "Start collecting throughput for one interface over SNMP.",
+      "domain": "traffic",
+      "examples": [],
+      "id": "traffic-watch",
+      "label": "Monitor an interface",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "network-read",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune vault lock",
+      "description": "End an open vault session immediately and erase the cached key.",
+      "domain": "vault",
+      "examples": [],
+      "id": "vault-lock",
+      "label": "Lock vault",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune vault migrate",
       "description": "Convert a legacy passphrase GPG vault to terminal sudo-gated GPG without exposing the SSH password.",
       "domain": "vault",
       "examples": [],
@@ -3732,7 +4663,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops vault set",
+      "command": "netrune vault set",
       "description": "Store a new SSH password in the terminal sudo-gated GPG vault.",
       "domain": "vault",
       "examples": [],
@@ -3754,7 +4685,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops vault status",
+      "command": "netrune vault status",
       "description": "Show the SSH vault format, permissions, recording time, and non-prompting lock state.",
       "domain": "vault",
       "examples": [],
@@ -3774,8 +4705,8 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops vault unlock",
-      "description": "Authenticate through sudo and verify the encrypted SSH vault for the current sudo timeout.",
+      "command": "netrune vault unlock",
+      "description": "Authenticate once and hold the SSH vault open for a bounded window so a batch of commands does not re-prompt.",
       "domain": "vault",
       "examples": [],
       "id": "vault-unlock",
@@ -3840,7 +4771,7 @@
         "refresh_neighbors"
       ],
       "cancellable": true,
-      "command": "netops vlan locate '<target>' '<vlan>'",
+      "command": "netrune vlan locate '<target>' '<vlan>'",
       "description": "Locate one or many VLANs from one or many roots; optional depth traverses LLDP/CDP-confirmed switch links.",
       "domain": "vlan",
       "examples": [],
@@ -3904,7 +4835,7 @@
         "refresh_neighbors"
       ],
       "cancellable": true,
-      "command": "netops vlan propagation '<target>' '<vlan>'",
+      "command": "netrune vlan propagation '<target>' '<vlan>'",
       "description": "Trace a root-by-VLAN matrix with bounded breadth-first switch traversal.",
       "domain": "vlan",
       "examples": [],
@@ -3977,8 +4908,8 @@
         "replace"
       ],
       "cancellable": true,
-      "command": "netops vlan set '<target>' '<interface>' '<vlan_mode>' '<vlan>'",
-      "description": "Back up, apply, and verify one typed access or trunk VLAN change through the audited core.",
+      "command": "netrune vlan set '<target>' '<interface>' '<vlan_mode>' '<vlan>'",
+      "description": "Back up, apply, and verify one typed access or trunk VLAN change through the audited core -- one device or (--file) a batch of independent target/interface/vlan lines.",
       "domain": "vlan",
       "examples": [],
       "id": "vlan-set",
@@ -4002,7 +4933,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops workflow ap-audit",
+      "command": "netrune workflow ap-audit",
       "description": "Refresh AP records and show AP moves.",
       "domain": "workflow",
       "examples": [],
@@ -4035,7 +4966,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops workflow backup-online '<target>'",
+      "command": "netrune workflow backup-online '<target>'",
       "description": "Changed-only backups for online devices.",
       "domain": "workflow",
       "examples": [],
@@ -4058,8 +4989,8 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops workflow morning-check",
-      "description": "Health, memory, topology, filtering, and attention summary.",
+      "command": "netrune workflow morning-check",
+      "description": "Health, topology refresh, memory, filtering, and attention summary.",
       "domain": "workflow",
       "examples": [],
       "id": "workflow-morning-check",
@@ -4081,7 +5012,7 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
-      "command": "netops workflow refresh-inventory",
+      "command": "netrune workflow refresh-inventory",
       "description": "Health, AP, topology, and memory refresh.",
       "domain": "workflow",
       "examples": [],
@@ -4114,7 +5045,7 @@
         "target"
       ],
       "cancellable": true,
-      "command": "netops workflow site-health '<target>'",
+      "command": "netrune workflow site-health '<target>'",
       "description": "Latency and filtering checks for a target/site.",
       "domain": "workflow",
       "examples": [],
@@ -4135,5 +5066,5 @@
     }
   ],
   "schema_version": 1,
-  "version": "8.5.0b2"
+  "version": "8.5.0b3"
 }

@@ -1,19 +1,23 @@
 # ADR 0001: Local-First Operator Console
 
-- Status: Accepted
+> **Superseded 2026-08-15.** The Textual console was removed. Its local-first
+> premise still holds and is now met by the CLI, the collector daemon, and a
+> loopback metrics exposition. See handbook 21 and 22.
+
+- Status: Superseded 2026-08-15
 - Date: 2026-08-02
 
 ## Context
 
-NetOps had capable noun-first commands and a localhost WebUI, but routine work
+Netrune had capable noun-first commands and a localhost WebUI, but routine work
 still required memorizing commands and mentally joining separate outputs. The
 primary deployment environment is a network engineer's terminal with local
 state and controlled access to network adapters.
 
 ## Decision
 
-An interactive `netops` invocation opens a full-screen Textual console;
-`netop tui` is the shortest explicit form. The startup surface is a searchable
+An interactive `netrune` invocation opens a full-screen Textual console;
+`netrune tui` is the shortest explicit form. The startup surface is a searchable
 Action Hub rather than a dashboard. Functions, metrics, advanced result tabs,
 Inspector, and Activity remain available on demand. Explicit CLI commands
 remain stable, and `--no-tui` or `--plain` retains no-argument help. The console

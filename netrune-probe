@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+for name in $(compgen -e NETRUNE_); do
+    legacy="NETOPS_${name#NETRUNE_}"
+    printf -v "$legacy" '%s' "${!name}"
+    export "$legacy"
+done
+exec "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/netops-probe" "$@"

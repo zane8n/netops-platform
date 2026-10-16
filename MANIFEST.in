@@ -1,33 +1,22 @@
 include CHANGELOG.md
 include .privacy-denylist.example
-include CONTRIBUTING.md
+include .github/CONTRIBUTING.md
 include LICENSE
-include NETOPS_TOOLSET_HANDBOOK.md
 include README.md
-include SECURITY.md
-include SUPPORT.md
-include THIRD_PARTY_NOTICES.md
+include .github/SECURITY.md
+include .github/SUPPORT.md
 include VERSION
-include build_release.py
-include create_public_export.py
-include generate_reference.py
 include install.sh
 include uninstall.sh
 include uv.lock
 include netops
-include privacy_check.py
-include ai/Modelfile.netops
+include netrune-lib.sh
+include ai/Modelfile.netrune
 include ai/logs/.gitkeep
 recursive-include ai *.md *.py *.txt *.yaml
 recursive-include completions *
 recursive-include docs *.md
 recursive-include examples *.json *.jsonl *.toml *.csv *.md
 recursive-include man *.1
-recursive-include scripts *.sh
-include webui/index.html
-include webui/package.json
-include webui/package-lock.json
-include webui/tailwind.config.ts
-include webui/vite.config.ts
-recursive-include webui/src *.css *.ts *.vue
-recursive-include webui/dist *.css *.html *.js
+recursive-include scripts *.sh *.py
+include scripts/netrune

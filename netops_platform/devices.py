@@ -104,20 +104,42 @@ class DeviceDriver:
             if not command:
                 raise ValueError("show operation requires a command")
             commands.append(command)
+        elif operation == "show_batch":
+            # Several read-only commands in one login. Each is still a plain
+            # show; batching changes only how many times we authenticate.
+            requested = [str(item).strip() for item in values.get("commands") or [] if str(item).strip()]
+            if not requested:
+                raise ValueError("show batch operation requires at least one command")
+            commands.extend(requested)
         elif operation == "config":
             requested = [str(item).strip() for item in values.get("commands") or [] if str(item).strip()]
             if not requested:
                 raise ValueError("config operation requires at least one command")
-            approved_profile = str(values.get("firmware_profile") or "")
+            # capability("configuration") == "supported" means this driver's
+            # config_enter/config_exit/save are trusted across its whole
+            # product line (currently cisco-ios, cisco-nxos, aruba-aos-switch,
+            # aruba-aos-cx) -- no per-firmware certification needed, only
+            # device_writes_enabled. "firmware-gated" is the narrower,
+            # per-firmware-profile version of the same gate: the caller (see
+            # App.firmware_write_certified, or main()'s CLI path below for the
+            # actual SSH-command-rendering invocation) is the one that knows
+            # about certification (built-in list, or the operator's own
+            # device_certified_firmware/_min config); this only trusts its
+            # verdict, not the raw profile string, so that logic exists in
+            # exactly one place. No built-in driver currently uses
+            # "firmware-gated" for "configuration" -- it's kept for a future
+            # driver whose write syntax genuinely does vary by firmware.
+            support = self.capability("configuration")
+            certified = support == "supported" or bool(values.get("firmware_certified"))
             writes_enabled = bool(values.get("writes_enabled"))
             if (
                 self.source != "built-in"
-                or self.capability("configuration") != "firmware-gated"
-                or approved_profile not in self.firmware_profiles
+                or support not in {"supported", "firmware-gated"}
+                or not certified
                 or not writes_enabled
             ):
                 raise UnsupportedDeviceAction(
-                    f"configuration is not enabled for a certified {self.family} firmware profile"
+                    f"configuration is not enabled for the {self.family} driver"
                 )
             commands.extend(self._render("config_enter", values))
             commands.extend(requested)
@@ -189,9 +211,10 @@ class DeviceDriverRegistry:
                 continue
             try:
                 implementation = loaded.implementation
+                provider = getattr(implementation, "netrune_device_drivers", None) or getattr(implementation, "netops_device_drivers", None)
                 provided = (
-                    implementation.netops_device_drivers()
-                    if callable(getattr(implementation, "netops_device_drivers", None))
+                    provider()
+                    if callable(provider)
                     else implementation
                 )
                 candidates = [provided] if isinstance(provided, DeviceDriver) else list(provided or ())
@@ -458,6 +481,7 @@ COMMON_READ_CAPABILITIES = {
     "core_ping": "supported",
     "fdb": "supported",
     "vlan_membership": "supported",
+    "vlan_table": "supported",
     "stp": "supported",
     "lag": "supported",
     "svi": "supported",
@@ -510,13 +534,21 @@ REGISTRY.register(_driver(
         "backup": ("show running-config",),
         "vlan_inspect": ("show vlan id {vlan}", "show interfaces trunk"),
         "vlan_locate": ("show vlan id {vlan}", "show interfaces trunk"),
-        "mac_lookup": ("show mac address-table | include {mac_dotted}",),
+        "mac_lookup": (
+            "show mac address-table address {mac_dotted}",
+            "show mac address-table | include {mac_dotted}",
+        ),
         "arp_lookup": ("show arp | include {lookup}",),
         "core_lookup": ("show arp | include {lookup}", "show mac address-table | include {lookup}"),
         "ping": ("ping {destination} repeat {count} timeout {timeout}",),
         "neighbors": ("show lldp neighbors detail", "show cdp neighbors detail"),
+        "cdp_neighbors": ("show cdp neighbors",),
+        "neighbor_detail": ("show lldp neighbors {interface} detail",),
+        "trunk_summary": ("show interfaces trunk",),
+        "stp_summary": ("show spanning-tree",),
         "fdb": ("show mac address-table",),
         "vlan_membership": ("show vlan id {vlan}", "show interfaces trunk"),
+        "vlan_table": ("show vlan brief",),
         "stp": ("show spanning-tree vlan {vlan}",),
         "lag": ("show etherchannel summary",),
         "svi": ("show interfaces vlan {vlan}",),
@@ -531,7 +563,7 @@ REGISTRY.register(_driver(
         "config_exit": ("end",),
         "save": ("write memory",),
     },
-    capabilities={**COMMON_READ_CAPABILITIES, "cdp": "supported", "cable_status": "supported", "cable_test": "supported", "configuration": "firmware-gated", "vlan_write": "firmware-gated"},
+    capabilities={**COMMON_READ_CAPABILITIES, "cdp": "supported", "cable_status": "supported", "cable_test": "supported", "configuration": "supported", "vlan_write": "firmware-gated"},
     firmware_profiles=("ios-15.x", "ios-xe-17.x"),
     notes=("Writes require an explicitly enabled profile and an accepted model/firmware fixture.",),
 ))
@@ -551,7 +583,9 @@ REGISTRY.register(_driver(
         "neighbors": ("show lldp neighbors detail", "show cdp neighbors detail"),
         "fdb": ("show mac address-table",),
         "vlan_membership": ("show vlan id {vlan}", "show interface trunk"),
+        "vlan_table": ("show vlan brief",),
         "stp": ("show spanning-tree vlan {vlan}",),
+        "stp_summary": ("show spanning-tree",),
         "lag": ("show port-channel summary",),
         "svi": ("show interface vlan {vlan}",),
         "vrf": ("show vrf",),
@@ -564,7 +598,7 @@ REGISTRY.register(_driver(
         "config_exit": ("end",),
         "save": ("copy running-config startup-config",),
     },
-    capabilities={**COMMON_READ_CAPABILITIES, "cdp": "supported", "cable_status": "optics-only", "cable_test": "unsupported", "configuration": "firmware-gated", "vlan_write": "firmware-gated"},
+    capabilities={**COMMON_READ_CAPABILITIES, "cdp": "supported", "cable_status": "optics-only", "cable_test": "unsupported", "configuration": "supported", "vlan_write": "firmware-gated"},
     firmware_profiles=("nxos-9.x", "nxos-10.x"),
     notes=("NX-OS is selected independently from IOS; writes remain firmware- and profile-gated.",),
 ))
@@ -575,16 +609,24 @@ REGISTRY.register(_driver(
     templates={
         "inventory": ("show version", "show system", "show modules"),
         "backup": ("show running-config",),
-        "vlan_inspect": ("show vlan {vlan}", "show running-config"),
+        # Spanning tree joins the propagation stream so uplinks are chosen from
+        # forwarding, non-edge ports instead of guessed from VLAN counts.
+        "vlan_inspect": ("show vlan {vlan}", "show running-config", "show spanning-tree"),
         "vlan_locate": ("show vlan {vlan}", "show running-config"),
         "mac_lookup": ("show mac-address {mac_hyphen}",),
         "arp_lookup": ("show arp | include {lookup}",),
         "core_lookup": ("show arp | include {lookup}", "show mac-address | include {lookup}"),
         "ping": ("ping {destination} repetitions {count}",),
         "neighbors": ("show lldp info remote-device",),
+        "cdp_neighbors": ("show cdp neighbors",),
+        "neighbor_detail": ("show lldp info remote-device {interface}",),
         "fdb": ("show mac-address",),
         "vlan_membership": ("show vlan {vlan}", "show running-config"),
-        "stp": ("show spanning-tree vlan {vlan}",),
+        "vlan_table": ("show vlan",),
+        # AOS-S runs MSTP by default, where per-VLAN spanning tree does not
+        # exist and `show spanning-tree vlan <id>` is rejected as invalid input.
+        # Plain `show spanning-tree` is valid in every AOS-S STP mode.
+        "stp": ("show spanning-tree",),
         "lag": ("show trunks",),
         "svi": ("show ip", "show vlan {vlan}"),
         "vrf": ("show vrf",),
@@ -598,7 +640,7 @@ REGISTRY.register(_driver(
         "config_exit": ("end",),
         "save": ("write memory",),
     },
-    capabilities={**COMMON_READ_CAPABILITIES, "vrf": "model-dependent", "cdp": "unsupported", "cable_status": "supported", "cable_test": "supported", "configuration": "unsupported", "vlan_write": "unsupported"},
+    capabilities={**COMMON_READ_CAPABILITIES, "vrf": "model-dependent", "cdp": "supported", "cable_status": "supported", "cable_test": "supported", "configuration": "supported", "vlan_write": "unsupported"},
     firmware_profiles=("aos-s-16.x",),
     notes=("Read commands cover ProCurve/Aruba AOS-S generations; VLAN writes remain blocked pending model-specific fixtures.",),
 ))
@@ -609,7 +651,7 @@ REGISTRY.register(_driver(
     templates={
         "inventory": ("show version", "show system", "show inventory"),
         "backup": ("show running-config",),
-        "vlan_inspect": ("show vlan {vlan}", "show running-config"),
+        "vlan_inspect": ("show vlan {vlan}", "show running-config", "show spanning-tree"),
         "vlan_locate": ("show vlan {vlan}", "show running-config"),
         "mac_lookup": ("show mac-address-table address {mac_colon}",),
         "arp_lookup": ("show arp | include {lookup}",),
@@ -618,7 +660,10 @@ REGISTRY.register(_driver(
         "neighbors": ("show lldp neighbor-info",),
         "fdb": ("show mac-address-table",),
         "vlan_membership": ("show vlan {vlan}", "show interface trunk"),
-        "stp": ("show spanning-tree vlan {vlan}",),
+        "vlan_table": ("show vlan",),
+        # AOS-CX defaults to MSTP; plain `show spanning-tree` reports the port
+        # roles in every supported mode.
+        "stp": ("show spanning-tree",),
         "lag": ("show lag",),
         "svi": ("show interface vlan {vlan}",),
         "vrf": ("show vrf",),
@@ -632,7 +677,7 @@ REGISTRY.register(_driver(
         "config_exit": ("end",),
         "save": ("write memory",),
     },
-    capabilities={**COMMON_READ_CAPABILITIES, "cdp": "unsupported", "cable_status": "supported", "cable_test": "manual-confirmation", "configuration": "unsupported", "vlan_write": "unsupported"},
+    capabilities={**COMMON_READ_CAPABILITIES, "cdp": "unsupported", "cable_status": "supported", "cable_test": "manual-confirmation", "configuration": "supported", "vlan_write": "unsupported"},
     firmware_profiles=("aos-cx-10.x",),
     notes=("AOS-CX active cable tests may prompt interactively and remain maintenance-window operations.",),
 ))
@@ -652,7 +697,9 @@ REGISTRY.register(_driver(
         "neighbors": ("show lldp neighbors detail",),
         "fdb": ("show mac-address",),
         "vlan_membership": ("show vlan {vlan}", "show running-config"),
+        "vlan_table": ("show vlan brief",),
         "stp": ("show spanning-tree vlan {vlan}",),
+        "stp_summary": ("show spanning-tree",),
         "lag": ("show lag",),
         "svi": ("show interfaces ve {vlan}",),
         "vrf": ("show vrf",),
@@ -702,6 +749,70 @@ def driver_for(*, family: str = "", **evidence: Any) -> DeviceDriver:
     return REGISTRY.get(REGISTRY.detect(**evidence).family)
 
 
+def firmware_certification(
+    driver: DeviceDriver,
+    detection: DeviceDetection,
+    evidence: str,
+    *,
+    exact_patterns: str = "",
+    floor_ranges: str = "",
+) -> Tuple[bool, str]:
+    """Is this device's firmware trusted to receive `driver`'s config/VLAN
+    write commands? True either because the detected firmware profile is on
+    the driver's own built-in list (`driver.firmware_profiles`), or because
+    an operator has certified it themselves without a source change:
+
+    `exact_patterns` -- raw `device_certified_firmware` profile config value:
+    comma-separated `family:pattern` entries, `pattern` a case-insensitive
+    regex matched against `evidence` (the same uppercased platform/model/
+    hostname text the built-in detector itself is given).
+
+    `floor_ranges` -- raw `device_certified_firmware_min` profile config
+    value: comma-separated `family:X.Y` entries. Certifies anything whose
+    evidence contains a `major.minor`-shaped number at or above the floor,
+    for a driver whose commands don't meaningfully change across a whole
+    firmware range.
+
+    This is deliberately pure (no Config/App/SQLite dependency) so it runs
+    identically from the full App (core.py's App.firmware_write_certified,
+    used for the preflight decision of whether to even attempt a write) and
+    from this module's own stateless `main()` CLI (used by the shell helper
+    to actually render the SSH command stream) -- one certification
+    decision, not two that could silently disagree. Returns (certified,
+    source) where source is "built-in", "operator" (pattern), or
+    "operator-floor".
+    """
+    if detection.firmware_profile in driver.firmware_profiles:
+        return True, "built-in"
+    for entry in (exact_patterns or "").split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        family, _, pattern = entry.partition(":")
+        if family.strip() != driver.family or not pattern.strip():
+            continue
+        try:
+            if re.search(pattern.strip(), evidence, re.I):
+                return True, "operator"
+        except re.error:
+            continue
+    if (floor_ranges or "").strip():
+        version_seen = re.search(r"(\d{1,3})\.(\d{1,3})", evidence)
+        if version_seen:
+            detected_version = (int(version_seen.group(1)), int(version_seen.group(2)))
+            for entry in floor_ranges.split(","):
+                entry = entry.strip()
+                if not entry or ":" not in entry:
+                    continue
+                family, _, floor_text = entry.partition(":")
+                if family.strip() != driver.family:
+                    continue
+                floor_match = re.match(r"\s*(\d{1,3})\.(\d{1,3})\s*$", floor_text.strip())
+                if floor_match and detected_version >= (int(floor_match.group(1)), int(floor_match.group(2))):
+                    return True, "operator-floor"
+    return False, ""
+
+
 def _stream_values(action: str, arguments: Sequence[str]) -> Tuple[str, Dict[str, Any]]:
     action_key = action.strip().lower().replace("-", "_")
     if action_key == "propagated":
@@ -716,6 +827,8 @@ def _stream_values(action: str, arguments: Sequence[str]) -> Tuple[str, Dict[str
         return action_key, {"lookup": arguments[0] if arguments else ""}
     if action_key == "show":
         return action_key, {"command": arguments[0] if arguments else ""}
+    if action_key == "show_batch":
+        return action_key, {"commands": list(arguments)}
     if action_key == "config":
         return action_key, {"commands": list(arguments)}
     if action_key in {"cable_status", "cable_start", "interface_health"}:
@@ -738,7 +851,7 @@ def _parse_cli_args(parser: argparse.ArgumentParser, argv: Optional[Sequence[str
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="NetOps device-driver registry")
+    parser = argparse.ArgumentParser(description="Netrune device-driver registry")
     parser.add_argument("operation", choices=("detect", "report", "stream"))
     parser.add_argument("--family", default="")
     parser.add_argument("--platform", default="")
@@ -746,6 +859,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--sysdescr", default="")
     parser.add_argument("--hostname", default="")
     parser.add_argument("--action", default="")
+    parser.add_argument("--writes-enabled", action="store_true", help="Mirrors the device_writes_enabled profile config value; required (with certification) for a 'config' action to render.")
+    parser.add_argument("--certified-patterns", default="", help="Raw device_certified_firmware profile config value (family:pattern, comma-separated).")
+    parser.add_argument("--certified-floors", default="", help="Raw device_certified_firmware_min profile config value (family:X.Y, comma-separated).")
+    parser.add_argument("--skip-verification", action="store_true", help="Danger: treat a 'config' action as firmware-certified without checking. device_writes_enabled is still required.")
     parser.add_argument("arguments", nargs="*")
     args = _parse_cli_args(parser, argv)
     detection = detect_device_family(
@@ -765,6 +882,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     try:
         operation, values = _stream_values(args.action, args.arguments)
+        if operation == "config":
+            if args.skip_verification:
+                certified = True
+            else:
+                evidence = " ".join(str(value or "") for value in (args.platform, args.model, args.hostname)).upper()
+                certified, _via = firmware_certification(
+                    driver, detection, evidence,
+                    exact_patterns=args.certified_patterns, floor_ranges=args.certified_floors,
+                )
+            values["firmware_certified"] = certified
+            values["writes_enabled"] = args.writes_enabled
         for command in driver.command_plan(operation, **values):
             print(command)
     except (IndexError, KeyError, UnsupportedDeviceAction, ValueError) as exc:

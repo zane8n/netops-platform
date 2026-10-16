@@ -6,7 +6,7 @@
 ## Context
 
 Handwritten forms and command-specific UI handlers drift from CLI validation
-and safety policy. NetOps already has a central command registry.
+and safety policy. Netrune already has a central command registry.
 
 ## Decision
 

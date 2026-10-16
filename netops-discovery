@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# NetOps Discovery Engine
-source "$(dirname "$(realpath "$0")")/netops-lib.sh"
+# Netrune Discovery Engine
+source "$(dirname "$(realpath "$0")")/netrune-lib.sh"
 # shellcheck disable=SC2001,SC2207,SC2162,SC2086
 set -o pipefail
 
@@ -27,7 +27,7 @@ discovery_runtime_init() {
     local old_umask
     old_umask=$(umask)
     umask 077
-    DISCOVERY_RUNTIME=$(mktemp -d "${TMPDIR:-/tmp}/netops-discovery.XXXXXX") || {
+    DISCOVERY_RUNTIME=$(mktemp -d "${TMPDIR:-/tmp}/netrune-discovery.XXXXXX") || {
         umask "$old_umask"
         log_error "Could not create a private discovery runtime directory."
         exit 10
@@ -45,7 +45,29 @@ discovery_db_tmp() {
     mktemp "${db}.tmp.XXXXXX"
 }
 
-progress_enabled() { [[ -t 2 && "${NETOPS_PROGRESS:-1}" != "0" ]]; }
+# Progress is one transient line on stderr, matching the Python side: same
+# gate, same shape, and always trimmed to the terminal so it cannot wrap and
+# leave a stranded row above real output.
+progress_enabled() {
+    [[ -t 2 ]] || return 1
+    [[ -z "${NO_COLOR:-}" ]] || return 1
+    [[ "${NETRUNE_PROGRESS:-${NETOPS_PROGRESS:-1}}" != "0" ]]
+}
+
+progress_width() {
+    local columns="${COLUMNS:-}"
+    [[ "$columns" =~ ^[0-9]+$ ]] || columns=$(tput cols 2>/dev/null || echo 80)
+    [[ "$columns" =~ ^[0-9]+$ ]] || columns=80
+    (( columns > 20 )) || columns=21
+    printf '%s' "$(( columns - 1 ))"
+}
+
+progress_write() {
+    local text="$1" width
+    width=$(progress_width)
+    (( ${#text} <= width )) || text="${text:0:$((width - 1))}…"
+    printf "\r\033[2K%s" "$text" >&2
+}
 
 progress_clear() {
     progress_enabled || return 0
@@ -54,8 +76,7 @@ progress_clear() {
 
 progress_note() {
     progress_enabled || return 0
-    local msg="${1:-working}"
-    printf "\r\033[2K[STATUS] discovery | %s | Ctrl+C cancels" "$msg" >&2
+    progress_write "[STATUS] discovery | ${1:-working} | Ctrl+C cancels"
 }
 
 progress_start() {
@@ -73,9 +94,9 @@ progress_start() {
                 fi
             fi
             if [[ "$total" =~ ^[0-9]+$ && "$total" -gt 0 ]]; then
-                printf "\r\033[2K[STATUS] discovery | %s | %s/%s | Ctrl+C cancels" "$label" "$done_count" "$total" >&2
+                progress_write "$(printf '[STATUS] discovery | %s | %s/%s | Ctrl+C cancels' "$label" "$done_count" "$total")"
             else
-                printf "\r\033[2K[STATUS] discovery | %s | %s done | Ctrl+C cancels" "$label" "$done_count" >&2
+                progress_write "$(printf '[STATUS] discovery | %s | %s done | Ctrl+C cancels' "$label" "$done_count")"
             fi
             sleep 1
         done
@@ -305,18 +326,10 @@ scan_host() {
         hostname=$(netops_snmp_get "$ip" "sysName.0")
         if [[ -n "$hostname" ]]; then
             hostname=$(sanitize_string "$hostname")
-            serial=$(netops_snmp_get "$ip" "1.3.6.1.2.1.47.1.1.1.1.11.1")
-            [[ -z "$serial" ]] && serial=$(netops_snmp_get "$ip" "1.3.6.1.4.1.9.3.6.3.0")
-            serial=$(sanitize_string "${serial:-N/A}")
-
             sysdesc=$(netops_snmp_get "$ip" "sysDescr.0")
             sysdesc=$(sanitize_string "$sysdesc")
-            model=$(grep -ioE 'WS-C[0-9A-Z-]+|C[0-9]{4}[A-Z0-9-]*|N[0-9]K-[A-Z0-9-]+|J[A-Z0-9]{5,}|ICX[[:space:]-]*[0-9]{4}[A-Z0-9-]*' <<< "$sysdesc" | head -1 | tr -d ' \r')
-            [[ -z "$model" ]] && model="N/A"
             mac=$(netops_snmp_get "$ip" "1.3.6.1.2.1.17.1.1.0")
-            clean_mac=$(grep -ioE '([0-9a-f]{2}[:-]){5}[0-9a-f]{2}|[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}|[0-9a-f]{12}' <<< "$mac" | head -1)
-            [[ -z "$clean_mac" ]] && clean_mac="N/A"
-            family=$(netops_platform_family "$sysdesc" "$model" "$hostname")
+            family=$(netops_platform_family "$sysdesc" "" "$hostname")
             case "$family" in
                 cisco-ios) platform="Cisco IOS" ;;
                 aruba-aos-switch) platform="Aruba AOS-S" ;;
@@ -326,6 +339,28 @@ scan_host() {
                 ruckus-ap) platform="Ruckus AP" ;;
                 *) platform="Unknown" ;;
             esac
+
+            # Model and serial come from the ENTITY-MIB chassis (class 3), which
+            # sits at index 1 on standalone Arubas, 1000 on Catalyst 9000 (1 is
+            # the stack container), and 1001 on 2960/3560CX and stackable
+            # Arubas. One request checks all three; a walk is the fallback.
+            local entity_base="1.3.6.1.2.1.47.1.1.1.1" entity chassis_index ingest_helper hardware
+            entity=$(netops_snmp_get_many "$ip" "$entity_base.5.1" "$entity_base.5.1000" "$entity_base.5.1001")
+            chassis_index=$(awk -F'\t' '$2 ~ /^(3|chassis)/ { n = split($1, part, "."); print part[n]; exit }' <<< "$entity")
+            if [[ -z "$chassis_index" ]]; then
+                chassis_index=$(netops_snmp_walk "$ip" "$entity_base.5" "-On -Oq" | awk '$2 ~ /^(3|chassis)/ { n = split($1, part, "."); print part[n]; exit }')
+            fi
+            if [[ "$chassis_index" =~ ^[0-9]+$ ]]; then
+                entity+=$'\n'"$entity_base.5.$chassis_index"$'\t'"3"$'\n'
+                entity+=$(netops_snmp_get_many "$ip" "$entity_base.13.$chassis_index" "$entity_base.11.$chassis_index" "$entity_base.2.$chassis_index")
+            fi
+            model="N/A"; serial="N/A"; clean_mac="N/A"
+            ingest_helper="${NETOPS_INGEST_HELPER:-$(netops_python_helper_path netops_ingest netops_ingest.py)}"
+            if [[ -r "$ingest_helper" ]] && hardware=$(printf '%s\n' "$entity" | python3 "$ingest_helper" parse-snmp-hardware --family "$family" --sysdescr "$sysdesc" --bridge-mac "$mac"); then
+                IFS='|' read -r model serial clean_mac <<< "$hardware"
+            fi
+            model=$(sanitize_string "${model:-N/A}")
+            serial=$(sanitize_string "${serial:-N/A}")
 
             echo "${ip}|${hostname}|${platform}|${model}|${serial}|${clean_mac}|SNMP|$(date +%s)|ONLINE"
             return 0
@@ -372,7 +407,7 @@ update_cache() {
     scan_started=$(date +%s)
     echo "$all_ips" > "$all_ips_file"
 
-    local lib_path="$(dirname "$(realpath "$0")")/netops-lib.sh"
+    local lib_path="$(dirname "$(realpath "$0")")/netrune-lib.sh"
     local funcs=$(declare -f scan_host sanitize_string)
     local host_timeout="${CONFIG[scan_host_timeout]:-20}"
     [[ ! "$host_timeout" =~ ^[0-9]+$ ]] && host_timeout=20
@@ -519,7 +554,7 @@ add_manual_device() {
     log "Adding $ip manually via SSH verification..."
     db_update_device "$ip" "N/A" "Unknown" "N/A" "N/A" "N/A" "SSH" "ONLINE"
     
-    local ctl_path="$(dirname "$(realpath "$0")")/netops-control"
+    local ctl_path="$(dirname "$(realpath "$0")")/netrune-control"
     "$ctl_path" inventory "$ip" >/dev/null 2>&1
     
     local host=$(db_get_device "$ip" | cut -d'|' -f2)
@@ -600,7 +635,7 @@ discover_cisco_wlc_join_stats_aps() {
     [[ -f "$PASSWORD_FILE" ]] || { log "Skipping Cisco WLC join-stat lookup: SSH password vault not initialized."; return 0; }
 
     local lib_path join_cmd timeout_val output ts
-    lib_path="$(dirname "$(realpath "$0")")/netops-lib.sh"
+    lib_path="$(dirname "$(realpath "$0")")/netrune-lib.sh"
     join_cmd="${CONFIG[cisco_wlc_join_stats_cmd]:-show ap join stats summary all}"
     timeout_val="${CONFIG[cisco_wlc_join_stats_timeout]:-45}"
     [[ ! "$timeout_val" =~ ^[0-9]+$ ]] && timeout_val=45
@@ -800,7 +835,10 @@ get_aps_from_switch_lldp() {
             local if_index=$(echo "$oid_suffix" | cut -d. -f2)
             local key="$if_index"
             case "$attr" in
-                5) neighbors["$key.port_id"]="$val" ;;
+                # lldpRemChassisId. For an access point this is its Ethernet
+                # MAC, which is the only identity strong enough to correlate a
+                # switch-learned attachment with a controller-reported AP.
+                5) neighbors["$key.chassis_id"]="$val" ;;
                 9) neighbors["$key.hostname"]="$val" ;;
                 10) neighbors["$key.platform"]="$val" ;;
                 12) if [[ "$val" =~ (4|W) ]]; then neighbors["$key.caps"]="${neighbors[$key.caps]}W"; fi ;;
@@ -818,7 +856,12 @@ get_aps_from_switch_lldp() {
                 local ip=$(getent hosts "$hostname" | awk '{ print $1 ; exit }')
                 [[ -z "$ip" ]] && ip="N/A"
                 local switch_port=$(get_port_name_from_index "$switch_ip" "$base_key")
-                local mac=$(get_mac_for_ip "$ip")
+                # Prefer the MAC the neighbour advertised. Resolving the AP name
+                # in DNS and then reading the local ARP cache only works when the
+                # scanner shares the AP's subnet, which left switch-learned rows
+                # with no identity to correlate against controller records.
+                local mac=$(normalize_mac "${neighbors[$base_key.chassis_id]:-}")
+                [[ "$mac" == "N/A" ]] && mac=$(get_mac_for_ip "$ip")
                 echo "${ip}|${hostname}|${platform}|${switch_ip}|${switch_hostname}|${switch_port}|${mac}|$(date +%s)|ONLINE"
             fi
         fi
@@ -893,8 +936,8 @@ discover_aps() {
     progress_clear
     log_success "Controller Scan: Found $(wc -l < "$ctrl_file") AP(s)."
 
-    local funcs=$(declare -f sanitize_string compact_switch_name is_ap_device get_mac_for_ip get_port_name_from_index get_aps_from_switch_lldp get_aps_from_switch_cdp discover_aps_for_single_switch)
-    local lib_path="$(dirname "$(realpath "$0")")/netops-lib.sh"
+    local funcs=$(declare -f sanitize_string compact_switch_name is_ap_device normalize_mac get_mac_for_ip get_port_name_from_index get_aps_from_switch_lldp get_aps_from_switch_cdp discover_aps_for_single_switch)
+    local lib_path="$(dirname "$(realpath "$0")")/netrune-lib.sh"
     local switch_timeout="${CONFIG[ap_switch_timeout]:-45}"
     [[ ! "$switch_timeout" =~ ^[0-9]+$ ]] && switch_timeout=45
     awk -F '|' '{print $1, $2}' "$DEVICES_DB" > "$switch_targets"
@@ -1084,7 +1127,7 @@ discover_neighbors() {
     workers=$(discovery_workers "${CONFIG[scan_workers]:-30}" 30 200)
 
     local funcs=$(declare -f is_switch_device get_port_name_from_index get_switch_neighbors_from_cdp get_switch_neighbors_from_lldp discover_neighbors_for_single)
-    local lib_path="$(dirname "$(realpath "$0")")/netops-lib.sh"
+    local lib_path="$(dirname "$(realpath "$0")")/netrune-lib.sh"
     
     awk -F '|' '{print $1, $2}' "$DEVICES_DB" | xargs -r -L 1 -P "$workers" bash -c "
         source '$lib_path'
@@ -1121,7 +1164,7 @@ discover_neighbors() {
 # --- Topology Diagram (BFS Hop-based) ---
 show_neighbor_diagram() {
     local target_input="$1"
-    if [[ -z "$target_input" ]]; then echo "Usage: netops discover --topology <target>"; return 1; fi
+    if [[ -z "$target_input" ]]; then echo "Usage: netrune discover --topology <target>"; return 1; fi
     if [[ ! -s "$NEIGHBOR_DB" ]]; then echo "Neighbor DB empty. Run --discover-neighbors first."; return 1; fi
 
     local target_ip=$(resolve_targets "$target_input" "DEVICES" "false")
@@ -1214,7 +1257,7 @@ is_detail_flag() {
 search_cache() {
     local pattern="$1" detail="$2"
     if is_detail_flag "$detail"; then
-        [[ -z "$pattern" ]] && { log_error "Usage: netops discover <target> --detail OR netops discover --details <target>"; return 2; }
+        [[ -z "$pattern" ]] && { log_error "Usage: netrune discover <target> --detail OR netrune discover --details <target>"; return 2; }
         local ip=$(resolve_targets "$pattern" "DEVICES" "false")
         [[ -z "$ip" ]] && return 1
         
@@ -1223,7 +1266,7 @@ search_cache() {
         local plat=$(echo "$entry" | cut -d'|' -f3)
         if [[ ("$mac" == "N/A" || -z "$mac") && "$plat" != "Unknown" ]]; then
             log "Missing detailed L2 data. Autonomously enriching via SSH..."
-            "$(dirname "$(realpath "$0")")/netops-control" inventory "$ip" >/dev/null 2>&1
+            "$(dirname "$(realpath "$0")")/netrune-control" inventory "$ip" >/dev/null 2>&1
             entry=$(db_get_device "$ip")
         fi
 
@@ -1312,7 +1355,7 @@ lookup_activity_target() {
 
 check_activity_list() {
     local list_file="$1"
-    [[ -z "$list_file" ]] && { log_error "Usage: netops discover --ping-list <file.txt>"; return 2; }
+    [[ -z "$list_file" ]] && { log_error "Usage: netrune discover --ping-list <file.txt>"; return 2; }
     [[ ! -f "$list_file" ]] && { log_error "List file not found: $list_file"; return 2; }
 
     local raw_line target type ip name platform source status checked_at timeout ping_target
@@ -1369,11 +1412,11 @@ show_activity_list() {
 
 show_help() {
     cat <<EOF
-${CYAN}${BOLD}NetOps Discovery Engine${NC}
+${CYAN}${BOLD}Netrune Discovery Engine${NC}
 Network Discovery and Management Tool with SNMP/SSH device detection
 
 ${BOLD}USAGE:${NC}
-  netops discover [COMMAND] [OPTIONS]
+  netrune discover [COMMAND] [OPTIONS]
 
 ${BOLD}COMMANDS:${NC}
 
@@ -1407,36 +1450,36 @@ ${BOLD}COMMANDS:${NC}
 
 ${BOLD}EXAMPLES:${NC}
   ${CYAN}# Network Discovery${NC}
-  netops discover --update                     # Scan configured subnets
-  netops discover --fast-health                # Fast ping status for known switches/APs
-  netops discover --deep                       # Full switch/AP/topology refresh
-  netops discover -u "198.51.100.0/24"          # Scan specific network
-  netops discover -u "192.0.2.1-100"            # Scan IP range
+  netrune discover --update                     # Scan configured subnets
+  netrune discover --fast-health                # Fast ping status for known switches/APs
+  netrune discover --deep                       # Full switch/AP/topology refresh
+  netrune discover -u "198.51.100.0/24"          # Scan specific network
+  netrune discover -u "192.0.2.1-100"            # Scan IP range
 
   ${CYAN}# AP Discovery${NC}
-  netops discover --discover-aps               # Discover all access points
-  netops discover --aps "Cisco"                # Show Cisco APs only
-  netops discover --aps "Ruckus"               # Show Ruckus APs only
-  netops discover --ping-list devices.txt      # Ping listed switches/APs
-  netops discover --json --ping-list devices.txt # JSON activity status
+  netrune discover --discover-aps               # Discover all access points
+  netrune discover --aps "Cisco"                # Show Cisco APs only
+  netrune discover --aps "Ruckus"               # Show Ruckus APs only
+  netrune discover --ping-list devices.txt      # Ping listed switches/APs
+  netrune discover --json --ping-list devices.txt # JSON activity status
 
   ${CYAN}# Neighbor Discovery & Topology${NC}
-  netops discover --discover-neighbors         # Build network topology
-  netops discover --topology core-switch       # Display topology diagram
+  netrune discover --discover-neighbors         # Build network topology
+  netrune discover --topology core-switch       # Display topology diagram
 
   ${CYAN}# Database Management${NC}
-  netops discover --db-add 192.0.2.1 core-sw Cisco 2960 ABC123 02:00:00:00:00:25 DEVICE
-  netops discover --db-edit 192.0.2.1 host new-core-switch
-  netops discover --db-delete 192.0.2.1
-  netops discover --add 192.0.2.1               # Auto-detect via SSH
+  netrune discover --db-add 192.0.2.1 core-sw Cisco 2960 ABC123 02:00:00:00:00:25 DEVICE
+  netrune discover --db-edit 192.0.2.1 host new-core-switch
+  netrune discover --db-delete 192.0.2.1
+  netrune discover --add 192.0.2.1               # Auto-detect via SSH
 
   ${CYAN}# Search & Info${NC}
-  netops discover "switch1"                    # Search switches and APs
-  netops discover "198.51.100.112" --detail        # Detailed switch view with enrichment
-  netops discover --details "198.51.100.112"       # Same detail view, legacy spelling/order
-  netops discover --offline                    # Show offline devices
-  netops discover -i                           # Show cache statistics
-  netops discover -c                           # Clear all caches
+  netrune discover "switch1"                    # Search switches and APs
+  netrune discover "198.51.100.112" --detail        # Detailed switch view with enrichment
+  netrune discover --details "198.51.100.112"       # Same detail view, legacy spelling/order
+  netrune discover --offline                    # Show offline devices
+  netrune discover -i                           # Show cache statistics
+  netrune discover -c                           # Clear all caches
 
 ${BOLD}FEATURES:${NC}
   • ${GREEN}Multi-protocol Discovery${NC} - SNMP (v2c/v3) + SSH fallback
@@ -1523,10 +1566,10 @@ ${BOLD}NOTES:${NC}
   • All databases are plain text pipe-delimited files
 
 ${BOLD}SEE ALSO:${NC}
-  netops --help          General NetOps help
-  netops control         Device management commands
-  netops probe           Network diagnostics
-  netops vault           Credential management
+  netrune --help          General Netrune help
+  netrune control         Device management commands
+  netrune probe           Network diagnostics
+  netrune vault           Credential management
 EOF
 }
 
@@ -1638,7 +1681,7 @@ if [[ "$JSON_OUTPUT" == true ]]; then
         --offline) json_offline ;;
         --topology) json_topology "${2:-}" ;;
         --topology-changes) show_topology_changes true ;;
-        --detail|--details) [[ -n "${2:-}" ]] || { jq -n '{ok:false,error:"missing target",usage:"netops discover --details <target>"}'; exit 2; }; json_lookup "${2:-}" ;;
+        --detail|--details) [[ -n "${2:-}" ]] || { jq -n '{ok:false,error:"missing target",usage:"netrune discover --details <target>"}'; exit 2; }; json_lookup "${2:-}" ;;
         --fast-health) fast_health_update "${2:-}" >/dev/null; json_info ;;
         --deep) deep_discovery "${2:-}" >/dev/null; json_info ;;
         -u|--update) update_cache "$2" >/dev/null; json_info ;;
@@ -1663,7 +1706,7 @@ case "$1" in
     --discover-neighbors) discover_neighbors ;;
     --topology) show_neighbor_diagram "$2" ;;
     --topology-changes) show_topology_changes false ;;
-    --detail|--details) [[ -n "${2:-}" ]] || { log_error "Usage: netops discover --details <target>"; exit 2; }; search_cache "$2" "--detail" ;;
+    --detail|--details) [[ -n "${2:-}" ]] || { log_error "Usage: netrune discover --details <target>"; exit 2; }; search_cache "$2" "--detail" ;;
     --aps) show_aps "$2" ;;
     --ping-list|--check-list|--activity-list) show_activity_list "$2" ;;
     --offline) show_offline ;;
@@ -1674,7 +1717,7 @@ case "$1" in
         elif [[ "$CONFIRM_YES" == true ]]; then
             rm -f "$DEVICES_DB" "$AP_DB" "$NEIGHBOR_DB"; log_success "Caches cleared."
         elif [[ -t 0 ]]; then
-            read -rp "Clear all NetOps cache databases? Type CLEAR to continue: " ans
+            read -rp "Clear all Netrune cache databases? Type CLEAR to continue: " ans
             [[ "$ans" == "CLEAR" ]] && { rm -f "$DEVICES_DB" "$AP_DB" "$NEIGHBOR_DB"; log_success "Caches cleared."; } || { log_error "Clear aborted."; exit 7; }
         else
             log_error "Refusing to clear caches without --yes or --dry-run."

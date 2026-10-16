@@ -1,7 +1,7 @@
 tools:
   get_down_interfaces:
     description: "Returns interfaces that are down, not connected, disabled, or otherwise non-active on a known switch."
-    command: '{netops} device show {switch} "show interface status"'
+    command: '{netrune} device show {switch} "show interface status"'
     parser: "interface_status_down"
     accept_nonzero_if_parsed: true
     read_only: true
@@ -10,7 +10,7 @@ tools:
 
   get_interface_summary:
     description: "Returns the interface status table for a known switch."
-    command: '{netops} device show {switch} "show interface status"'
+    command: '{netrune} device show {switch} "show interface status"'
     parser: "interface_status"
     accept_nonzero_if_parsed: true
     read_only: true
@@ -19,7 +19,7 @@ tools:
 
   get_vlan_summary:
     description: "Returns the VLAN summary for a known switch."
-    command: '{netops} device show {switch} "show vlan brief"'
+    command: '{netrune} device show {switch} "show vlan brief"'
     parser: "text"
     read_only: true
     requires_confirmation: false
@@ -27,15 +27,15 @@ tools:
 
   get_device_details:
     description: "Returns current canonical inventory details for a known switch or device."
-    command: '{netops} inventory details {switch} --json'
+    command: '{netrune} inventory details {switch} --json'
     parser: "json_summary"
     read_only: true
     requires_confirmation: false
     timeout_seconds: 60
 
   get_health_offline:
-    description: "Returns current offline devices and APs from NetOps health state."
-    command: '{netops} health offline --json'
+    description: "Returns current offline devices and APs from Netrune health state."
+    command: '{netrune} health offline --json'
     parser: "json_summary"
     read_only: true
     requires_confirmation: false
@@ -43,7 +43,7 @@ tools:
 
   get_aps_on_switch:
     description: "Returns AP inventory rows associated with a switch token."
-    command: '{netops} ap list {switch} --json'
+    command: '{netrune} ap list {switch} --json'
     target_resolution: "search_token"
     parser: "json_summary"
     read_only: true
@@ -52,7 +52,7 @@ tools:
 
   get_topology_neighbors:
     description: "Returns cached topology neighbors for a switch token."
-    command: '{netops} topology neighbors {switch} --json'
+    command: '{netrune} topology show {switch} --json'
     parser: "json_summary"
     read_only: true
     requires_confirmation: false
@@ -60,7 +60,7 @@ tools:
 
   get_memory_switch:
     description: "Returns relationship memory and timeline context for a switch token."
-    command: '{netops} memory switch {switch} --json'
+    command: '{netrune} memory switch {switch} --json'
     parser: "json_summary"
     read_only: true
     requires_confirmation: false
@@ -68,7 +68,7 @@ tools:
 
   get_relationship_confidence:
     description: "Returns relationship source counts and average confidence scores for a switch or target."
-    command: "{netops} --json memory explain {switch}"
+    command: "{netrune} --json memory explain {switch}"
     parser: "json_summary"
     read_only: true
     requires_confirmation: false
@@ -76,15 +76,15 @@ tools:
 
   get_relationship_timeline:
     description: "Returns relationship memory timeline events for a switch or target."
-    command: "{netops} --json memory timeline {switch}"
+    command: "{netrune} --json memory timeline {switch}"
     parser: "json_summary"
     read_only: true
     requires_confirmation: false
     timeout_seconds: 60
 
-  answer_from_netops_state:
+  answer_from_netrune_state:
     description: "Authoritative natural command center for deterministic retrieval plus registry-backed command planning and safe previews. This workflow never executes a planned operation."
-    command: "{netops} --json ask {query}"
+    command: "{netrune} --json ask {query}"
     parser: "ask_json"
     read_only: true
     requires_confirmation: false

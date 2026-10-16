@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import ipaddress
 import os
 import re
@@ -15,7 +14,11 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 
-SKIP_PARTS = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache"}
+# Tool state that lives beside the source and never ships with it. Flagging
+# these produces findings nobody can act on, which is how a scanner teaches
+# people to skim past it.
+SKIP_PARTS = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache",
+              ".claude", ".vscode", ".idea", ".mypy_cache", ".ruff_cache"}
 SKIP_ROOTS = {"dist", "build"}
 SKIP_NAMES = {".privacy-denylist"}
 MAX_TEXT_BYTES = 5_000_000
@@ -55,8 +58,9 @@ class ArchiveScanError(ValueError):
 
 def _denied_identifiers(extra: Iterable[str] = ()) -> list[str]:
     values = [value.strip() for value in extra if value.strip()]
-    values.extend(value.strip() for value in os.environ.get("NETOPS_PRIVACY_DENYLIST", "").split(",") if value.strip())
-    path = os.environ.get("NETOPS_PRIVACY_DENYLIST_FILE", "").strip()
+    configured = os.environ.get("NETRUNE_PRIVACY_DENYLIST", os.environ.get("NETOPS_PRIVACY_DENYLIST", ""))
+    values.extend(value.strip() for value in configured.split(",") if value.strip())
+    path = os.environ.get("NETRUNE_PRIVACY_DENYLIST_FILE", os.environ.get("NETOPS_PRIVACY_DENYLIST_FILE", "")).strip()
     if path and Path(path).is_file():
         values.extend(line.strip() for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip() and not line.lstrip().startswith("#"))
     return sorted(set(values), key=str.lower)

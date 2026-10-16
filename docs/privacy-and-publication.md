@@ -17,13 +17,13 @@ assume caches or existing clones have been erased.
 9. Obtain owner approval for organization, trademark, license, and fixture use.
 
 ```bash
-python privacy_check.py --root .
-python privacy_check.py --root . dist/*.whl dist/*.tar.gz
-python create_public_export.py ../netops-platform-public
-python ../netops-platform-public/privacy_check.py --root ../netops-platform-public --git-history
+python scripts/privacy_check.py --root .
+python scripts/privacy_check.py --root . dist/*.whl dist/*.tar.gz
+python scripts/create_public_export.py ../netrune-public
+python ../netrune-public/scripts/privacy_check.py --root ../netrune-public --git-history
 ```
 
-Use `NETOPS_PRIVACY_DENYLIST_FILE` for a private newline-separated identifier
+Use `NETRUNE_PRIVACY_DENYLIST_FILE` for a private newline-separated identifier
 list. Never commit the real denylist. `.privacy-denylist.example` documents the
 format.
 
@@ -36,7 +36,7 @@ CI does not scan its intentionally retained legacy history.
 
 ## Public Export
 
-`create_public_export.py` copies tracked files, excludes known private runtime
+`scripts/create_public_export.py` copies tracked files, excludes known private runtime
 artifacts, runs privacy checks, initializes a new `main` branch, and creates one
 baseline commit using a neutral maintainer identity. It does not modify the
 private repository, copy its `.git` directory, or configure a remote.

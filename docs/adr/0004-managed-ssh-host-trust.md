@@ -11,7 +11,7 @@ known-hosts behavior operationally confusing.
 
 ## Decision
 
-NetOps owns a private known-hosts file and passes it to every SSH adapter.
+Netrune owns a private known-hosts file and passes it to every SSH adapter.
 `accept-new` is the compatibility default; `strict` is the production target.
 Enrollment requires an exact SHA-256 fingerprint comparison and writes an audit
 event. Changed keys fail closed. Insecure break-glass use requires an explicit

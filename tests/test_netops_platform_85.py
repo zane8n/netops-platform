@@ -14,6 +14,8 @@ import unittest
 from unittest import mock
 import urllib.error
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
 from netops_platform.contracts import (
     CapabilityEvidenceV1,
     IngestRunV1,
@@ -21,13 +23,12 @@ from netops_platform.contracts import (
     PathRequestV1,
     PluginDescriptorV1,
 )
-from netops_platform.core import Paths
 from netops_platform.devices import DeviceDriver
 from netops_platform.ingest import IngestManager, SameOriginRedirectHandler, SecretResolver, load_manifest
 from netops_platform.path_inspector import PathInspector
 from netops_platform.plugins import LoadedPlugin, PluginManager
 from netops_platform.privacy import scan_archive, scan_git_history, scan_tree
-from netops_platform.profiles import ProfileStore, read_kv
+from netops_platform.profiles import NEUTRAL_PROFILE, ProfileStore, read_kv
 from netops_platform.release import release_metadata, write_release_metadata
 from netops_platform.support import create_support_bundle
 from netops_devices import REGISTRY as DEVICE_REGISTRY
@@ -48,7 +49,7 @@ PATH_SCHEMA = """
 CREATE TABLE devices(ip TEXT PRIMARY KEY,hostname TEXT,platform TEXT,model TEXT,serial TEXT,mac TEXT,status TEXT,last_seen INTEGER);
 CREATE TABLE inventory_identity_state(identity_value TEXT,ip TEXT,name TEXT,entity_type TEXT);
 CREATE TABLE neighbors(local_ip TEXT,local_name TEXT,local_port TEXT,remote_name TEXT,remote_port TEXT,remote_ip TEXT);
-CREATE TABLE relationships_current(rel_type TEXT,subject_id TEXT,switch_ip TEXT,switch_name TEXT,switch_port TEXT,confidence INTEGER,last_seen INTEGER,updated_at INTEGER,attrs_json TEXT,source TEXT,status TEXT);
+CREATE TABLE relationships_current(rel_type TEXT,subject_id TEXT,switch_ip TEXT,switch_name TEXT,switch_port TEXT,confidence INTEGER,last_seen INTEGER,updated_at INTEGER,attrs_json TEXT,source TEXT,status TEXT,object_id TEXT);
 CREATE TABLE aps(ip TEXT,name TEXT,switch_ip TEXT,switch_name TEXT,switch_port TEXT,last_seen INTEGER,source TEXT);
 CREATE TABLE scan_runs(id TEXT,domain TEXT,started_at INTEGER,finished_at INTEGER);
 CREATE TABLE capability_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT,device_id TEXT,capability TEXT,state TEXT,observed_at INTEGER,source TEXT,confidence INTEGER,facts_json TEXT,raw_evidence_hash TEXT,driver_family TEXT,parser_version TEXT);
@@ -87,15 +88,86 @@ class SQLiteState:
 
 
 class ContractsAndProfilesTest(unittest.TestCase):
+    def test_tool_state_beside_the_source_is_skipped_but_source_is_not(self):
+        """A finding nobody can act on is how a scanner gets ignored.
+
+        Editor and agent directories sit next to the source and never ship, so
+        flagging a path inside one is noise. Anything that does ship stays under
+        the same scrutiny.
+        """
+        from netops_platform.privacy import scan_tree
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            # Built rather than written literally, so this fixture does not
+            # trip the very scanner it is testing.
+            home = "/" + "home" + "/" + "someone"
+            (root / ".claude").mkdir()
+            (root / ".claude" / "settings.local.json").write_text('{"p":"%s/"}' % home)
+            (root / "shipped.py").write_text('PATH = "%s/secret"\n' % home)
+            findings = scan_tree(root, [])
+        paths = {finding.path for finding in findings}
+        self.assertNotIn(".claude/settings.local.json", paths)
+        self.assertIn("shipped.py", paths)
+
     def test_flat_compatibility_modules_alias_canonical_implementations(self):
         import netops_core
         import netops_devices
         import netops_speed
+        from netrune import core as netrune_core
+        from netrune import devices as netrune_devices
         from netops_platform import core, devices, speed
 
         self.assertIs(netops_core, core)
         self.assertIs(netops_devices, devices)
         self.assertIs(netops_speed, speed)
+        self.assertIs(netrune_core, core)
+        self.assertIs(netrune_devices, devices)
+
+    def test_every_netops_platform_module_has_a_canonical_netrune_alias(self):
+        """`netrune` is the documented canonical Python API (docs/migration-netrune.md).
+
+        A module can land in `netops_platform` without anyone remembering to add
+        its one-line mirror under `netrune/`, and nothing else notices: the CLI
+        still works because it imports `netops_platform` directly. The gap only
+        shows up as an ImportError for whoever follows the docs and writes
+        `import netrune.<module>`. This enumerates both packages so a missing
+        alias fails here instead of in an integrator's face.
+        """
+        import importlib
+        import netops_platform
+        import netrune
+
+        implementation_dir = Path(netops_platform.__file__).parent
+        alias_dir = Path(netrune.__file__).parent
+        skip = {"__init__", "__main__", "launcher", "tui"}
+        implementation_modules = {
+            path.stem for path in implementation_dir.glob("*.py") if path.stem not in skip
+        }
+        alias_modules = {
+            path.stem for path in alias_dir.glob("*.py") if path.stem not in skip
+        }
+        missing = implementation_modules - alias_modules
+        self.assertEqual(missing, set(), f"netrune is missing aliases for: {sorted(missing)}")
+
+        for name in implementation_modules:
+            implementation = importlib.import_module(f"netops_platform.{name}")
+            alias = importlib.import_module(f"netrune.{name}")
+            self.assertIs(alias, implementation, f"netrune.{name} does not alias netops_platform.{name}")
+
+    def test_netrune_environment_paths_take_precedence_over_legacy_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = {
+                "NETRUNE_CONFIG_DIR": str(root / "canonical-config"),
+                "NETRUNE_CACHE_DIR": str(root / "canonical-cache"),
+                "NETOPS_CONFIG_DIR": str(root / "legacy-config"),
+                "NETOPS_CACHE_DIR": str(root / "legacy-cache"),
+            }
+            with mock.patch.dict(os.environ, environment, clear=False):
+                layout = ProfileStore(root / "home").layout("default")
+            self.assertEqual(layout.config_dir, root / "canonical-config")
+            self.assertEqual(layout.cache_dir, root / "canonical-cache")
 
     def test_observation_idempotency_and_contract_bounds(self):
         first = ObservationV1(
@@ -122,7 +194,7 @@ class ContractsAndProfilesTest(unittest.TestCase):
                 os.environ.pop(variable, None)
             store = ProfileStore(home)
             layout = store.ensure("lab")
-            self.assertEqual(layout.config_dir, home / ".config" / "netops" / "profiles" / "lab")
+            self.assertEqual(layout.config_dir, home / ".config" / "netrune" / "profiles" / "lab")
             for path in (layout.config_dir, layout.state_dir, layout.cache_dir, layout.data_dir):
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
             self.assertNotEqual(store.active(), "lab")
@@ -132,26 +204,43 @@ class ContractsAndProfilesTest(unittest.TestCase):
             self.assertIn('[access]\nssh_user = ""', (layout.config_dir / "profile.toml").read_text(encoding="utf-8"))
             self.assertEqual(read_kv(layout.config_dir / "netsnmp.conf")["ssh_user"], "")
 
-    def test_paths_resolve_source_and_installed_webui_assets(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            install_dir = root / "venv" / "bin"
-            installed_dist = root / "venv" / "share" / "netops-platform" / "webui" / "dist"
-            installed_dist.mkdir(parents=True)
-            (installed_dist / "index.html").write_text("installed", encoding="utf-8")
-            environment = {
-                "XDG_CONFIG_HOME": str(root / "config"),
-                "XDG_STATE_HOME": str(root / "state"),
-                "XDG_CACHE_HOME": str(root / "cache"),
-                "XDG_DATA_HOME": str(root / "data"),
-                "NETOPS_PROFILE": "webui-test",
-            }
-            with mock.patch.dict(os.environ, environment), mock.patch.object(sys, "prefix", str(root / "venv")):
-                paths = Paths(install_dir, home=root / "home")
-                self.assertEqual(paths.webui_dist_dir, installed_dist)
-                source_dist = install_dir / "webui" / "dist"
-                source_dist.mkdir(parents=True)
-                self.assertEqual(Paths(install_dir, home=root / "home").webui_dist_dir, source_dist)
+    def test_netrune_state_rename_copies_xdg_profiles_and_wal_safely(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {}, clear=False):
+            home = Path(directory)
+            for variable in (
+                "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+                "NETRUNE_CONFIG_DIR", "NETRUNE_CACHE_DIR", "NETRUNE_STATE_DIR", "NETRUNE_DATA_DIR", "NETRUNE_PROFILE",
+                "NETOPS_CONFIG_DIR", "NETOPS_CACHE_DIR", "NETOPS_STATE_DIR", "NETOPS_DATA_DIR", "NETOPS_PROFILE",
+            ):
+                os.environ.pop(variable, None)
+            old_config = home / ".config" / "netops"
+            old_profile = old_config / "profiles" / "default"
+            old_profile.mkdir(parents=True)
+            (old_config / "active_profile").write_text("default\n", encoding="utf-8")
+            (old_profile / "profile.toml").write_text(NEUTRAL_PROFILE, encoding="utf-8")
+            old_state = home / ".local" / "state" / "netops" / "profiles" / "default"
+            old_state.mkdir(parents=True)
+            old_database = old_state / "netops.sqlite3"
+            source = sqlite3.connect(old_database)
+            source.execute("PRAGMA journal_mode=WAL")
+            source.execute("CREATE TABLE fixture(value TEXT)")
+            source.execute("INSERT INTO fixture VALUES('preserved-through-wal')")
+            source.commit()
+
+            store = ProfileStore(home)
+            layout = store.layout("default")
+            new_database = layout.state_dir / "netrune.sqlite3"
+            copied = sqlite3.connect(new_database)
+            self.assertEqual(copied.execute("SELECT value FROM fixture").fetchone()[0], "preserved-through-wal")
+            copied.close()
+            self.assertTrue(old_database.is_file())
+            self.assertTrue((layout.state_root / "migration-from-netops.json").is_file())
+            self.assertEqual(store.rename_migration["action"], "copied")
+
+            second = ProfileStore(home)
+            self.assertEqual(second.rename_migration["action"], "not-needed")
+            self.assertTrue(old_database.is_file())
+            source.close()
 
     def test_legacy_migration_is_copy_first_sqlite_consistent_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {}, clear=False):
@@ -185,7 +274,7 @@ class ContractsAndProfilesTest(unittest.TestCase):
             self.assertFalse((target.config_dir / ".env").exists())
             self.assertEqual(first["pending_secret_names"], ["api_token"])
             self.assertEqual(first["imported_public_keys"], ["ssh_user"])
-            copied = sqlite3.connect(target.state_dir / "netops.sqlite3")
+            copied = sqlite3.connect(target.state_dir / "netrune.sqlite3")
             self.assertEqual(copied.execute("SELECT value FROM fixture").fetchone()[0], "preserved")
             copied.close()
             second = store.migrate_legacy("legacy-local")
@@ -210,7 +299,7 @@ class ContractsAndProfilesTest(unittest.TestCase):
 
             store = ProfileStore(home)
             target = store.ensure("legacy-local")
-            destination_db = target.state_dir / "netops.sqlite3"
+            destination_db = target.state_dir / "netrune.sqlite3"
             initialized = sqlite3.connect(destination_db)
             initialized.execute("CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT)")
             initialized.execute("INSERT INTO schema_meta VALUES('schema_version', '12')")
@@ -245,7 +334,7 @@ class ContractsAndProfilesTest(unittest.TestCase):
 
             store = ProfileStore(home)
             target = store.ensure("legacy-local")
-            destination_db = target.state_dir / "netops.sqlite3"
+            destination_db = target.state_dir / "netrune.sqlite3"
             destination = sqlite3.connect(destination_db)
             destination.execute("CREATE TABLE fixture(value TEXT)")
             destination.execute("INSERT INTO fixture VALUES('current')")
@@ -524,7 +613,7 @@ class FakeDistribution:
 
 
 class FakeEntryPoint:
-    def __init__(self, name="fixture", group="netops.parsers", value="fixture:plugin", implementation=None):
+    def __init__(self, name="fixture", group="netrune.parsers", value="fixture:plugin", implementation=None):
         self.name = name
         self.group = group
         self.value = value
@@ -547,8 +636,8 @@ class FakeEntryPoints(list):
 class PluginPolicyTest(unittest.TestCase):
     def implementation(self, api="1", capabilities=()):
         return type("Plugin", (), {
-            "NETOPS_PLUGIN_API_VERSION": api,
-            "NETOPS_PLUGIN_CAPABILITIES": capabilities,
+            "NETRUNE_PLUGIN_API_VERSION": api,
+            "NETRUNE_PLUGIN_CAPABILITIES": capabilities,
             "parse": staticmethod(lambda _parser_id, _text, _context=None: {}),
         })
 
@@ -559,9 +648,22 @@ class PluginPolicyTest(unittest.TestCase):
             with mock.patch("netops_platform.plugins.metadata.entry_points", return_value=FakeEntryPoints([entry])):
                 discovered = manager.discover()
                 self.assertEqual((discovered[0].load_status, entry.loads), ("disabled", 0))
-                enabled = manager.set_enabled("netops.parsers:fixture", True)
+                enabled = manager.set_enabled("netrune.parsers:fixture", True)
                 self.assertEqual((enabled.load_status, enabled.api_version, entry.loads), ("loaded", "1", 1))
                 self.assertEqual(stat.S_IMODE(manager.state_file.stat().st_mode), 0o600)
+
+    def test_legacy_netops_plugin_group_and_metadata_remain_compatible(self):
+        implementation = type("LegacyPlugin", (), {
+            "NETOPS_PLUGIN_API_VERSION": "1",
+            "NETOPS_PLUGIN_CAPABILITIES": (),
+            "parse": staticmethod(lambda _parser_id, _text, _context=None: {}),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            entry = FakeEntryPoint(group="netops.parsers", implementation=implementation)
+            manager = PluginManager(Path(directory))
+            with mock.patch("netops_platform.plugins.metadata.entry_points", return_value=FakeEntryPoints([entry])):
+                enabled = manager.set_enabled("netops.parsers:fixture", True)
+            self.assertEqual((enabled.group, enabled.load_status), ("netops.parsers", "loaded"))
 
     def test_incompatible_or_write_plugin_rolls_back_enablement(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -575,7 +677,7 @@ class PluginPolicyTest(unittest.TestCase):
                 manager = PluginManager(Path(directory) / str(entry.loads))
                 with mock.patch("netops_platform.plugins.metadata.entry_points", return_value=FakeEntryPoints([entry])):
                     with self.assertRaisesRegex(ValueError, "could not be enabled"):
-                        manager.set_enabled("netops.parsers:fixture", True)
+                        manager.set_enabled("netrune.parsers:fixture", True)
                     self.assertFalse(manager.discover()[0].enabled)
 
     def test_entry_point_collision_is_ambiguous(self):
@@ -585,12 +687,12 @@ class PluginPolicyTest(unittest.TestCase):
             with mock.patch("netops_platform.plugins.metadata.entry_points", return_value=entries):
                 self.assertTrue(all(row.load_status == "collision" for row in manager.discover()))
                 with self.assertRaisesRegex(ValueError, "ambiguous"):
-                    manager.set_enabled("netops.parsers:fixture", True)
+                    manager.set_enabled("netrune.parsers:fixture", True)
 
     def test_missing_enabled_plugin_and_unsafe_state_are_reported(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = PluginManager(Path(directory))
-            manager._write_enabled({"netops.parsers:missing"})
+            manager._write_enabled({"netrune.parsers:missing"})
             with mock.patch("netops_platform.plugins.metadata.entry_points", return_value=FakeEntryPoints()):
                 descriptor = manager.discover()[0]
                 self.assertEqual((descriptor.load_status, descriptor.source), ("missing", "profile-state"))
@@ -609,19 +711,19 @@ class PluginPolicyTest(unittest.TestCase):
 
     def test_group_interface_is_checked_before_enablement(self):
         with tempfile.TemporaryDirectory() as directory:
-            implementation = type("Plugin", (), {"NETOPS_PLUGIN_API_VERSION": "1", "NETOPS_PLUGIN_CAPABILITIES": ()})
+            implementation = type("Plugin", (), {"NETRUNE_PLUGIN_API_VERSION": "1", "NETRUNE_PLUGIN_CAPABILITIES": ()})
             entry = FakeEntryPoint(implementation=implementation)
             manager = PluginManager(Path(directory))
             with mock.patch("netops_platform.plugins.metadata.entry_points", return_value=FakeEntryPoints([entry])):
                 with self.assertRaisesRegex(ValueError, "must expose parse"):
-                    manager.set_enabled("netops.parsers:fixture", True)
+                    manager.set_enabled("netrune.parsers:fixture", True)
 
     def test_device_driver_plugin_is_revalidated_and_profile_scoped(self):
         descriptor = PluginDescriptorV1(
             name="fixture",
             distribution="fixture-plugin",
             version="1.0",
-            group="netops.device_drivers",
+            group="netrune.device_drivers",
             entry_point="fixture:driver",
             api_version="1",
             enabled=True,
@@ -692,7 +794,11 @@ class FakePathApp:
                 "neighbor": {"remote_ip": "192.0.2.2", "remote_name": "SITE-A-ACCESS-01"},
             }]
         else:
-            links = []
+            links = [{
+                "port": "Gi1/0/48",
+                "carries_vlan": True,
+                "neighbor": {"remote_ip": "192.0.2.1", "remote_name": "SITE-A-CORE-01"},
+            }]
         return {
             "defined": True,
             "error": "",
@@ -700,6 +806,63 @@ class FakePathApp:
             "observed_at": 1_700_000_100,
             "state": "OK",
             "result": "PRESENT",
+        }
+
+    def inspect_path_forwarding_node(self, device, endpoint, vlan, options):
+        if device["ip"] == "192.0.2.1":
+            return {
+                "observed_at": 1_700_000_108,
+                "driver_family": "cisco-ios",
+                "port": "Gi1/0/48",
+                "selected": {"vlan": str(vlan), "port": "Gi1/0/48", "entry_type": "DYNAMIC"},
+                "hits": [{"vlan": str(vlan), "port": "Gi1/0/48", "entry_type": "DYNAMIC"}],
+                "neighbor": {"remote_ip": "192.0.2.2", "remote_name": "SITE-A-ACCESS-01", "remote_port": "Gi1/0/48"},
+                "next_device": self.state.one("SELECT * FROM devices WHERE ip='192.0.2.2'"),
+            }
+        return {
+            "observed_at": 1_700_000_109,
+            "driver_family": "cisco-ios",
+            "port": "Gi1/0/7",
+            "selected": {"vlan": str(vlan), "port": "Gi1/0/7", "entry_type": "DYNAMIC"},
+            "hits": [{"vlan": str(vlan), "port": "Gi1/0/7", "entry_type": "DYNAMIC"}],
+            "neighbor": {},
+            "next_device": {},
+        }
+
+    def inspect_path_layer3(self, device, vlan, options):
+        return {
+            "observed_at": 1_700_000_109,
+            "driver_family": "cisco-ios",
+            "interface": f"Vlan{vlan}",
+            "exists": True,
+            "state": "up",
+            "parsed": True,
+        }
+
+
+class StpPathApp(FakePathApp):
+    """A path app whose core switch reports the path port as STP blocking."""
+
+    def __init__(self, state, *, stp_state="blocking"):
+        super().__init__(state)
+        self.stp_state = stp_state
+        self.stp_calls = []
+
+    def inspect_spanning_tree(self, device, options, *, vlan=0, interfaces=None, record=True):
+        self.stp_calls.append((device["ip"], list(interfaces or [])))
+        state = self.stp_state if device["ip"] == "192.0.2.1" else "forwarding"
+        return {
+            "observed_at": 1_700_000_109,
+            "driver_family": "aruba-aos-switch",
+            "parsed": True,
+            "mode": "mstp",
+            "is_root": False,
+            "root_port": "Gi1/0/48",
+            "ports": [
+                {"port": "Gi1/0/48", "state": state, "role": "root", "edge": False,
+                 "network_facing": state == "forwarding"},
+            ],
+            "uplinks": ["Gi1/0/48"] if state == "forwarding" else [],
         }
 
 
@@ -716,7 +879,7 @@ class PathInspectorTest(unittest.TestCase):
                 ],
             )
             connection.execute("INSERT INTO neighbors VALUES(?,?,?,?,?,?)", ("192.0.2.1", "SITE-A-CORE-01", "Gi1/0/48", "SITE-A-ACCESS-01", "Gi1/0/48", "192.0.2.2"))
-            connection.execute("INSERT INTO relationships_current VALUES(?,?,?,?,?,?,?,?,?,?,?)", ("mac_location", "020000000025", "192.0.2.2", "SITE-A-ACCESS-01", "Gi1/0/7", 95, 1_700_000_100, 1_700_000_100, "{}", "fixture", "active"))
+            connection.execute("INSERT INTO relationships_current(rel_type,subject_id,switch_ip,switch_name,switch_port,confidence,last_seen,updated_at,attrs_json,source,status) VALUES(?,?,?,?,?,?,?,?,?,?,?)", ("mac_location", "020000000025", "192.0.2.2", "SITE-A-ACCESS-01", "Gi1/0/7", 95, 1_700_000_100, 1_700_000_100, "{}", "fixture", "active"))
             connection.execute("INSERT INTO scan_runs VALUES(?,?,?,?)", ("scan-1", "topology", 1_700_000_000, 1_700_000_100))
 
     def tearDown(self):
@@ -730,10 +893,102 @@ class PathInspectorTest(unittest.TestCase):
         payload = result.to_dict()
         self.assertEqual((result.status, len(result.hops)), ("COMPLETE", 2))
         self.assertEqual(payload["finished_at_iso"], "2023-11-14T22:15:10Z")
-        self.assertEqual(payload["hops"][0]["evidence_age_seconds"], 10)
+        self.assertEqual(payload["hops"][0]["device_name"], "SITE-A-ACCESS-01")
+        self.assertEqual(payload["hops"][1]["device_name"], "SITE-A-CORE-01")
+        self.assertEqual(payload["hops"][1]["layer"], "L2/L3")
+        self.assertEqual(payload["hops"][1]["egress_interface"], "Vlan120")
         self.assertEqual(self.state.one("SELECT COUNT(*) AS count FROM path_runs")["count"], 1)
         self.assertEqual(len(inspector.history()), 1)
         self.assertEqual(inspector.show(result.run_id)["status"], "COMPLETE")
+        run_ref = inspector.history("0200.0000.0025", 120)[0]["run_ref"]
+        self.assertEqual(inspector.show(run_ref)["run_id"], result.run_id)
+        self.assertEqual(inspector.show("02:00:00:00:00:25", 120)["run_id"], result.run_id)
+        self.assertEqual(inspector.show("last", 120)["run_id"], result.run_id)
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_stp_blocking_on_a_path_interface_blocks_the_hop(self, _clock):
+        app = StpPathApp(self.state, stp_state="blocking")
+        result = PathInspector(app).inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110), object()
+        )
+        codes = {finding.code for finding in result.findings}
+        self.assertIn("STP_BLOCKING", codes)
+        # Reported exactly once: the live read must not be re-judged from the
+        # stored capability row.
+        self.assertEqual(len([f for f in result.findings if f.code == "STP_BLOCKING"]), 1)
+        core = next(hop for hop in result.hops if hop.device_name == "SITE-A-CORE-01")
+        self.assertEqual(core.forwarding_state, "blocked")
+        # The interfaces on the path are what gets asked about.
+        self.assertIn(("192.0.2.1", ["Gi1/0/48"]), app.stp_calls)
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_stp_forwarding_leaves_a_healthy_path_complete(self, _clock):
+        app = StpPathApp(self.state, stp_state="forwarding")
+        result = PathInspector(app).inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110), object()
+        )
+        self.assertEqual(result.status, "COMPLETE")
+        self.assertNotIn("STP_BLOCKING", {finding.code for finding in result.findings})
+        core = next(hop for hop in result.hops if hop.device_name == "SITE-A-CORE-01")
+        self.assertEqual(core.forwarding_state, "forwarding")
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_stp_inspection_failure_is_a_warning_not_a_crash(self, _clock):
+        class BrokenStpApp(StpPathApp):
+            def inspect_spanning_tree(self, device, options, **kwargs):
+                raise RuntimeError("fixture stp transport timeout")
+
+        result = PathInspector(BrokenStpApp(self.state)).inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110), object()
+        )
+        self.assertIn("STP_INSPECTION_FAILED", {finding.code for finding in result.findings})
+        self.assertNotEqual(result.status, "ERROR")
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_fresh_live_walk_supersedes_stale_cached_attachment(self, _clock):
+        with self.state.connect() as connection:
+            connection.execute(
+                "UPDATE relationships_current SET last_seen=?,updated_at=? WHERE rel_type='mac_location'",
+                (1_699_000_000, 1_699_000_000),
+            )
+        result = PathInspector(FakePathApp(self.state)).inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110), object()
+        )
+        self.assertEqual(result.status, "COMPLETE")
+        self.assertNotIn("STALE_ENDPOINT_ATTACHMENT", {finding.code for finding in result.findings})
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_partial_live_walk_is_not_collapsed_to_a_stale_shorter_attachment(self, _clock):
+        vlan_inspections = []
+
+        class PartialPathApp(FakePathApp):
+            def inspect_path_forwarding_node(self, device, endpoint, vlan, options):
+                if device["ip"] == "192.0.2.2":
+                    return {
+                        "observed_at": 1_700_000_109,
+                        "driver_family": "cisco-ios",
+                        "error": "fixture transport timeout",
+                    }
+                return super().inspect_path_forwarding_node(device, endpoint, vlan, options)
+
+            def inspect_vlan_node(self, device, vlan, mode, options):
+                vlan_inspections.append(device["ip"])
+                return super().inspect_vlan_node(device, vlan, mode, options)
+
+        with self.state.connect() as connection:
+            connection.execute(
+                "UPDATE relationships_current SET switch_ip=?,switch_name=?,switch_port=?,attrs_json=? "
+                "WHERE rel_type='mac_location'",
+                ("192.0.2.1", "SITE-A-CORE-01", "Gi1/0/9", json.dumps({"vlan": "120"})),
+            )
+        result = PathInspector(PartialPathApp(self.state)).inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110),
+            object(),
+        )
+        self.assertEqual((result.status, len(result.hops)), ("PARTIAL", 2))
+        self.assertEqual(result.hops[0].device_name, "SITE-A-ACCESS-01")
+        self.assertNotIn("192.0.2.2", vlan_inspections)
+        self.assertNotIn("STALE_ENDPOINT_ATTACHMENT", {finding.code for finding in result.findings})
 
     @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
     def test_missing_trunk_is_a_confirmed_blocker(self, _clock):
@@ -746,12 +1001,31 @@ class PathInspectorTest(unittest.TestCase):
     @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
     def test_cached_mode_and_ambiguous_attachment_are_partial(self, _clock):
         with self.state.connect() as connection:
-            connection.execute("INSERT INTO relationships_current VALUES(?,?,?,?,?,?,?,?,?,?,?)", ("mac_location", "020000000025", "192.0.2.1", "SITE-A-CORE-01", "Gi1/0/9", 80, 1_700_000_090, 1_700_000_090, "{}", "fixture", "active"))
+            connection.execute("INSERT INTO relationships_current(rel_type,subject_id,switch_ip,switch_name,switch_port,confidence,last_seen,updated_at,attrs_json,source,status) VALUES(?,?,?,?,?,?,?,?,?,?,?)", ("mac_location", "020000000025", "192.0.2.1", "SITE-A-CORE-01", "Gi1/0/9", 80, 1_700_000_090, 1_700_000_090, "{}", "fixture", "active"))
         result = PathInspector(FakePathApp(self.state)).inspect(
             PathRequestV1("02:00:00:00:00:25", 120, mode="cached", requested_at=1_700_000_110), object()
         )
         self.assertEqual(result.status, "PARTIAL")
         self.assertIn("AMBIGUOUS_ENDPOINT_LOCATION", {finding.code for finding in result.findings})
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_cached_attachment_from_another_vlan_is_not_used_as_a_path_edge(self, _clock):
+        with self.state.connect() as connection:
+            connection.execute(
+                "UPDATE relationships_current SET attrs_json=? WHERE rel_type='mac_location'",
+                (json.dumps({"vlan": "112"}),),
+            )
+        result = PathInspector(FakePathApp(self.state)).inspect(
+            PathRequestV1(
+                "02:00:00:00:00:25", 120, mode="cached", requested_at=1_700_000_110
+            ),
+            object(),
+        )
+        self.assertEqual((result.status, len(result.hops)), ("UNKNOWN", 0))
+        self.assertIn(
+            "CACHED_ENDPOINT_VLAN_MISMATCH",
+            {finding.code for finding in result.findings},
+        )
 
     @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
     def test_unbound_stp_evidence_cannot_invent_a_block(self, _clock):
@@ -786,6 +1060,182 @@ class PathInspectorTest(unittest.TestCase):
         self.assertEqual(stale.status, "PARTIAL")
         self.assertIn("STALE_CAPABILITY_EVIDENCE", codes)
         self.assertNotIn("STP_BLOCKING", codes)
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_a_stored_run_rebuilds_identically_from_the_normalised_tables(self, _clock):
+        """The blob and the tables held the same run and could drift apart.
+        Reads now come from the tables, so they must reproduce the live result
+        exactly rather than approximately."""
+        inspector = PathInspector(FakePathApp(self.state))
+        live = inspector.inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110), object()
+        ).to_dict()
+
+        rebuilt = inspector.show(live["run_id"])
+        self.assertEqual(rebuilt, live)
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_reading_a_run_does_not_depend_on_the_stored_blob(self, _clock):
+        inspector = PathInspector(FakePathApp(self.state))
+        live = inspector.inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110), object()
+        ).to_dict()
+        # Corrupt the blob: the tables alone must still serve the run.
+        with self.state.connect() as connection:
+            connection.execute("UPDATE path_runs SET result_json='{\"corrupt\": true}' WHERE run_id=?", (live["run_id"],))
+        rebuilt = inspector.show(live["run_id"])
+        self.assertEqual(rebuilt["status"], live["status"])
+        self.assertEqual(len(rebuilt["hops"]), len(live["hops"]))
+        self.assertEqual([h["device_name"] for h in rebuilt["hops"]],
+                         [h["device_name"] for h in live["hops"]])
+        self.assertNotIn("corrupt", rebuilt)
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_a_run_recorded_before_the_tables_were_authoritative_still_reads(self, _clock):
+        inspector = PathInspector(FakePathApp(self.state))
+        live = inspector.inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110), object()
+        ).to_dict()
+        # Legacy shape: blob present, normalised rows absent.
+        with self.state.connect() as connection:
+            connection.execute("DELETE FROM path_hops WHERE run_id=?", (live["run_id"],))
+            connection.execute("DELETE FROM path_findings WHERE run_id=?", (live["run_id"],))
+        rebuilt = inspector.show(live["run_id"])
+        self.assertEqual(rebuilt["run_id"], live["run_id"])
+        self.assertEqual(len(rebuilt["hops"]), len(live["hops"]))
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_a_stalled_walk_falls_back_to_searching_every_switch(self, _clock):
+        """A hop-by-hop walk follows one branch; a search covers all of them."""
+
+        class StalledWalkApp(FakePathApp):
+            def inspect_path_forwarding_node(self, device, endpoint, vlan, options):
+                # The core knows nothing, so the walk cannot take a first step.
+                return {"observed_at": 1_700_000_108, "driver_family": "cisco-ios",
+                        "error": "MAC not learned"}
+
+            def locate_endpoint_live(self, mac, vlan, options, jobs=0):
+                return {
+                    "found": True, "searched": 172, "uplink_data_available": True,
+                    "attached": [{"switch_ip": "192.0.2.2", "switch_name": "SITE-A-ACCESS-01",
+                                  "port": "Gi1/0/7", "vlan": str(vlan), "entry_type": "DYNAMIC"}],
+                    "transit": [],
+                }
+
+        result = PathInspector(StalledWalkApp(self.state)).inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110), object()
+        )
+        codes = {finding.code for finding in result.findings}
+        self.assertIn("ENDPOINT_RELOCATED_BY_SEARCH", codes)
+        relocated = next(f for f in result.findings if f.code == "ENDPOINT_RELOCATED_BY_SEARCH")
+        self.assertEqual(relocated.interface, "Gi1/0/7")
+        self.assertIn("172 switches", relocated.message)
+        # The path must now terminate at the switch the search actually found.
+        self.assertEqual(result.hops[0].device_name, "SITE-A-ACCESS-01")
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_an_endpoint_seen_only_on_uplinks_is_reported_as_such(self, _clock):
+        class TransitOnlyApp(FakePathApp):
+            def inspect_path_forwarding_node(self, device, endpoint, vlan, options):
+                return {"observed_at": 1_700_000_108, "driver_family": "cisco-ios",
+                        "error": "MAC not learned"}
+
+            def locate_endpoint_live(self, mac, vlan, options, jobs=0):
+                return {
+                    "found": True, "searched": 100, "uplink_data_available": True,
+                    "attached": [],
+                    "transit": [{"switch_ip": "192.0.2.1", "switch_name": "SITE-A-CORE-01",
+                                 "port": "Gi1/0/48", "vlan": str(vlan), "entry_type": "DYNAMIC"}],
+                }
+
+        result = PathInspector(TransitOnlyApp(self.state)).inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110), object()
+        )
+        finding = next(f for f in result.findings if f.code == "ENDPOINT_ONLY_SEEN_IN_TRANSIT")
+        # Every hit on an uplink means the access switch is not being reached.
+        self.assertIn("only on uplink ports", finding.message)
+        self.assertIn("1 switch(es)", finding.message)
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_a_completed_walk_does_not_pay_for_a_search(self, _clock):
+        searches = []
+
+        class CountingApp(FakePathApp):
+            def locate_endpoint_live(self, mac, vlan, options, jobs=0):
+                searches.append(mac)
+                return {"found": False, "attached": [], "transit": [], "searched": 0}
+
+        result = PathInspector(CountingApp(self.state)).inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110), object()
+        )
+        self.assertEqual(result.status, "COMPLETE")
+        # Searching every switch is expensive; a walk that succeeded must not.
+        self.assertEqual(searches, [])
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_evidence_collected_during_the_run_is_not_called_future(self, _clock):
+        # A long run records evidence after its own start. Comparing against
+        # the start instead of the wall clock reported that fresh evidence as
+        # "later than the current clock".
+        with self.state.connect() as connection:
+            connection.execute(
+                "INSERT INTO capability_evidence(device_id,capability,state,observed_at,source,confidence,facts_json,raw_evidence_hash,driver_family,parser_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("192.0.2.1", "stp", "supported", 1_700_000_105, "fixture", 95,
+                 json.dumps({"state": "forwarding", "interface": "Gi1/0/48"}), "midrun", "cisco-ios", "fixture-v1"),
+            )
+        result = PathInspector(FakePathApp(self.state)).inspect(
+            # Requested well before the evidence was written, as a slow run does.
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_000), object()
+        )
+        self.assertNotIn("FUTURE_CAPABILITY_TIMESTAMP", {finding.code for finding in result.findings})
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_a_genuinely_future_timestamp_is_still_reported(self, _clock):
+        with self.state.connect() as connection:
+            connection.execute(
+                "INSERT INTO capability_evidence(device_id,capability,state,observed_at,source,confidence,facts_json,raw_evidence_hash,driver_family,parser_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("192.0.2.1", "stp", "supported", 1_700_009_999, "fixture", 95,
+                 json.dumps({"state": "forwarding", "interface": "Gi1/0/48"}), "ahead", "cisco-ios", "fixture-v1"),
+            )
+        result = PathInspector(FakePathApp(self.state)).inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110), object()
+        )
+        self.assertIn("FUTURE_CAPABILITY_TIMESTAMP", {finding.code for finding in result.findings})
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_stale_evidence_about_an_unrelated_interface_is_not_reported(self, _clock):
+        # Old spanning-tree evidence for a port this path never touches cannot
+        # affect the verdict, so warning about it only buries real findings.
+        with self.state.connect() as connection:
+            connection.execute(
+                "INSERT INTO capability_evidence(device_id,capability,state,observed_at,source,confidence,facts_json,raw_evidence_hash,driver_family,parser_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("192.0.2.1", "stp", "supported", 1_699_990_000, "fixture", 95,
+                 json.dumps({"state": "blocking", "interface": "Gi1/0/99"}), "elsewhere", "cisco-ios", "fixture-v1"),
+            )
+        result = PathInspector(FakePathApp(self.state)).inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110), object()
+        )
+        codes = {finding.code for finding in result.findings}
+        self.assertNotIn("STALE_CAPABILITY_EVIDENCE", codes)
+        # And it must certainly not block a path it has nothing to do with.
+        self.assertNotIn("STP_BLOCKING", codes)
+
+    @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
+    def test_stale_evidence_on_a_path_interface_is_still_reported(self, _clock):
+        with self.state.connect() as connection:
+            connection.execute(
+                "INSERT INTO capability_evidence(device_id,capability,state,observed_at,source,confidence,facts_json,raw_evidence_hash,driver_family,parser_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("192.0.2.1", "stp", "supported", 1_699_990_000, "fixture", 95,
+                 json.dumps({"state": "blocking", "interface": "Gi1/0/48"}), "onpath", "cisco-ios", "fixture-v1"),
+            )
+        result = PathInspector(FakePathApp(self.state)).inspect(
+            PathRequestV1("02:00:00:00:00:25", 120, requested_at=1_700_000_110), object()
+        )
+        stale = [f for f in result.findings if f.code == "STALE_CAPABILITY_EVIDENCE"]
+        self.assertTrue(stale, "stale evidence on a path interface must be reported")
+        # The message must say how old and against what limit, not just "stale".
+        self.assertIn("minute", stale[0].message)
+        self.assertGreater(stale[0].evidence.get("age_seconds", 0), 0)
 
     @mock.patch("netops_platform.path_inspector.time.time", return_value=1_700_000_110)
     def test_unknown_policy_semantics_and_partial_device_failure_remain_partial(self, _clock):
@@ -823,7 +1273,7 @@ class PathInspectorTest(unittest.TestCase):
                     ("192.0.2.3", "SITE-A-ACCESS-02", "1/1/47", "SITE-A-CORE-01", "Gi1/0/47", "192.0.2.1"),
                 ],
             )
-            connection.execute("INSERT INTO relationships_current VALUES(?,?,?,?,?,?,?,?,?,?,?)", ("mac_location", "020000000026", "192.0.2.3", "SITE-A-ACCESS-02", "1/1/7", 95, 1_700_000_100, 1_700_000_100, "{}", "fixture", "active"))
+            connection.execute("INSERT INTO relationships_current(rel_type,subject_id,switch_ip,switch_name,switch_port,confidence,last_seen,updated_at,attrs_json,source,status) VALUES(?,?,?,?,?,?,?,?,?,?,?)", ("mac_location", "020000000026", "192.0.2.3", "SITE-A-ACCESS-02", "1/1/7", 95, 1_700_000_100, 1_700_000_100, "{}", "fixture", "active"))
         result = PathInspector(FakePathApp(self.state)).inspect(
             PathRequestV1("02:00:00:00:00:26", 120, depth=8, max_nodes=1, mode="cached", requested_at=1_700_000_110), object()
         )
@@ -1023,20 +1473,88 @@ class SupportAndReleaseTest(unittest.TestCase):
             for name, digest in manifest.items():
                 self.assertEqual(hashlib.sha256(payloads[name]).hexdigest(), digest)
 
+    def test_support_bundles_in_the_default_directory_are_rotated(self):
+        """Nothing removed an old bundle before: a directory nobody looked at
+        grew by one file per 'netrune support bundle' call forever."""
+        from netops_platform.support import KEPT_BUNDLES
+
+        class State:
+            def db_status_payload(self): return {"ok": True, "counts": {}, "files": {}}
+            def integrity_check(self): return {"ok": True}
+            def rows(self, _query): return []
+
+        class Config:
+            def public_safe(self): return {}
+
+        class Plugins:
+            def discover(self): return []
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = type("App", (), {})()
+            app.paths = type("Paths", (), {"data_dir": root, "profile": "private-estate"})()
+            app.config = Config()
+            app.state = State()
+            app.device_drivers = DEVICE_REGISTRY.clone()
+            app.driver_manifest_report = []
+            app.plugin_manager = Plugins()
+            import itertools
+            stamps = itertools.count(1_700_000_000)
+            # time.time() is mocked process-wide for the duration of the
+            # 'with' block, not just support.py's own call, so more than one
+            # value can be drawn per bundle -- only the path each call
+            # actually wrote is a reliable stamp to assert against.
+            written = []
+            with mock.patch("netops_platform.support.time.time", side_effect=lambda: next(stamps)):
+                for _ in range(KEPT_BUNDLES + 3):
+                    written.append(Path(create_support_bundle(app)["path"]))
+            remaining = set((root / "support").glob("netops-support-*.tar.gz"))
+            self.assertEqual(len(remaining), KEPT_BUNDLES)
+            # The ones kept are the newest, not an arbitrary subset.
+            self.assertIn(written[-1], remaining)
+            self.assertNotIn(written[0], remaining)
+            self.assertEqual(remaining, set(written[-KEPT_BUNDLES:]))
+
+    def test_a_custom_bundle_path_is_never_touched_by_rotation(self):
+        class State:
+            def db_status_payload(self): return {"ok": True, "counts": {}, "files": {}}
+            def integrity_check(self): return {"ok": True}
+            def rows(self, _query): return []
+
+        class Config:
+            def public_safe(self): return {}
+
+        class Plugins:
+            def discover(self): return []
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch("netops_platform.support.time.time", return_value=1_700_000_000):
+            root = Path(directory)
+            app = type("App", (), {})()
+            app.paths = type("Paths", (), {"data_dir": root, "profile": "private-estate"})()
+            app.config = Config()
+            app.state = State()
+            app.device_drivers = DEVICE_REGISTRY.clone()
+            app.driver_manifest_report = []
+            app.plugin_manager = Plugins()
+            custom = root / "elsewhere" / "mine.tar.gz"
+            create_support_bundle(app, custom)
+            self.assertTrue(custom.is_file())
+
     def test_release_metadata_is_reproducible_and_validates_artifacts(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"SOURCE_DATE_EPOCH": "1700000000"}):
             root = Path(directory)
-            wheel = root / "netops_platform-8.5.0b1-py3-none-any.whl"
-            source = root / "netops_platform-8.5.0b1.tar.gz"
+            wheel = root / "netrune-8.5.0b3-py3-none-any.whl"
+            source = root / "netrune-8.5.0b3.tar.gz"
             wheel.write_bytes(b"wheel fixture")
             source.write_bytes(b"source fixture")
-            first = release_metadata("8.5.0b1", [source, wheel])
-            second = release_metadata("8.5.0b1", [wheel, source])
+            first = release_metadata("8.5.0b3", [source, wheel])
+            second = release_metadata("8.5.0b3", [wheel, source])
             self.assertEqual(first["sbom"]["serialNumber"], second["sbom"]["serialNumber"])
+            self.assertEqual(first["sbom"]["metadata"]["component"]["name"], "netrune")
             metadata = first["provenance"]["predicate"]["runDetails"]["metadata"]
             self.assertEqual(metadata["startedOn"], "2023-11-14T22:13:20Z")
             self.assertEqual(metadata["finishedOn"], metadata["startedOn"])
-            outputs = write_release_metadata("8.5.0b1", [wheel, source], root / "release")
+            outputs = write_release_metadata("8.5.0b3", [wheel, source], root / "release")
             self.assertEqual(set(outputs), {"checksums", "sbom", "provenance"})
             self.assertEqual(scan_tree(root / "release"), [])
 

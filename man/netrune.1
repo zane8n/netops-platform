@@ -1,0 +1,602 @@
+.TH NETRUNE 1 "" "Netrune 8.5.0b3" "User Commands"
+.SH NAME
+netrune \- local-first network operations platform
+.SH SYNOPSIS
+.B netrune
+[--profile NAME] DOMAIN ACTION [ARGUMENTS] [GLOBAL FLAGS]
+.SH DESCRIPTION
+Netrune provides profile-isolated inventory, diagnostics, ingest, plugins, and bounded path inspection.
+.SH DOMAINS
+.TP
+.B inventory
+Switch/router inventory, flat-file migration, details, and bulk activity checks.
+.TP
+.B ap
+Wireless AP inventory, AP-on-switch lookup, AP move history, unjoined WLC records, and AP timelines.
+.TP
+.B topology
+LLDP/CDP neighbor scans, topology display, topology changes, and link timelines.
+.TP
+.B memory
+Relationship memory: AP attachments, IP/MAC ownership, switch ports, topology, and source confidence.
+.TP
+.B health
+Reachability, stale state, offline lists, attention queue, and health timeline.
+.TP
+.B backup
+Online-only, changed-only config backups plus backup history and diffs.
+.TP
+.B device
+SSH, read-only show commands, config previews/confirmed changes, and inventory enrichment.
+.TP
+.B vault
+Local SSH-password vault lifecycle with terminal sudo authentication and no graphical pinentry.
+.TP
+.B vlan
+Read-only VLAN lookup/propagation plus guarded VLAN changes.
+.TP
+.B lookup
+Core and MAC lookups. Results are cached into relationship memory.
+.TP
+.B diagnose
+Local/core latency, verified Internet speed, controlled throughput, port health, and guarded copper cable diagnostics.
+.TP
+.B workflow
+Safe multi-step operator workflows.
+.TP
+.B commands
+Canonical command registry used by the CLI, previews, and workflows.
+.TP
+.B db
+SQLite lifecycle and flat-file compatibility shortcuts.
+.TP
+.B ask
+Deterministic state retrieval and registry-backed command planning from natural language.
+.TP
+.B init
+Initialize an isolated profile and check host capabilities.
+.TP
+.B profile
+Create, select, inspect, and migrate isolated operator profiles.
+.TP
+.B config
+Inspect and change non-secret profile configuration.
+.TP
+.B secrets
+Manage named sudo-gated encrypted secrets without putting values in arguments or config.
+.TP
+.B ingest
+Validate and run declarative, provenance-preserving data channels.
+.TP
+.B plugin
+Discover and explicitly enable trusted Python entry-point plugins.
+.TP
+.B setup
+Stand up a working install from the few facts that differ between two of them.
+.TP
+.B traffic
+Interface and reachability monitoring. Collection is watchlist driven: only targets you name are ever polled.
+.TP
+.B path
+Inspect a bounded endpoint path across cached topology and live read-only forwarding evidence.
+.TP
+.B excel
+Correlate your own Excel workbooks with Netrune's inventory, and build tracker workbooks.
+.TP
+.B support
+Create privacy-redacted diagnostics for support and bug reports.
+.SH REGISTERED COMMANDS
+.TP
+.B ap-list
+netrune ap list '<target>' - Search current reconciled AP inventory.
+.TP
+.B ap-merge
+netrune ap merge '<source>' '<target>' --reason '<reason>' --dry-run - Preview retiring an old AP into a current AP while preserving chronological evidence. Apply explicitly in the CLI with --confirm.
+.TP
+.B ap-merges
+netrune ap merges - List active manual AP merges and their chronology.
+.TP
+.B ap-moves
+netrune ap moves - Show recorded AP attachment changes newest first.
+.TP
+.B ap-on-switch
+netrune ap on-switch '<target>' - Show canonical APs attached to a switch or site.
+.TP
+.B ap-scan
+netrune ap scan - Refresh AP inventory.
+.TP
+.B ap-timeline
+netrune ap timeline '<target>' - Show AP attachment history newest first.
+.TP
+.B ap-unjoined
+netrune ap unjoined '<target>' - List AP observations that are not joined to a controller.
+.TP
+.B ap-unmerge
+netrune ap unmerge '<merge_id>' --reason '<reason>' - Prepare restoration of a manually retired source AP. Apply explicitly in the CLI with --confirm.
+.TP
+.B ask-alias-remove
+netrune ask alias remove '<phrase>' - Remove a durable deterministic phrase alias.
+.TP
+.B ask-alias-set
+netrune ask alias set '<phrase>' '<alias_target>' - Create or update a durable deterministic phrase alias.
+.TP
+.B ask-aliases
+netrune ask aliases - List deterministic phrase aliases.
+.TP
+.B ask-chat
+netrune ask - Open the stateful Natural Ask terminal session.
+.TP
+.B ask-patterns
+netrune ask patterns - List supported retrieval and command-center examples.
+.TP
+.B ask-query
+netrune ask '<question>' - Run a deterministic question workflow over current inventory and relationship memory.
+.TP
+.B backup-diff
+netrune backup diff '<target>' - Diff latest changed backups for a target.
+.TP
+.B backup-history
+netrune backup history '<target>' - Show backup history for a target.
+.TP
+.B backup-run
+netrune backup run '<target>' - Online-only changed-only config backup.
+.TP
+.B backup-verify
+netrune backup verify - Review recorded backup checksums, paths, and statuses.
+.TP
+.B commands-list
+netrune commands list - List the structured command registry and safety metadata.
+.TP
+.B commands-run
+netrune commands run '<action>' --preview - Meta-action for previewing a registry command. Ask plans the selected action directly.
+.TP
+.B commands-show
+netrune commands show '<action>' - Show metadata for one registry action.
+.TP
+.B config-get
+netrune config get '<key>' - Read one effective non-secret setting.
+.TP
+.B config-paths
+netrune config paths - Show global and profile configuration files.
+.TP
+.B config-set
+netrune config set '<key>' '<value>' - Set one non-secret profile override.
+.TP
+.B config-show
+netrune config show - Show effective redacted profile settings.
+.TP
+.B config-unset
+netrune config unset '<key>' - Remove one profile override.
+.TP
+.B config-validate
+netrune config validate - Validate effective settings and legacy-secret state.
+.TP
+.B db-history
+netrune db history - Show recorded command executions with exit codes.
+.TP
+.B db-integrity
+netrune db integrity - Run SQLite integrity checks without modifying state.
+.TP
+.B db-migrate
+netrune db migrate - Apply SQLite schema migrations and reconcile derived state.
+.TP
+.B db-path
+netrune db path - Print the active SQLite database path.
+.TP
+.B db-prune
+netrune db prune - Delete operational history past its retention window; audit events are never pruned.
+.TP
+.B db-repair
+netrune db repair - Reindex and repair recoverable SQLite structures, then verify integrity.
+.TP
+.B db-status
+netrune db status - Show database paths, schema version, file sizes, and record counts.
+.TP
+.B db-vacuum
+netrune db vacuum - Compact the SQLite database.
+.TP
+.B device-config
+netrune device config '<target>' '<commands>' - Preview/confirmed config command wrapper, one device or a batch (comma list, --target, or --file; --commands-file, --skip-offline, --cisco/--aruba/--ruckus). Confirmed execution stays in the CLI.
+.TP
+.B device-identity
+netrune device identity '<target>' '<target2>' - Explain confidence and conflicts between two switch identity records.
+.TP
+.B device-inventory
+netrune device inventory '<target>' - Run the device inventory helper for one target.
+.TP
+.B device-show
+netrune device show '<target>' '<command>' - Run a policy-checked read-only show command.
+.TP
+.B device-ssh
+netrune device ssh '<target>' - Open an interactive SSH session in a terminal.
+.TP
+.B device-support
+netrune device support '<target>' - Classify a device and show driver capability maturity for Cisco, Aruba, or Ruckus.
+.TP
+.B device-trust-enroll
+netrune device trust enroll '<target>' --fingerprint '<fingerprint>' --confirm - Enroll only an out-of-band verified SSH host-key fingerprint.
+.TP
+.B device-trust-forget
+netrune device trust forget '<target>' --confirm - Remove a target from the managed SSH trust store.
+.TP
+.B device-trust-scan
+netrune device trust scan '<target>' - Retrieve SSH host keys and SHA-256 fingerprints without enrolling them.
+.TP
+.B device-trust-status
+netrune device trust status '<target>' - Inspect managed SSH host-key fingerprints without network access.
+.TP
+.B diagnose-cable
+netrune diagnose cable '<device>' on '<interface>' - Read the last recorded copper cable/TDR result without starting a test.
+.TP
+.B diagnose-cable-test
+netrune diagnose cable '<device>' on '<interface>' --test --dry-run - Preview a potentially disruptive copper TDR. Confirmed execution remains CLI-only.
+.TP
+.B diagnose-core-ping
+netrune diagnose core-ping '<target>' - Issue ICMP from the configured/selected core switch and store parsed latency.
+.TP
+.B diagnose-doctor
+netrune diagnose doctor - Audit diagnostic dependencies, routing, host limitations, trust, and core settings.
+.TP
+.B diagnose-filtering
+netrune diagnose filtering '<target>' - DNS/TLS/filtering diagnostics.
+.TP
+.B diagnose-interface
+netrune diagnose interface '<device>' on '<interface>' - Legacy interface rate monitor; command-center jobs default to one finite sample.
+.TP
+.B diagnose-latency
+netrune diagnose latency '<target>' - Run latency probing.
+.TP
+.B diagnose-port-health
+netrune diagnose port-health '<device>' on '<interface>' - Sample link negotiation and switch error-counter deltas.
+.TP
+.B diagnose-speed
+netrune diagnose speed - Measure this Netrune host's routed Internet path with verified profile-based testing.
+.TP
+.B diagnose-throughput
+netrune diagnose throughput '<target>' - Measure TCP receiver goodput between this client and a controlled iperf3 server.
+.TP
+.B excel-export
+netrune excel export '<workbook>' - Write a new inventory, summary, and migration tracker workbook from Netrune's inventory.
+.TP
+.B excel-inspect
+netrune excel inspect '<workbook>' - Match a workbook's rows to Netrune switches and report what is out of date, without writing.
+.TP
+.B excel-sync
+netrune excel sync '<workbook>' --dry-run - Fill and update a workbook's switch rows from Netrune's inventory. Apply explicitly in the CLI with --confirm.
+.TP
+.B health-attention
+netrune health attention - Show health, topology, AP movement, and backup items needing review.
+.TP
+.B health-check
+netrune health check '<target>' - Ping known/supplied devices and APs, then refresh health state.
+.TP
+.B health-offline
+netrune health offline '<target>' - List current offline entities, optionally filtered by target.
+.TP
+.B health-status
+netrune health status '<target>' - Read current canonical health, optionally filtered by target.
+.TP
+.B health-timeline
+netrune health timeline '<target>' - Read health state changes newest first.
+.TP
+.B ingest-channels
+netrune ingest channels - List declarative channels in the active profile.
+.TP
+.B ingest-history
+netrune ingest history - Show ingest runs newest first.
+.TP
+.B ingest-observations
+netrune ingest observations '<channel>' - Show append-only channel observations.
+.TP
+.B ingest-rejects
+netrune ingest rejects '<run_id>' - Show redacted quarantine metadata.
+.TP
+.B ingest-run
+netrune ingest run '<channel>' - Run one provenance-preserving ingest channel.
+.TP
+.B ingest-validate
+netrune ingest validate - Validate channel manifests without fetching records.
+.TP
+.B init-run
+netrune init - Create neutral profile state and check host capabilities.
+.TP
+.B inventory-activity
+netrune inventory activity '<target>' - Ping one or more inventory targets and report current activity.
+.TP
+.B inventory-details
+netrune inventory details '<target>' - Collect detailed inventory for one target.
+.TP
+.B inventory-export-flat
+netrune inventory export-flat - Export SQLite inventory back to legacy flat files.
+.TP
+.B inventory-forget
+netrune inventory forget '<target>' - Drop a device's inventory and derived state so the next scan adopts it afresh. Apply explicitly in the CLI with --confirm.
+.TP
+.B inventory-import-flat
+netrune inventory import-flat - Import legacy flat caches into SQLite.
+.TP
+.B inventory-list
+netrune inventory list '<target>' - Search current canonical device and AP inventory.
+.TP
+.B inventory-merge
+netrune inventory merge '<source>' '<target>' --reason '<reason>' --dry-run - Preview retiring an old device into a current device while preserving chronological evidence. Apply explicitly in the CLI with --confirm.
+.TP
+.B inventory-merges
+netrune inventory merges - List active manual device merges and their chronology.
+.TP
+.B inventory-scan
+netrune inventory scan '<target>' - Refresh switch/router inventory.
+.TP
+.B inventory-unmerge
+netrune inventory unmerge '<merge_id>' --reason '<reason>' - Prepare restoration of a manually retired source device. Apply explicitly in the CLI with --confirm.
+.TP
+.B lookup-core
+netrune lookup core '<target>' - Core IP/MAC lookup cached into memory.
+.TP
+.B lookup-mac
+netrune lookup mac '<target>' '<mac>' - MAC lookup from one target or from all current switches with target=all.
+.TP
+.B lookup-mac-all
+netrune lookup mac all '<mac>' - Search every online switch for a MAC and separate the access port it is attached to from the uplinks it transits.
+.TP
+.B lookup-mac-history
+netrune lookup mac history '<mac>' - Show newest-first identity and switch-port events for a MAC.
+.TP
+.B lookup-mac-inspect
+netrune lookup mac inspect '<mac>' - Correlate cached MAC identity, location, IP, vendor, and history evidence.
+.TP
+.B lookup-mac-locate
+netrune lookup mac locate '<mac>' - Search switch forwarding tables without requiring an endpoint IP.
+.TP
+.B lookup-mac-online
+netrune lookup mac online '<mac>' - Resolve the longest authoritative IEEE MA-L/MA-M/MA-S assignment with cache provenance.
+.TP
+.B lookup-mac-profile
+netrune lookup mac profile '<mac>' - Locate a MAC and profile likely edge ports with interface, LLDP/CDP, PoE, device-tracking, and core evidence.
+.TP
+.B lookup-mac-registry
+netrune lookup mac registry status - Show cached IEEE registry files, row counts, checksums, sources, and last refresh time.
+.TP
+.B lookup-mac-registry-refresh
+netrune lookup mac registry refresh - Refresh all IEEE public MAC assignment CSV registries into the private local cache.
+.TP
+.B lookup-mac-vendor
+netrune lookup mac vendor '<mac>' - Resolve a MAC prefix from the locally installed OUI database.
+.TP
+.B memory-device
+netrune memory device '<target>' - Show current identity relationships and history for a device.
+.TP
+.B memory-explain
+netrune memory explain '<target>' - Explain relationship sources, confidence, and last observations.
+.TP
+.B memory-export
+netrune memory export --json - Export all current relationships as JSON.
+.TP
+.B memory-ip
+netrune memory ip '<target>' - Show historical ownership and relationship events for an IP.
+.TP
+.B memory-mac
+netrune memory mac '<target>' - Show identity and movement history for a MAC address.
+.TP
+.B memory-port
+netrune memory port '<target>' '<interface>' - Show current and historical occupancy for a switch port.
+.TP
+.B memory-prune
+netrune memory prune - Memory pruning is intentionally disabled because history is retained by default.
+.TP
+.B memory-refresh
+netrune memory refresh - Recompute relationship memory from canonical state.
+.TP
+.B memory-switch
+netrune memory switch '<target>' - Show APs, neighbors, relationships, and timeline for a switch/site.
+.TP
+.B memory-timeline
+netrune memory timeline '<target>' - Search all relationship events newest first.
+.TP
+.B path-findings
+netrune path findings - Query findings across every recorded path run with a frequency summary.
+.TP
+.B path-history
+netrune path history '<endpoint>' --vlan '<vlan>' - Show chronological path inspections with reusable run references.
+.TP
+.B path-inspect
+netrune path inspect '<endpoint>' --vlan '<vlan>' - Inspect a bounded L2/L3 endpoint path with cached and live read-only evidence.
+.TP
+.B path-show
+netrune path show '<reference>' --vlan '<vlan>' - Open a path by full ID, unique prefix, endpoint/VLAN, or latest reference.
+.TP
+.B plugin-check
+netrune plugin check '<group>' - Load enabled plugins and isolate failures.
+.TP
+.B plugin-disable
+netrune plugin disable '<plugin_id>' - Disable one plugin in this profile.
+.TP
+.B plugin-enable
+netrune plugin enable '<plugin_id>' - Enable one trusted entry point in this profile.
+.TP
+.B plugin-groups
+netrune plugin groups - List stable entry-point groups and policy.
+.TP
+.B plugin-list
+netrune plugin list - Discover plugins without importing disabled code.
+.TP
+.B profile-create
+netrune profile create '<name>' - Create a neutral isolated profile.
+.TP
+.B profile-list
+netrune profile list - List isolated Netrune profiles.
+.TP
+.B profile-migrate-legacy
+netrune profile migrate-legacy '<name>' - Copy legacy netsnmp state without deleting the source.
+.TP
+.B profile-paths
+netrune profile paths - Show active profile XDG paths.
+.TP
+.B profile-show
+netrune profile show '<name>' - Show profile paths and non-secret settings.
+.TP
+.B profile-use
+netrune profile use '<name>' - Select the profile used by future commands.
+.TP
+.B secrets-delete
+netrune secrets delete '<name>' --confirm - Delete one named secret after confirmation.
+.TP
+.B secrets-import-ssh
+netrune secrets import-ssh - Import the legacy SSH vault into ssh/default/password.
+.TP
+.B secrets-list
+netrune secrets list - List named secrets without values.
+.TP
+.B secrets-set
+netrune secrets set '<name>' - Prompt for and encrypt one named secret.
+.TP
+.B secrets-status
+netrune secrets status - Show named-secret store security and lock state.
+.TP
+.B setup-local
+netrune setup local --community '<community>' - Stand up collector, storage, and dashboards on this machine.
+.TP
+.B setup-poller
+netrune setup poller --community '<community>' - Stand up a machine that collects and nothing else, from a community and an identity.
+.TP
+.B support-bundle
+netrune support bundle - Create a redacted support archive without inventory, secrets, raw evidence, or backups.
+.TP
+.B topology-changes
+netrune topology changes - Show recorded topology changes newest first.
+.TP
+.B topology-links
+netrune topology links - Show spanning-tree derived switch links with source confidence.
+.TP
+.B topology-scan
+netrune topology scan - Refresh LLDP/CDP topology.
+.TP
+.B topology-show
+netrune topology show '<target>' - Show topology, optionally querying one target.
+.TP
+.B topology-stp
+netrune topology stp '<target>' - Read spanning tree from switches and derive switch links from designated-bridge addresses.
+.TP
+.B topology-timeline
+netrune topology timeline '<target>' - Show neighbor-link history newest first.
+.TP
+.B traffic-backfill
+netrune traffic backfill - Import history collected before the metrics stack existed into VictoriaMetrics.
+.TP
+.B traffic-daemon
+netrune traffic daemon - Collect continuously until interrupted. Runs in a terminal you keep open.
+.TP
+.B traffic-dashboard
+netrune traffic dashboard - Print every dashboard's URL and whether the grapher is answering.
+.TP
+.B traffic-export
+netrune traffic export - Print this collector's stored readings as JSONL for another install to pull.
+.TP
+.B traffic-exporter
+netrune traffic exporter - Publish collected readings as Prometheus exposition on loopback for VictoriaMetrics to scrape.
+.TP
+.B traffic-health
+netrune traffic health - Show uptime, control-plane CPU, memory, temperature, and sessions for every switch with a watched port.
+.TP
+.B traffic-interfaces
+netrune traffic interfaces '<device>' - List the interfaces SNMP reports on a device.
+.TP
+.B traffic-interval
+netrune traffic interval '<target>' '<seconds>' - Change how often a target is collected.
+.TP
+.B traffic-list
+netrune traffic list - Show every monitored target with recent activity.
+.TP
+.B traffic-name
+netrune traffic name '<target>' '<name>' - Give a monitored port a name of your own for dashboards. History is unaffected.
+.TP
+.B traffic-pause
+netrune traffic pause '<target>' - Stop collecting a target without discarding its history.
+.TP
+.B traffic-ping
+netrune traffic ping '<target>' - Start collecting round-trip time and loss to one address.
+.TP
+.B traffic-poll
+netrune traffic poll - Collect one round from every enabled watch.
+.TP
+.B traffic-pull
+netrune traffic pull --remote '<remote>' - Fetch readings from a remote poller over SSH and merge them locally.
+.TP
+.B traffic-push
+netrune traffic push --to '<url>' - Send this collector's readings straight into a VictoriaMetrics import endpoint.
+.TP
+.B traffic-remote
+netrune traffic remote list - List configured remote pollers and when each was last pulled.
+.TP
+.B traffic-report
+netrune traffic report - Write a self-contained HTML report with charts for the collected window.
+.TP
+.B traffic-resume
+netrune traffic resume '<target>' - Start collecting a paused target again.
+.TP
+.B traffic-show
+netrune traffic show - Show throughput and latency as terminal sparklines.
+.TP
+.B traffic-stack
+netrune traffic stack init - Write the VictoriaMetrics, vmalert, and Perses provisioning files.
+.TP
+.B traffic-status
+netrune traffic status - Show whether a collector is running and when each target last produced a sample.
+.TP
+.B traffic-subscribe
+netrune traffic subscribe '<target>' --down '<down>' - Record what a service link is sold at, so utilisation is measured against the contract rather than the port's line rate.
+.TP
+.B traffic-unwatch
+netrune traffic unwatch '<target>' - Stop monitoring one or more targets and discard their samples.
+.TP
+.B traffic-verify
+netrune traffic verify - Walk the metrics pipeline link by link and report where it breaks.
+.TP
+.B traffic-watch
+netrune traffic watch '<device>' '<interface>' - Start collecting throughput for one interface over SNMP.
+.TP
+.B vault-lock
+netrune vault lock - End an open vault session immediately and erase the cached key.
+.TP
+.B vault-migrate
+netrune vault migrate - Convert a legacy passphrase GPG vault to terminal sudo-gated GPG without exposing the SSH password.
+.TP
+.B vault-set
+netrune vault set - Store a new SSH password in the terminal sudo-gated GPG vault.
+.TP
+.B vault-status
+netrune vault status - Show the SSH vault format, permissions, recording time, and non-prompting lock state.
+.TP
+.B vault-unlock
+netrune vault unlock - Authenticate once and hold the SSH vault open for a bounded window so a batch of commands does not re-prompt.
+.TP
+.B vlan-locate
+netrune vlan locate '<target>' '<vlan>' - Locate one or many VLANs from one or many roots; optional depth traverses LLDP/CDP-confirmed switch links.
+.TP
+.B vlan-propagation
+netrune vlan propagation '<target>' '<vlan>' - Trace a root-by-VLAN matrix with bounded breadth-first switch traversal.
+.TP
+.B vlan-set
+netrune vlan set '<target>' '<interface>' '<vlan_mode>' '<vlan>' - Back up, apply, and verify one typed access or trunk VLAN change through the audited core -- one device or (--file) a batch of independent target/interface/vlan lines.
+.TP
+.B workflow-ap-audit
+netrune workflow ap-audit - Refresh AP records and show AP moves.
+.TP
+.B workflow-backup-online
+netrune workflow backup-online '<target>' - Changed-only backups for online devices.
+.TP
+.B workflow-morning-check
+netrune workflow morning-check - Health, topology refresh, memory, filtering, and attention summary.
+.TP
+.B workflow-refresh-inventory
+netrune workflow refresh-inventory - Health, AP, topology, and memory refresh.
+.TP
+.B workflow-site-health
+netrune workflow site-health '<target>' - Latency and filtering checks for a target/site.
+.SH FILES
+Configuration follows XDG base directories and is isolated under profiles/PROFILE.
+.SH SECURITY
+Secret values use named encrypted storage and must not be placed in command arguments or TOML files.
+.SH SEE ALSO
+netrune help, netrune commands list, netrune diagnose doctor
+.\" Generated by generate_reference.py; do not edit by hand.

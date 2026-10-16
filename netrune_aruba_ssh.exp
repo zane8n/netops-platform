@@ -1,0 +1,8 @@
+#!/usr/bin/expect -f
+# Canonical launcher for the v8-compatible Aruba Expect implementation.
+set script_dir [file dirname [file normalize [info script]]]
+set command [list [file join $script_dir netops_aruba_ssh.exp]]
+foreach argument $argv {
+    lappend command $argument
+}
+exec {*}$command

@@ -527,7 +527,7 @@ class IngestManager:
                 )
                 yield from self._read_file_records(fixture)
                 return
-            if os.environ.get("NETOPS_ENABLE_EXPERIMENTAL_APIS") != "1":
+            if os.environ.get("NETRUNE_ENABLE_EXPERIMENTAL_APIS", os.environ.get("NETOPS_ENABLE_EXPERIMENTAL_APIS")) != "1":
                 raise RuntimeError(f"live {kind} ingest is fixture-gated until explicitly enabled")
         yield from self._read_http_records(manifest)
 

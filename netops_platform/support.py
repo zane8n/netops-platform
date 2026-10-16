@@ -82,9 +82,22 @@ def _built_in_driver_reports(app: Any) -> list[dict[str, Any]]:
     return [driver.report() for driver in registry.all() if driver.source == "built-in"]
 
 
+#: How many bundles to keep. Each is small and redacted, but nothing wrote
+#: over an old one or removed it, so a directory nobody looked at accumulated
+#: one file per invocation forever.
+KEPT_BUNDLES = 10
+
+
+def _rotate_support_bundles(directory: Path, keep: int) -> None:
+    bundles = sorted(directory.glob("netops-support-*.tar.gz"), key=lambda path: path.name)
+    for stale in bundles[:-keep] if keep > 0 else bundles:
+        stale.unlink(missing_ok=True)
+
+
 def create_support_bundle(app: Any, output: Path | None = None) -> dict[str, Any]:
     stamp = int(time.time())
-    output = Path(output or (app.paths.data_dir / "support" / f"netops-support-{stamp}.tar.gz"))
+    bundle_dir = app.paths.data_dir / "support"
+    output = Path(output or (bundle_dir / f"netops-support-{stamp}.tar.gz"))
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="netops-support-") as directory:
         root = Path(directory) / "netops-support"
@@ -147,6 +160,10 @@ def create_support_bundle(app: Any, output: Path | None = None) -> dict[str, Any
             archive.add(root, arcname=root.name)
         os.replace(staged, output)
         output.chmod(0o600)
+    # Scoped to this function's own default directory and its own naming
+    # pattern, so a bundle written to an explicit custom path elsewhere is
+    # never touched.
+    _rotate_support_bundles(bundle_dir, KEPT_BUNDLES)
     return {
         "ok": True,
         "path": str(output),

@@ -1,4 +1,4 @@
-"""Installed console-script entrypoint."""
+"""Console entrypoint implementation shared by Netrune compatibility names."""
 
 from __future__ import annotations
 

@@ -1,8 +1,8 @@
-# Migrating to NetOps 8.5
+# Migrating to Netrune 8.5
 
 ## Scope
 
-NetOps 8.5 changes local state ownership from shared legacy directories to
+Netrune 8.5 changes local state ownership from shared legacy directories to
 isolated XDG profiles, generalizes the SSH vault into named secrets, adds schema
 12 evidence tables, and replaces environment-specific defaults with neutral
 configuration. Existing noun-first commands and the command-first TUI remain.
@@ -13,9 +13,9 @@ rollback rehearsal.
 
 ## Before Upgrade
 
-1. Stop `netops serve` and finish or cancel active jobs.
-2. Record `netops version`, `netops db status`, and
-   `netops db integrity --json` in the change record.
+1. Stop `netrune serve` and finish or cancel active jobs.
+2. Record `netrune version`, `netrune db status`, and
+   `netrune db integrity --json` in the change record.
 3. Back up SQLite consistently, including WAL/SHM only after writers stop or by
    using the SQLite backup API.
 4. Back up legacy config, cache, known hosts, encrypted vault, matching
@@ -31,18 +31,18 @@ Do not place plaintext credentials in the migration bundle.
 Use a new virtual environment and keep the old one intact:
 
 ```bash
-python3 -m venv "$HOME/.local/share/netops/runtime-8.5"
-"$HOME/.local/share/netops/runtime-8.5/bin/python" -m pip install netops_platform-8.5.0b2-py3-none-any.whl
-"$HOME/.local/share/netops/runtime-8.5/bin/netops" version
-"$HOME/.local/share/netops/runtime-8.5/bin/netops" tui --help
+python3 -m venv "$HOME/.local/share/netrune/runtime-8.5"
+"$HOME/.local/share/netrune/runtime-8.5/bin/python" -m pip install netrune-8.5.0b3-py3-none-any.whl
+"$HOME/.local/share/netrune/runtime-8.5/bin/netrune" version
+"$HOME/.local/share/netrune/runtime-8.5/bin/netrune" --help
 ```
 
 ## Create and Import the Legacy Profile
 
 ```bash
-netops profile migrate-legacy legacy-local
-netops --profile legacy-local profile show
-netops --profile legacy-local config validate
+netrune profile migrate-legacy legacy-local
+netrune --profile legacy-local profile show
+netrune --profile legacy-local config validate
 ```
 
 Migration copies legacy non-secret files and database state when safe, merges
@@ -57,12 +57,12 @@ non-empty legacy `ssh_user` from `.env` into `netsnmp.conf` and records it under
 file did not contain it, configure it explicitly before testing device access:
 
 ```bash
-netops --profile legacy-local config set ssh_user operator
-netops --profile legacy-local config validate
+netrune --profile legacy-local config set ssh_user operator
+netrune --profile legacy-local config validate
 ```
 
 The command also handles a profile database that was initialized before the
-legacy copy. If that destination contains schema only, NetOps validates both
+legacy copy. If that destination contains schema only, Netrune validates both
 databases, stores a timestamped copy under `migration-backups/`, and atomically
 replaces it with the legacy database. A destination containing any operator or
 history rows is never replaced automatically. Inspect
@@ -73,14 +73,14 @@ Do not run a fresh initialization merely because inventory appears empty after
 an upgrade. First compare the active profile and database paths:
 
 ```bash
-netops profile list
-netops --profile legacy-local db status
-netops --profile legacy-local db integrity
+netrune profile list
+netrune --profile legacy-local db status
+netrune --profile legacy-local db integrity
 ```
 
 If the legacy source still exists, re-run `profile migrate-legacy`, validate
 the recovered profile, and activate it explicitly with
-`netops profile use legacy-local`.
+`netrune profile use legacy-local`.
 
 Place former operator aliases in the profile's `aliases.yaml`. Put address
 abbreviation and identity-prefix rules in profile configuration. Do not restore
@@ -91,28 +91,28 @@ those values to tracked defaults.
 Inspect without prompting:
 
 ```bash
-netops --profile legacy-local secrets status
-netops --profile legacy-local vault status
+netrune --profile legacy-local secrets status
+netrune --profile legacy-local vault status
 ```
 
 Import the existing SSH value:
 
 ```bash
-netops --profile legacy-local secrets import-ssh
-netops --profile legacy-local secrets list
+netrune --profile legacy-local secrets import-ssh
+netrune --profile legacy-local secrets list
 ```
 
 The original vault remains unchanged. New named values are set interactively:
 
 ```bash
-netops --profile legacy-local secrets set ingest/netbox/token
-netops --profile legacy-local secrets list
+netrune --profile legacy-local secrets set ingest/netbox/token
+netrune --profile legacy-local secrets list
 ```
 
-The named store uses sudo/PAM authentication and a root-only random key. NetOps
+The named store uses sudo/PAM authentication and a root-only random key. Netrune
 never stores or reuses the sudo password. On WSL2, a separately configured and
 reviewed Windows Hello PAM module can satisfy sudo authentication; this is an
-operating-system integration, not a NetOps feature.
+operating-system integration, not a Netrune feature.
 
 ## Database Migration
 
@@ -129,10 +129,10 @@ and backup chronology and adds:
 Validate:
 
 ```bash
-netops --profile legacy-local db status
-netops --profile legacy-local db integrity
-netops --profile legacy-local ingest history
-netops --profile legacy-local path history
+netrune --profile legacy-local db status
+netrune --profile legacy-local db integrity
+netrune --profile legacy-local ingest history
+netrune --profile legacy-local path history
 ```
 
 Do not point an older process at the schema 13 database. Rollback restores the
@@ -155,8 +155,8 @@ entire pre-upgrade database, not selected tables.
 
 ## Acceptance Checks
 
-1. `netops version` reports the expected beta without creating profile state.
-2. `netops init --profile acceptance` creates private XDG directories.
+1. `netrune version` reports the expected beta without creating profile state.
+2. `netrune init --profile acceptance` creates private XDG directories.
 3. Fresh-profile config has neutral defaults and does not expand a short IP.
 4. Legacy migration run twice is idempotent and source checksums do not change.
 5. Named-secret import leaves the old vault intact and never logs the value.

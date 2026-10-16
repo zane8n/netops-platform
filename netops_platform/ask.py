@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Deterministic natural-language query workflows for NetOps."""
+"""Deterministic natural-language query workflows for Netrune."""
 
 from __future__ import annotations
 
 import contextlib
-import ipaddress
 import json
 import re
 import shlex
@@ -12,7 +11,7 @@ import time
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from netops_platform.identity import ap_name_evidence, ap_rows_match, normalize_location_label, normalize_mac, reconcile_ap_rows
+from netops_platform.identity import ap_name_evidence, normalize_location_label, normalize_mac, reconcile_ap_rows
 
 
 QUESTION_PATTERNS: List[Dict[str, Any]] = [
@@ -306,7 +305,7 @@ QUESTION_PATTERNS: List[Dict[str, Any]] = [
 
 QUESTION_PATTERNS.append({
     "intent": "command_plan",
-    "purpose": "Plan, preview, clarify, and safely execute registered NetOps commands.",
+    "purpose": "Plan, preview, clarify, and safely execute registered Netrune commands.",
     "examples": [
         "Run a fast health check for ZONE34",
         "Refresh the AP and topology inventory",
@@ -369,6 +368,13 @@ class NaturalAskEngine:
         return {"ok": True, "removed": before}
 
     def resolve_alias(self, text: str) -> str:
+        """The alias a phrase names, tolerating spacing and punctuation.
+
+        An input that merely *appears inside* a known phrase is not that phrase.
+        Matching that direction means the word "admin" resolves to whatever
+        device "camp admin office" names, and a short word an operator typed
+        becomes a specific switch they never asked for.
+        """
         query = self._compact(text)
         if not query:
             return ""
@@ -376,13 +382,20 @@ class NaturalAskEngine:
         for row in self.aliases():
             phrase = str(row.get("phrase") or "")
             key = self._compact(phrase)
-            if key and (key == query or key in query or query in key):
+            if key and (key == query or key in query):
                 score = len(key) + (100 if key == query else 0)
                 if score > best[0]:
                     best = (score, str(row.get("target") or ""))
         return best[1]
 
-    def apply_aliases(self, text: str) -> str:
+    def apply_aliases(self, text: str, strict: bool = False) -> str:
+        """Rewrite known phrases into their targets.
+
+        `strict` is for naming a device rather than asking a question. A
+        question may be phrased loosely and still mean one place; a target is an
+        identity, and guessing which device someone meant is how a command lands
+        on the wrong switch.
+        """
         output = re.sub(r"\s+", " ", str(text or "").strip())
         if not output:
             return ""
@@ -395,7 +408,7 @@ class NaturalAskEngine:
             pattern = re.compile(r"(?<![a-z0-9])" + r"\s+".join(re.escape(part) for part in phrase.split()) + r"(?![a-z0-9])", re.I)
             output, count = pattern.subn(target, output)
             changed = changed or bool(count)
-        if not changed:
+        if not changed and not strict:
             resolved = self.resolve_alias(output)
             if resolved:
                 return resolved
@@ -604,7 +617,7 @@ class NaturalAskEngine:
             f"I could not resolve {target!r} to a current {kind}. Try a shorter site/name fragment or add a deterministic alias.",
             [],
             self._workflow(("inventory", f"search current {kind} records for {target}")),
-            suggestions=["netops ask patterns", f"netops ask alias set {target!r} '<known name>'"],
+            suggestions=["netrune ask patterns", f"netrune ask alias set {target!r} '<known name>'"],
         )
 
     def _ambiguous(self, question: str, intent: str, target: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -773,7 +786,7 @@ class NaturalAskEngine:
             mac = normalize_mac(ap.get("mac"))
             if mac:
                 display_mac = ".".join(mac[index:index + 4] for index in range(0, 12, 4))
-                answer += f". A live read-only search is available with `netops lookup mac all {display_mac}`"
+                answer += f". A live read-only search is available with `netrune lookup mac all {display_mac}`"
             answer += "."
         else:
             answer = f"{self._entity_label(ap)} {tense} on {switch}, port {port}."
@@ -1403,7 +1416,6 @@ class NaturalAskEngine:
             ("db-repair", r"\brepair\b.*\b(?:sqlite|database|db)\b", 90),
             ("db-vacuum", r"\b(?:vacuum|compact)\b.*\b(?:sqlite|database|db)\b", 90),
             ("db-migrate", r"\b(?:migrate|initialize|init)\b.*\b(?:sqlite|database|db)\b", 90),
-            ("jobs-cancel", r"\bcancel\b.*\bjob\b", 90),
             ("serve-run", r"\b(?:start|run|launch)\b.*\b(?:server|webui|api)\b", 89),
         ]
         scores: Dict[str, int] = {}
@@ -1571,10 +1583,6 @@ class NaturalAskEngine:
                 scope_match = re.search(r"\b(?:on|at|from|within)\s+(?:the\s+)?(?:switch|site)?\s*([A-Za-z0-9_.:/-]{2,80})\b", question, re.I)
                 if scope_match and scope_match.group(1).lower() not in {"all", "every"}:
                     args["scope"] = self.apply_aliases(scope_match.group(1).strip())
-        elif action in {"jobs-show", "jobs-logs", "jobs-cancel"}:
-            job = re.search(r"\bjob\s+(?:id\s+)?([a-z0-9_-]{4,64})\b", question, re.I)
-            if job:
-                args["job_id"] = job.group(1)
         elif action in {"ask-alias-set", "ask-alias-remove"}:
             quoted = re.findall(r"['\"]([^'\"]{1,160})['\"]", question)
             if quoted:
@@ -1623,9 +1631,9 @@ class NaturalAskEngine:
                 args["core"] = self.apply_aliases(core_match.group(1).strip())
 
         target_actions = {
-            "inventory-scan", "inventory-list", "inventory-show", "inventory-details", "inventory-activity",
+            "inventory-scan", "inventory-list", "inventory-details", "inventory-activity",
             "health-check", "health-status", "health-offline", "health-timeline", "ap-list", "ap-unjoined", "ap-on-switch", "ap-timeline",
-            "topology-show", "topology-neighbors", "topology-timeline", "memory-switch", "memory-device", "memory-ip", "memory-mac",
+            "topology-show", "topology-timeline", "memory-switch", "memory-device", "memory-ip", "memory-mac",
             "memory-timeline", "memory-explain", "backup-run", "backup-history", "backup-diff", "diagnose-latency", "diagnose-filtering",
             "diagnose-core-ping", "diagnose-throughput", "lookup-core", "device-ssh", "device-inventory", "device-trust-status", "device-trust-scan", "device-trust-enroll", "device-trust-forget", "workflow-backup-online", "workflow-site-health",
         }
@@ -1680,7 +1688,7 @@ class NaturalAskEngine:
             answer = f"Prepared {spec.label}. Review the exact command and safety class before execution."
         confirmation = spec.effective_safety_class() != "read-only"
         if status == "ready":
-            execution_hint = f"netops ask --execute{' --confirm' if confirmation else ''} {shlex.quote(question)}"
+            execution_hint = f"netrune ask --execute{' --confirm' if confirmation else ''} {shlex.quote(question)}"
         else:
             execution_hint = preview.get("command") if spec.output_type == "terminal" else ""
         alternatives = []
@@ -1785,7 +1793,7 @@ class NaturalAskEngine:
     def ask(self, question: str, opts: Any, session: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         raw = str(question or "").strip()
         if not raw:
-            return {"ok": False, "error": "Ask a question or run: netops ask patterns"}
+            return {"ok": False, "error": "Ask a question or run: netrune ask patterns"}
         question = self._normalize_question(raw)
         lower = question.lower()
         limit = max(1, min(int(getattr(opts, "limit", 100) or 100), 500))

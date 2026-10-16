@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NetOps Unified Platform - Shared Function Library v5.3.1
+# Netrune Unified Platform - Shared Function Library v5.3.1
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "This is a library and should not be run directly."
@@ -9,33 +9,34 @@ fi
 NETOPS_INSTALL_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 if [[ -r "$NETOPS_INSTALL_DIR/VERSION" ]]; then
     NETOPS_VERSION=$(< "$NETOPS_INSTALL_DIR/VERSION")
-elif command -v netops >/dev/null 2>&1; then
-    NETOPS_VERSION=$(netops --version 2>/dev/null | awk 'NR==1 {print $2}')
+elif command -v netrune >/dev/null 2>&1; then
+    NETOPS_VERSION=$(netrune --version 2>/dev/null | awk 'NR==1 {print $2}')
     [[ -n "$NETOPS_VERSION" ]] || NETOPS_VERSION="unknown"
 else
     NETOPS_VERSION="unknown"
 fi
 export NETOPS_VERSION
 
-NETOPS_CONFIG_ROOT="${XDG_CONFIG_HOME:-${HOME}/.config}/netops"
-NETOPS_STATE_ROOT="${XDG_STATE_HOME:-${HOME}/.local/state}/netops"
-NETOPS_CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/netops"
-NETOPS_DATA_ROOT="${XDG_DATA_HOME:-${HOME}/.local/share}/netops"
+NETOPS_CONFIG_ROOT="${XDG_CONFIG_HOME:-${HOME}/.config}/netrune"
+NETOPS_STATE_ROOT="${XDG_STATE_HOME:-${HOME}/.local/state}/netrune"
+NETOPS_CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/netrune"
+NETOPS_DATA_ROOT="${XDG_DATA_HOME:-${HOME}/.local/share}/netrune"
+NETOPS_PROFILE="${NETRUNE_PROFILE:-${NETOPS_PROFILE:-}}"
 if [[ -z "${NETOPS_PROFILE:-}" && -r "${NETOPS_CONFIG_ROOT}/active_profile" ]]; then
     IFS= read -r NETOPS_PROFILE < "${NETOPS_CONFIG_ROOT}/active_profile" || true
 fi
 NETOPS_PROFILE="${NETOPS_PROFILE:-default}"
 [[ "$NETOPS_PROFILE" =~ ^[a-z0-9][a-z0-9_-]{0,47}$ ]] || NETOPS_PROFILE="default"
-CONFIG_DIR="${NETOPS_CONFIG_DIR:-${NETOPS_CONFIG_ROOT}/profiles/${NETOPS_PROFILE}}"
-CACHE_DIR="${NETOPS_CACHE_DIR:-${NETOPS_CACHE_ROOT}/profiles/${NETOPS_PROFILE}}"
-if [[ -n "${NETOPS_CONFIG_DIR:-}" || -n "${NETOPS_CACHE_DIR:-}" ]]; then
-    STATE_DIR="${NETOPS_STATE_DIR:-${CACHE_DIR}}"
-    DATA_DIR="${NETOPS_DATA_DIR:-${STATE_DIR}}"
+CONFIG_DIR="${NETRUNE_CONFIG_DIR:-${NETOPS_CONFIG_DIR:-${NETOPS_CONFIG_ROOT}/profiles/${NETOPS_PROFILE}}}"
+CACHE_DIR="${NETRUNE_CACHE_DIR:-${NETOPS_CACHE_DIR:-${NETOPS_CACHE_ROOT}/profiles/${NETOPS_PROFILE}}}"
+if [[ -n "${NETRUNE_CONFIG_DIR:-}${NETOPS_CONFIG_DIR:-}${NETRUNE_CACHE_DIR:-}${NETOPS_CACHE_DIR:-}" ]]; then
+    STATE_DIR="${NETRUNE_STATE_DIR:-${NETOPS_STATE_DIR:-${CACHE_DIR}}}"
+    DATA_DIR="${NETRUNE_DATA_DIR:-${NETOPS_DATA_DIR:-${STATE_DIR}}}"
 else
-    STATE_DIR="${NETOPS_STATE_DIR:-${NETOPS_STATE_ROOT}/profiles/${NETOPS_PROFILE}}"
-    DATA_DIR="${NETOPS_DATA_DIR:-${NETOPS_DATA_ROOT}/profiles/${NETOPS_PROFILE}}"
+    STATE_DIR="${NETRUNE_STATE_DIR:-${NETOPS_STATE_DIR:-${NETOPS_STATE_ROOT}/profiles/${NETOPS_PROFILE}}}"
+    DATA_DIR="${NETRUNE_DATA_DIR:-${NETOPS_DATA_DIR:-${NETOPS_DATA_ROOT}/profiles/${NETOPS_PROFILE}}}"
 fi
-LOG_FILE="${NETOPS_LOG_FILE:-${STATE_DIR}/netops.log}"
+LOG_FILE="${NETRUNE_LOG_FILE:-${NETOPS_LOG_FILE:-${STATE_DIR}/netrune.log}}"
 
 CONFIG_FILE="${CONFIG_DIR}/netsnmp.conf"
 ENV_FILE="${CONFIG_DIR}/.env"
@@ -43,9 +44,9 @@ DEVICES_DB="${CACHE_DIR}/devices.db"
 AP_DB="${CACHE_DIR}/ap_devices.db"
 NEIGHBOR_DB="${CACHE_DIR}/neighbor.db"
 SNMP_CACHE_FILE="${CACHE_DIR}/snmp_cache.db"
-PASSWORD_FILE="${NETOPS_PASSWORD_FILE:-${HOME}/.ssh/sshpass_cache.gpg}"
-SECRETS_FILE="${NETOPS_SECRETS_FILE:-${DATA_DIR}/secrets.gpg}"
-SECRETS_META_FILE="${NETOPS_SECRETS_META_FILE:-${STATE_DIR}/secrets.meta}"
+PASSWORD_FILE="${NETRUNE_PASSWORD_FILE:-${NETOPS_PASSWORD_FILE:-${HOME}/.ssh/sshpass_cache.gpg}}"
+SECRETS_FILE="${NETRUNE_SECRETS_FILE:-${NETOPS_SECRETS_FILE:-${DATA_DIR}/secrets.gpg}}"
+SECRETS_META_FILE="${NETRUNE_SECRETS_META_FILE:-${NETOPS_SECRETS_META_FILE:-${STATE_DIR}/secrets.meta}}"
 SUDO_VAULT_MAGIC="NETOPS-SUDO-GPG-V1"
 NAMED_SECRETS_MAGIC="NETOPS-NAMED-SECRETS-GPG-V1"
 SUDO_VAULT_KEY_ROOT="/etc/netops/vault-keys"
@@ -62,7 +63,9 @@ declare -gA CONFIG=(
     ["ap_switch_timeout"]="45"
     ["enable_logging"]="true"
     ["ssh_host_key_mode"]="accept-new"
+    ["management_vlan"]="4"
     ["vault_password_ttl_hours"]="72"
+    ["vault_session_ttl_minutes"]="15"
     ["vault_expiry_window_minutes"]="20"
     ["vault_expiry_warning_hours"]="12"
     ["core_switch_ip"]=""
@@ -79,6 +82,9 @@ declare -gA CONFIG=(
     ["ruckus_vsz_model_oids"]=""
     ["ruckus_ap_model_snmp"]="false"
     ["default_backup_dir"]="${DATA_DIR}/backups"
+    ["device_writes_enabled"]="false"
+    ["device_certified_firmware"]=""
+    ["device_certified_firmware_min"]=""
 )
 
 declare -gA CREDS=(
@@ -122,7 +128,7 @@ load_config() {
 save_config() {
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_FILE" << EOF
-# NetOps Unified Configuration (Public)
+# Netrune Unified Configuration (Public)
 subnets="${CONFIG[subnets]}"
 ping_timeout="${CONFIG[ping_timeout]}"
 snmp_timeout="${CONFIG[snmp_timeout]}"
@@ -151,12 +157,15 @@ ruckus_vsz_ip="${CONFIG[ruckus_vsz_ip]}"
 ruckus_vsz_model_oids="${CONFIG[ruckus_vsz_model_oids]}"
 ruckus_ap_model_snmp="${CONFIG[ruckus_ap_model_snmp]}"
 default_backup_dir="${CONFIG[default_backup_dir]}"
+device_writes_enabled="${CONFIG[device_writes_enabled]}"
+device_certified_firmware="${CONFIG[device_certified_firmware]}"
+device_certified_firmware_min="${CONFIG[device_certified_firmware_min]}"
 EOF
     chmod 600 "$CONFIG_FILE"
 }
 
 run_config_wizard() {
-    echo -e "\033[1;36m--- NetOps Configuration Wizard ---\033[0m"
+    echo -e "\033[1;36m--- Netrune Configuration Wizard ---\033[0m"
     read -rp "Enter target subnets [${CONFIG[subnets]}]: " in_val; [[ -n "$in_val" ]] && CONFIG[subnets]="$in_val"
     read -rp "Enter Core Switch IP (for Topology/Arp) [${CONFIG[core_switch_ip]}]: " in_val; [[ -n "$in_val" ]] && CONFIG[core_switch_ip]="$in_val"
     
@@ -165,7 +174,7 @@ run_config_wizard() {
     read -rp "Ruckus vSZ IP [${CONFIG[ruckus_vsz_ip]}]: " in_val; [[ -n "$in_val" ]] && CONFIG[ruckus_vsz_ip]="$in_val"
 
     save_config
-    echo -e "\n\033[0;32m[SUCCESS] Public configuration saved. Use 'netops secrets set' for credentials.\033[0m"
+    echo -e "\n\033[0;32m[SUCCESS] Public configuration saved. Use 'netrune secrets set' for credentials.\033[0m"
 }
 
 init_config() {
@@ -215,7 +224,7 @@ db_update_device() {
 
     local ingest_helper="${NETOPS_INGEST_HELPER:-$(netops_python_helper_path netops_ingest netops_ingest.py)}"
     [[ -r "$ingest_helper" ]] || {
-        echo "NetOps inventory ingest helper is unavailable: $ingest_helper" >&2
+        echo "Netrune inventory ingest helper is unavailable: $ingest_helper" >&2
         return 10
     }
     (
@@ -237,6 +246,15 @@ db_get_device() { awk -F'|' -v ip="$1" '$1 == ip { print; exit }' "$DEVICES_DB" 
 snmp_cache_get() {
     local ip="$1"
     awk -F'|' -v ip="$ip" '$1==ip && $2!="" {print $2; exit}' "$SNMP_CACHE_FILE" 2>/dev/null
+}
+
+# Which SNMP transport last answered for this host, if it answered recently.
+# A v3 credential that an ACL blocks costs a full timeout on every poll, so a
+# recent v2c success is treated as evidence that v3 is not reachable here.
+snmp_cache_version() {
+    local ip="$1" now
+    now=$(date +%s)
+    awk -F'|' -v ip="$ip" -v now="$now" '$1==ip && $3!="" && (now - $4) < 86400 {print $3; exit}' "$SNMP_CACHE_FILE" 2>/dev/null
 }
 
 snmp_cache_put() {
@@ -263,12 +281,26 @@ _build_snmp3_opts() {
     fi
 }
 
+# Why an SNMP read could not even be attempted. Empty when it could.
+#
+# "No response" and "nothing to send" look identical from the outside and lead
+# somewhere very different: one is a device or an ACL, the other is a profile
+# with no credentials in it. Reporting them the same way sends an operator to
+# check a switch that was answering all along.
+netops_snmp_credential_gap() {
+    local ip="$1"
+    [[ -n "$(snmp_cache_get "$ip")" ]] && return 0
+    [[ -n "${CREDS[communities]}" ]] && return 0
+    [[ "${CREDS[snmp_version]}" == "v3" && -n "${CREDS[snmpv3_user]}" ]] && return 0
+    printf 'no SNMP credentials are configured. %s has no cached community and none are set for this profile. Add one to %s as: communities="<community>"' "$ip" "$ENV_FILE"
+}
+
 netops_snmp_get() {
     local ip="$1" oid="$2" custom_comm="$3"
     local timeout_val="${CONFIG[snmp_timeout]}"
     local res cached_comm
     
-    if [[ "${CREDS[snmp_version]}" == "v3" && -n "${CREDS[snmpv3_user]}" && -z "$custom_comm" ]]; then
+    if [[ "${CREDS[snmp_version]}" == "v3" && -n "${CREDS[snmpv3_user]}" && -z "$custom_comm" && "$(snmp_cache_version "$ip")" != "v2c" ]]; then
         local -a v3_opts=()
         _build_snmp3_opts v3_opts
         res=$(timeout "$timeout_val" snmpget "${v3_opts[@]}" -Oqv "$ip" "$oid" 2>/dev/null)
@@ -293,6 +325,47 @@ netops_snmp_get() {
     return 1
 }
 
+# Fetch several OIDs in one SNMP request and emit "OID<TAB>value" lines.
+# A per-interface counter set is ten OIDs; asking for them one at a time turns a
+# single round trip into ten, which dominates the cost of a collection round.
+netops_snmp_get_many() {
+    local ip="$1"; shift
+    (($# > 0)) || return 2
+    local timeout_val="${CONFIG[snmp_timeout]}"
+    local res cached_comm comm
+    local -a oids=("$@")
+
+    _snmp_many_emit() {
+        # -OQnU keeps one varbind per line as "OID = value" without type noise.
+        awk -F' = ' 'NF >= 2 { name=$1; sub(/^[ \t]+/, "", name); value=$2
+                               gsub(/^"|"$/, "", value)
+                               printf "%s\t%s\n", name, value }'
+    }
+
+    if [[ "${CREDS[snmp_version]}" == "v3" && -n "${CREDS[snmpv3_user]}" && "$(snmp_cache_version "$ip")" != "v2c" ]]; then
+        local -a v3_opts=()
+        _build_snmp3_opts v3_opts
+        res=$(timeout "$timeout_val" snmpget "${v3_opts[@]}" -OQ "$ip" "${oids[@]}" 2>/dev/null)
+        if [[ $? -eq 0 && -n "$res" ]]; then printf '%s\n' "$res" | _snmp_many_emit; return 0; fi
+    fi
+
+    cached_comm=$(snmp_cache_get "$ip")
+    if [[ -n "$cached_comm" ]]; then
+        res=$(timeout "$timeout_val" snmpget -v2c -c "$cached_comm" -OQ "$ip" "${oids[@]}" 2>/dev/null)
+        if [[ $? -eq 0 && -n "$res" ]]; then printf '%s\n' "$res" | _snmp_many_emit; return 0; fi
+    fi
+    for comm in ${CREDS[communities]}; do
+        [[ -n "$cached_comm" && "$comm" == "$cached_comm" ]] && continue
+        res=$(timeout "$timeout_val" snmpget -v2c -c "$comm" -OQ "$ip" "${oids[@]}" 2>/dev/null)
+        if [[ $? -eq 0 && -n "$res" ]]; then
+            snmp_cache_put "$ip" "$comm" "v2c"
+            printf '%s\n' "$res" | _snmp_many_emit
+            return 0
+        fi
+    done
+    return 1
+}
+
 netops_snmp_walk() {
     local ip="$1" oid="$2" extra_flags="$3" custom_comm="$4"
     local timeout_val="15"
@@ -300,7 +373,7 @@ netops_snmp_walk() {
     local -a walk_flags=()
     [[ -n "$extra_flags" ]] && read -r -a walk_flags <<< "$extra_flags"
     
-    if [[ "${CREDS[snmp_version]}" == "v3" && -n "${CREDS[snmpv3_user]}" && -z "$custom_comm" ]]; then
+    if [[ "${CREDS[snmp_version]}" == "v3" && -n "${CREDS[snmpv3_user]}" && -z "$custom_comm" && "$(snmp_cache_version "$ip")" != "v2c" ]]; then
         local -a v3_opts=()
         _build_snmp3_opts v3_opts
         res=$(timeout "$timeout_val" snmpwalk "${v3_opts[@]}" "${walk_flags[@]}" "$ip" "$oid" 2>/dev/null)
@@ -331,12 +404,12 @@ cloud_sync_allowed() {
 
 sync_password_from_gist() {
     echo "Error: remote SSH vault sync is disabled because the legacy implementation exported credential material to a third party." >&2
-    echo "Use the local encrypted vault managed by 'netops vault set'." >&2
+    echo "Use the local encrypted vault managed by 'netrune vault set'." >&2
     return 1
 }
 
 sync_password_from_gist_upload() {
-    echo "Error: remote SSH vault sync is disabled; NetOps will not export the local credential vault." >&2
+    echo "Error: remote SSH vault sync is disabled; Netrune will not export the local credential vault." >&2
     return 1
 }
 
@@ -503,9 +576,9 @@ _sudo_vault_authenticate() {
         return 1
     fi
     if [[ -r /etc/pam.d/sudo ]] && /usr/bin/grep -q 'pam_wsl_hello\.so' /etc/pam.d/sudo 2>/dev/null; then
-        echo "Unlocking the NetOps SSH vault with Windows Hello (sudo/PAM)..." >&2
+        echo "Unlocking the Netrune SSH vault with Windows Hello (sudo/PAM)..." >&2
     else
-        echo "Unlocking the NetOps SSH vault with sudo authentication..." >&2
+        echo "Unlocking the Netrune SSH vault with sudo authentication..." >&2
     fi
     if ! "$sudo_bin" -v; then
         exec {auth_fd}>&-
@@ -533,7 +606,7 @@ _sudo_vault_prepare_key() {
         return 1
     fi
     "$sudo_bin" -n /usr/bin/install -d -m 0700 "$key_dir" || {
-        echo "Error: Could not create the root-only NetOps vault-key directory." >&2
+        echo "Error: Could not create the root-only Netrune vault-key directory." >&2
         return 1
     }
     if ! "$sudo_bin" -n /bin/sh -c '
@@ -548,16 +621,16 @@ _sudo_vault_prepare_key() {
             /usr/bin/mv -f "$tmp" "$key"
             trap - EXIT HUP INT TERM
         fi
-    ' netops-vault-key "$key_file"; then
-        echo "Error: Could not create the root-only NetOps vault key." >&2
+    ' netrune-vault-key "$key_file"; then
+        echo "Error: Could not create the root-only Netrune vault key." >&2
         return 1
     fi
     if ! "$sudo_bin" -n /usr/bin/test -s "$key_file" 2>/dev/null; then
-        echo "Error: The newly created root-only NetOps vault key is empty: $key_file" >&2
+        echo "Error: The newly created root-only Netrune vault key is empty: $key_file" >&2
         return 1
     fi
     if ! _sudo_vault_key_is_secure; then
-        echo "Error: The root-only NetOps vault key failed security validation: ${SUDO_VAULT_KEY_ERROR:-unknown reason}: $key_file" >&2
+        echo "Error: The root-only Netrune vault key failed security validation: ${SUDO_VAULT_KEY_ERROR:-unknown reason}: $key_file" >&2
         return 1
     fi
 }
@@ -569,7 +642,7 @@ _sudo_vault_require_key() {
     key_file=$(_sudo_vault_key_file)
     if ! "$sudo_bin" -n /usr/bin/test -s "$key_file" 2>/dev/null; then
         echo "Error: Root vault key is missing: $key_file" >&2
-        echo "Restore the key from backup, or run 'netops vault set' to replace the vault." >&2
+        echo "Restore the key from backup, or run 'netrune vault set' to replace the vault." >&2
         return 1
     fi
     _sudo_vault_key_is_secure || {
@@ -602,7 +675,7 @@ _sudo_vault_key_broker() {
 
         if [ ! -e "$key" ]; then
             printf "Error: Root vault key is missing: %s\n" "$key" >&2
-            printf "Restore the key from backup, or run '\''netops vault set'\'' to replace the vault.\n" >&2
+            printf "Restore the key from backup, or run '\''netrune vault set'\'' to replace the vault.\n" >&2
             exit 1
         fi
         [ -s "$key" ] || fail "key is empty"
@@ -635,12 +708,149 @@ _sudo_vault_key_broker() {
         [ "$key_owner" = "$dir_owner" ] || fail "key owner UID is $key_owner, key directory owner UID is $dir_owner"
 
         /usr/bin/cat "$key"
-    ' netops-vault-key-reader "$key_file" "$key_dir" "$owner_anchor")
+    ' netrune-vault-key-reader "$key_file" "$key_dir" "$owner_anchor")
     "${command[@]}"
+}
+
+# --- Vault session -----------------------------------------------------------
+# Every vault read otherwise costs one sudo authentication, which on a Windows
+# Hello PAM stack means a biometric prompt per process. An unlocked session
+# holds the root vault key in a memory-backed, user-private file for a bounded
+# window so a batch of commands authenticates once.
+#
+# The tradeoff is explicit: during the window the key is readable by this user
+# rather than only by root. It is therefore opt-in through `vault unlock`,
+# never started implicitly, capped in duration, and refused unless the backing
+# directory is tmpfs owned by this user at mode 0700 so it cannot reach a disk.
+
+_vault_session_dir() {
+    local base="${NETRUNE_VAULT_SESSION_DIR:-${NETOPS_VAULT_SESSION_DIR:-${XDG_RUNTIME_DIR:-}}}"
+    [[ -n "$base" ]] || return 1
+    printf '%s/netrune-vault' "${base%/}"
+}
+
+_vault_session_ttl_bounds() {
+    printf '%s %s' "${NETRUNE_VAULT_SESSION_MIN_MINUTES:-1}" "${NETRUNE_VAULT_SESSION_MAX_MINUTES:-480}"
+}
+
+_vault_session_path_is_secure() {
+    local path="$1" want_mode="$2" fstype owner mode
+    fstype=$(/usr/bin/stat -f -c %T -- "$path" 2>/dev/null) || {
+        VAULT_SESSION_ERROR="could not read filesystem type"
+        return 1
+    }
+    case "$fstype" in
+        tmpfs|ramfs) ;;
+        *)
+            VAULT_SESSION_ERROR="stored on '$fstype'; a memory-backed tmpfs is required"
+            return 1
+            ;;
+    esac
+    owner=$(/usr/bin/stat -c %u -- "$path" 2>/dev/null) || return 1
+    mode=$(/usr/bin/stat -c %a -- "$path" 2>/dev/null) || return 1
+    if [[ "$owner" != "$(id -u)" ]]; then
+        VAULT_SESSION_ERROR="owner UID is $owner, expected $(id -u)"
+        return 1
+    fi
+    if [[ "$mode" != "$want_mode" ]]; then
+        VAULT_SESSION_ERROR="mode is $mode, expected $want_mode"
+        return 1
+    fi
+}
+
+_vault_session_clear() {
+    local dir
+    dir=$(_vault_session_dir) || return 0
+    [[ -d "$dir" ]] || return 0
+    if [[ -f "$dir/key" ]]; then
+        command shred -u -- "$dir/key" 2>/dev/null || command rm -f -- "$dir/key" 2>/dev/null || true
+    fi
+    command rm -f -- "$dir/expires-at" 2>/dev/null || true
+    command rmdir -- "$dir" 2>/dev/null || true
+    return 0
+}
+
+_vault_session_expires_at() {
+    local dir expires
+    dir=$(_vault_session_dir) || return 1
+    [[ -s "$dir/expires-at" ]] || return 1
+    IFS= read -r expires < "$dir/expires-at" || return 1
+    [[ "$expires" =~ ^[0-9]+$ ]] || return 1
+    printf '%s' "$expires"
+}
+
+# Emit the cached key when a session is live. Any validation failure purges the
+# session and falls back to sudo rather than trusting a suspect file.
+_vault_session_read() {
+    local dir expires now_ts
+    dir=$(_vault_session_dir) || return 1
+    [[ -d "$dir" && -s "$dir/key" && -s "$dir/expires-at" ]] || return 1
+    if ! _vault_session_path_is_secure "$dir" 700 || ! _vault_session_path_is_secure "$dir/key" 600; then
+        echo "Warning: Discarding the vault session (${VAULT_SESSION_ERROR:-failed validation})." >&2
+        _vault_session_clear
+        return 1
+    fi
+    expires=$(_vault_session_expires_at) || { _vault_session_clear; return 1; }
+    now_ts=$(date +%s)
+    if (( now_ts >= expires )); then
+        _vault_session_clear
+        return 1
+    fi
+    command cat -- "$dir/key"
+}
+
+# Store the key read from stdin for ttl_minutes. Returns the expiry on stdout.
+_vault_session_store() {
+    local ttl_minutes="$1" dir key_tmp expires min_ttl max_ttl
+    read -r min_ttl max_ttl < <(_vault_session_ttl_bounds)
+    [[ "$ttl_minutes" =~ ^[0-9]+$ ]] || {
+        echo "Error: Vault session minutes must be a whole number." >&2
+        return 2
+    }
+    if (( ttl_minutes < min_ttl || ttl_minutes > max_ttl )); then
+        echo "Error: Vault session minutes must be between $min_ttl and $max_ttl." >&2
+        return 2
+    fi
+    dir=$(_vault_session_dir) || {
+        echo "Error: No per-user runtime directory is available for a vault session." >&2
+        echo "Set XDG_RUNTIME_DIR to a tmpfs path owned by this user, then retry." >&2
+        return 1
+    }
+    if ! mkdir -p -- "$dir" 2>/dev/null; then
+        echo "Error: Could not create the vault session directory: $dir" >&2
+        return 1
+    fi
+    chmod 700 -- "$dir" 2>/dev/null || return 1
+    if ! _vault_session_path_is_secure "$dir" 700; then
+        echo "Error: Refusing to cache the vault key: ${VAULT_SESSION_ERROR:-failed validation}: $dir" >&2
+        _vault_session_clear
+        return 1
+    fi
+    key_tmp="$dir/key.tmp.$$"
+    (
+        umask 077
+        command cat > "$key_tmp"
+    ) || { command rm -f -- "$key_tmp" 2>/dev/null; return 1; }
+    if [[ ! -s "$key_tmp" ]]; then
+        command rm -f -- "$key_tmp" 2>/dev/null
+        echo "Error: The vault key could not be read; the session was not started." >&2
+        return 1
+    fi
+    chmod 600 -- "$key_tmp" 2>/dev/null || { command rm -f -- "$key_tmp" 2>/dev/null; return 1; }
+    command mv -f -- "$key_tmp" "$dir/key" || { command rm -f -- "$key_tmp" 2>/dev/null; return 1; }
+    expires=$(( $(date +%s) + ttl_minutes * 60 ))
+    ( umask 077; printf '%s\n' "$expires" > "$dir/expires-at" ) || { _vault_session_clear; return 1; }
+    chmod 600 -- "$dir/expires-at" 2>/dev/null || true
+    printf '%s' "$expires"
 }
 
 _sudo_vault_emit_key() {
     local sudo_bin key_dir key_file owner_anchor auth_dir auth_lock auth_fd="" broker_mode="interactive"
+
+    # A live session answers without touching sudo, which is the entire point.
+    if [[ ! "${NETRUNE_VAULT_SESSION_BYPASS:-false}" =~ ^(1|true|yes)$ ]] && _vault_session_read; then
+        return 0
+    fi
     sudo_bin=$(_vault_sudo_bin) || {
         echo "Error: 'sudo' is required for the sudo-gated SSH vault." >&2
         return 1
@@ -675,9 +885,9 @@ _sudo_vault_emit_key() {
             return 1
         fi
         if [[ -r /etc/pam.d/sudo ]] && /usr/bin/grep -q 'pam_wsl_hello\.so' /etc/pam.d/sudo 2>/dev/null; then
-            echo "Unlocking the NetOps SSH vault with Windows Hello (sudo/PAM)..." >&2
+            echo "Unlocking the Netrune SSH vault with Windows Hello (sudo/PAM)..." >&2
         else
-            echo "Unlocking the NetOps SSH vault with sudo authentication..." >&2
+            echo "Unlocking the Netrune SSH vault with sudo authentication..." >&2
         fi
     elif [[ "${NETOPS_VAULT_NONINTERACTIVE:-false}" =~ ^(1|true|yes)$ ]]; then
         broker_mode="noninteractive"
@@ -699,7 +909,7 @@ _sudo_vault_gpg() {
         return 1
     }
     if ! exec {key_fd}< <(_sudo_vault_emit_key); then
-        echo "Error: Could not read the root-only NetOps vault key." >&2
+        echo "Error: Could not read the root-only Netrune vault key." >&2
         return 1
     fi
     key_reader_pid=$!
@@ -767,7 +977,7 @@ _named_secrets_write_payload() {
     secret_dir=$(dirname "$SECRETS_FILE")
     mkdir -p "$secret_dir" "$(dirname "$SECRETS_META_FILE")" || return 1
     chmod 700 "$secret_dir" "$(dirname "$SECRETS_META_FILE")" 2>/dev/null || true
-    staged=$(mktemp "$secret_dir/.netops-secrets.XXXXXX") || return 1
+    staged=$(mktemp "$secret_dir/.netrune-secrets.XXXXXX") || return 1
     chmod 600 "$staged" || { rm -f -- "$staged"; return 1; }
     printf '%s\n' "$NAMED_SECRETS_MAGIC" > "$staged"
     if ! printf '%s' "$payload" | _sudo_vault_gpg encrypt >> "$staged"; then
@@ -956,7 +1166,7 @@ _write_sudo_vault() {
     vault_dir=$(dirname "$PASSWORD_FILE")
     mkdir -p "$vault_dir" || return 1
     chmod 700 "$vault_dir" 2>/dev/null || true
-    staged=$(mktemp "$vault_dir/.netops-vault.XXXXXX") || return 1
+    staged=$(mktemp "$vault_dir/.netrune-vault.XXXXXX") || return 1
     chmod 600 "$staged" || { rm -f -- "$staged"; return 1; }
     printf '%s\n' "$SUDO_VAULT_MAGIC" > "$staged"
     if ! printf '%s' "$secret" | _sudo_vault_gpg encrypt >> "$staged"; then
@@ -984,7 +1194,7 @@ _write_legacy_vault() {
     vault_dir=$(dirname "$PASSWORD_FILE")
     mkdir -p "$vault_dir" || return 1
     chmod 700 "$vault_dir" 2>/dev/null || true
-    staged=$(mktemp "$vault_dir/.netops-vault.XXXXXX") || return 1
+    staged=$(mktemp "$vault_dir/.netrune-vault.XXXXXX") || return 1
     if ! printf '%s' "$secret" | "$gpg_bin" --no-options --quiet --batch --yes \
             --pinentry-mode loopback --passphrase-fd 3 --symmetric \
             --cipher-algo AES256 -o "$staged" - 3<<<"$vault_passphrase"; then
@@ -1008,7 +1218,7 @@ _decrypt_legacy_vault() {
         printf '%s' "$decrypted"
         return 0
     fi
-    _read_secret_value passphrase "Enter existing NetOps GPG vault passphrase: " || return 1
+    _read_secret_value passphrase "Enter existing Netrune GPG vault passphrase: " || return 1
     [[ -n "$passphrase" ]] || { echo "Error: GPG vault passphrase cannot be empty." >&2; return 1; }
     if ! decrypted=$(printf '%s\n' "$passphrase" | "$gpg_bin" --no-options --quiet \
             --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
@@ -1077,7 +1287,7 @@ migrate_password_store() {
         return 0
     fi
     if [[ ! -f "$PASSWORD_FILE" ]]; then
-        echo "Error: Password file not found. Run 'netops vault set'." >&2
+        echo "Error: Password file not found. Run 'netrune vault set'." >&2
         return 1
     fi
     recorded_at=$(stat -c '%Y' "$PASSWORD_FILE" 2>/dev/null || true)
@@ -1171,11 +1381,11 @@ _warn_vault_credential_lifecycle() {
             ;;
         EXPIRY_WINDOW)
             echo "Warning: The switch password is inside its estimated expiry window ($(_vault_iso_time "$window_start") to $(_vault_iso_time "$window_end"))." >&2
-            echo "If authentication is rejected, update it with 'netops vault set' or 'connect -p'." >&2
+            echo "If authentication is rejected, update it with 'netrune vault set' or 'connect -p'." >&2
             ;;
         EXPIRED)
             echo "Warning: The stored switch password is likely expired; expected expiry was $(_vault_iso_time "$expected_at")." >&2
-            echo "Update it with 'netops vault set' or 'connect -p'." >&2
+            echo "Update it with 'netrune vault set' or 'connect -p'." >&2
             ;;
     esac
 }
@@ -1233,7 +1443,7 @@ get_password_from_store() {
         return 0
     fi
     if [[ ! -f "$PASSWORD_FILE" ]]; then
-        echo "Error: SSH password not found. Run 'netops vault set'." >&2
+        echo "Error: SSH password not found. Run 'netrune vault set'." >&2
         return 1
     fi
     chmod 600 "$PASSWORD_FILE" 2>/dev/null || {
@@ -1248,7 +1458,7 @@ get_password_from_store() {
             return 1
         fi
     else
-        echo "Notice: legacy GPG vault detected. Run 'netops vault migrate' to use one sudo prompt without graphical pinentry." >&2
+        echo "Notice: legacy GPG vault detected. Run 'netrune vault migrate' to use one sudo prompt without graphical pinentry." >&2
         if ! decrypted=$(_decrypt_legacy_vault); then
             echo "Error: Failed to decrypt the legacy password vault." >&2
             SSHPASS=""
@@ -1262,10 +1472,46 @@ get_password_from_store() {
 }
 
 unlock_password_store() {
-    get_password_from_store || return $?
+    local ttl_minutes="${1:-}" expires session_dir
+    if [[ -z "$ttl_minutes" ]]; then
+        ttl_minutes=$(_vault_policy_integer "${CONFIG[vault_session_ttl_minutes]:-15}" 15 1 480)
+    fi
+
+    # Read the key through sudo once, deliberately bypassing any existing
+    # session so that unlocking always re-authenticates and the new window is
+    # anchored to a fresh authentication rather than silently extended.
+    session_dir=$(_vault_session_dir) || {
+        echo "Error: No per-user runtime directory is available for a vault session." >&2
+        return 1
+    }
+    if ! expires=$(NETRUNE_VAULT_SESSION_BYPASS=1 _sudo_vault_emit_key | _vault_session_store "$ttl_minutes"); then
+        _vault_session_clear
+        return 1
+    fi
+
+    # Prove the cached key actually opens the vault before promising a window.
+    if ! get_password_from_store; then
+        _vault_session_clear
+        echo "Error: The vault did not decrypt with the cached key; the session was discarded." >&2
+        return 1
+    fi
     SSHPASS=""
     unset SSHPASS
-    echo "SSH vault verified. Sudo authentication will be reused for its configured timeout." >&2
+    echo "SSH vault unlocked until $(date -d "@$expires" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '%s' "$expires") (${ttl_minutes}m)." >&2
+    echo "The key is held in memory at $session_dir and is readable by this user until then." >&2
+    echo "Run 'netrune vault lock' to end the session early." >&2
+}
+
+lock_password_store() {
+    local expires
+    expires=$(_vault_session_expires_at 2>/dev/null) || expires=""
+    _vault_session_clear
+    if [[ -n "$expires" ]]; then
+        echo "SSH vault session ended; the next command will authenticate again." >&2
+    else
+        echo "No SSH vault session was active." >&2
+    fi
+    return 0
 }
 
 netops_platform_family() {
@@ -1279,7 +1525,7 @@ netops_platform_family() {
         printf 'ruckus-fastiron'
     elif [[ "$evidence" =~ (AOS-CX|ARUBAOS-CX|ARUBA[[:space:]-]*CX|CX[[:space:]-]*(4100|6000|6100|6200|6300|6400|8100|8320|8325|8360|8400|9300|10000)) ]]; then
         printf 'aruba-aos-cx'
-    elif [[ "$evidence" =~ (ARUBA|PROCURVE|HEWLETT[[:space:]-]*PACKARD|HP[[:space:]]+(2530|2540|2920|2930|3810|5400)) ]]; then
+    elif [[ "$evidence" =~ (ARUBA|PROCURVE|HEWLETT[[:space:]-]*PACKARD|HP[[:space:]]+(2530|2540|2920|2930|3810|5400|J[A-Z]?[0-9]{3,4}[A-Z])) ]]; then
         printf 'aruba-aos-switch'
     elif [[ "$evidence" =~ (CISCO|IOS|IOS-XE|NX-OS|CATALYST|NEXUS) ]]; then
         printf 'cisco-ios'
@@ -1386,7 +1632,7 @@ _ssh_user_value() {
     local user="${CREDS[ssh_user]:-${CONFIG[ssh_user]:-}}"
     if [[ -z "$user" ]]; then
         echo "Error: SSH username is not configured for this profile." >&2
-        echo "Set it with: netops config set ssh_user <username>" >&2
+        echo "Set it with: netrune config set ssh_user <username>" >&2
         return 6
     fi
     if ((${#user} > 255)) || [[ "$user" =~ [[:space:]] ]]; then
@@ -1450,7 +1696,7 @@ netops_ssh_prompted() {
     "$wrapper" "$ip" "$@"
 }
 
-export -f db_update_device db_get_device snmp_cache_get snmp_cache_put netops_snmp_get netops_snmp_walk _build_snmp3_opts netops_ssh netops_ssh_prompted _build_ssh_opts _ssh_user_value netops_platform_family ssh_failure_kind ssh_failure_offer
+export -f db_update_device db_get_device snmp_cache_get snmp_cache_put snmp_cache_version netops_snmp_get_many netops_snmp_get netops_snmp_walk _build_snmp3_opts netops_ssh netops_ssh_prompted _build_ssh_opts _ssh_user_value netops_platform_family ssh_failure_kind ssh_failure_offer
 
 resolve_targets() {
     local input="$1" scope="${2:-DEVICES}" allow_multiple="${3:-false}"

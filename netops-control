@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# NetOps Autonomous C&C (Crowler Engine)
-source "$(dirname "$(realpath "$0")")/netops-lib.sh"
+# Netrune Autonomous C&C (Crowler Engine)
+source "$(dirname "$(realpath "$0")")/netrune-lib.sh"
 set -o pipefail
 
 CONTROL_INTERRUPTED=false
@@ -120,14 +120,16 @@ control_sql_quote() {
 }
 
 control_sqlite_db() {
-    if [[ -n "${NETOPS_SQLITE_DB:-}" ]]; then
+    if [[ -n "${NETRUNE_SQLITE_DB:-}" ]]; then
+        echo "$NETRUNE_SQLITE_DB"
+    elif [[ -n "${NETOPS_SQLITE_DB:-}" ]]; then
         echo "$NETOPS_SQLITE_DB"
+    elif [[ -n "${NETRUNE_CACHE_DIR:-}" ]]; then
+        echo "$NETRUNE_CACHE_DIR/netrune.sqlite3"
     elif [[ -n "${NETOPS_CACHE_DIR:-}" ]]; then
-        echo "$NETOPS_CACHE_DIR/netops.sqlite3"
-    elif [[ ${EUID:-$(id -u)} -eq 0 ]]; then
-        echo "/var/cache/netsnmp/netops.sqlite3"
+        echo "$NETOPS_CACHE_DIR/netrune.sqlite3"
     else
-        echo "${HOME}/.cache/netsnmp/netops.sqlite3"
+        echo "$CACHE_DIR/netrune.sqlite3"
     fi
 }
 
@@ -248,23 +250,38 @@ device_marked_offline() {
     [[ "$status" == "OFFLINE" ]]
 }
 
-filter_backup_targets() {
-    local kept=() ip
+# Drop devices the last sweep could not reach. Each one costs a full SSH
+# timeout -- about five seconds -- so a job spanning an estate pays that for
+# every unreachable device before doing any work.
+#
+# Only when fanning out. A device named on its own is always attempted, because
+# naming it is how an operator asks whether it has come back.
+filter_offline_targets() {
+    local kept=() skipped=() ip
+    [[ "${INCLUDE_OFFLINE:-false}" == "true" ]] && return 0
+    if [[ ${#TARGETS[@]} -le 1 && "${ONLINE_ONLY:-false}" != "true" ]]; then
+        return 0
+    fi
     for ip in "${TARGETS[@]}"; do
         if device_marked_offline "$ip"; then
-            if [[ "${JSON_OUTPUT:-false}" == "true" ]]; then
-                echo "[WARN] Skipped $ip (marked OFFLINE in discovery DB)" >&2
-            else
-                warn "Skipped $ip (marked OFFLINE in discovery DB)"
-            fi
+            skipped+=("$ip")
             continue
         fi
         kept+=("$ip")
     done
+    ((${#skipped[@]})) || return 0
 
     TARGETS=("${kept[@]}")
+    local note="Skipped ${#skipped[@]} device(s) recorded offline: ${skipped[*]}"
+    if [[ "${JSON_OUTPUT:-false}" == "true" ]]; then
+        echo "[WARN] $note" >&2
+    else
+        warn "$note"
+        warn "Add --include-offline to try them, or refresh with 'netrune inventory activity'."
+    fi
+
     if [[ ${#TARGETS[@]} -eq 0 && "${DRY_RUN:-false}" != "true" ]]; then
-        warn "No online targets remain for backup."
+        warn "No online targets remain."
         exit 0
     fi
 }
@@ -278,29 +295,32 @@ refine_inventory_from_ssh() {
     local hostname=$(echo "$raw_data" | grep -iE "^(hostname|sysname)" | awk '{print $2}' | tr -d '\r' | head -1)
     [[ -z "$hostname" ]] && hostname="$prompt_host"
     
-    local model="Unknown"
+    local model="N/A"
     local serial="N/A"
     local mac="N/A"
 
-    if [[ "$family" == "cisco-ios" ]]; then
-        model=$(echo "$raw_data" | grep -i "Model Number" | awk -F: '{print $2}' | tr -d ' \r' | head -1)
-        [[ -z "$model" ]] && model=$(echo "$raw_data" | grep "Model number" | awk '{print $NF}' | tr -d '\r' | head -1)
-        serial=$(echo "$raw_data" | grep -i "Motherboard Serial Number" | awk -F: '{print $2}' | tr -d ' \r' | head -1)
-        mac=$(echo "$raw_data" | grep -ioE "([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}" | head -1)
-        plat="Cisco IOS"
-    elif [[ "$family" == "aruba-aos-switch" || "$family" == "aruba-aos-cx" ]]; then
-        local sys_name=$(echo "$raw_data" | grep -i "System Name" | awk -F':' '{print $2}' | tr -d ' \r' | head -1)
-        [[ -n "$sys_name" ]] && hostname="$sys_name"
-
-        model=$(echo "$raw_data" | grep -iE "(Aruba|HP|ProCurve)" | grep -iE "(Switch|revision)" | head -1 | sed 's/.*\(Aruba[a-zA-Z0-9 -+]*Switch\).*/\1/' | tr -d '\r')
-        [[ -z "$model" ]] && model=$(echo "$raw_data" | grep -i "Aruba" | awk '{print $1" "$2" "$3}' | head -1 | tr -d '\r')
-        
-        serial=$(echo "$raw_data" | grep -i "Serial" | grep -v "Number" | awk -F':' '{print $2}' | tr -d ' \r' | head -1)
-        mac=$(echo "$raw_data" | grep -i "Base MAC" | awk -F':' '{print $2":"$3":"$4":"$5":"$6":"$7}' | tr -d ' \r' | head -1)
-        
-        # Extracted MAC via precise regex to avoid garbage output trailing
-        mac=$(echo "$raw_data" | grep -ioE "([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{6}-[0-9A-Fa-f]{6}" | head -1)
-        [[ "$family" == "aruba-aos-cx" ]] && plat="Aruba AOS-CX" || plat="Aruba AOS-S"
+    if [[ "$family" == "cisco-ios" || "$family" == "aruba-aos-switch" || "$family" == "aruba-aos-cx" ]]; then
+        if [[ "$family" != "cisco-ios" ]]; then
+            # AOS-S labels this "System Name"; AOS-CX labels it "Hostname" and
+            # indents it, so an anchored match on the generic patterns misses it.
+            local sys_name
+            sys_name=$(printf '%s\n' "$raw_data" | sed -nE 's/^[[:space:]]*(System Name|Hostname)[[:space:]]*:[[:space:]]*([^[:space:]]+).*$/\2/Ip' | head -1 | tr -d ' \r')
+            [[ -n "$sys_name" ]] && hostname="$sys_name"
+        fi
+        # Only labelled fields count: Cisco's Model Number / Motherboard Serial
+        # Number / Base Ethernet MAC Address, Aruba's show modules Chassis line,
+        # Serial Number, and Base MAC Addr. This runs after every SSH job, and
+        # an unlabelled MAC in `show interfaces` is not the switch's base MAC.
+        local ingest_helper hardware
+        ingest_helper="${NETOPS_INGEST_HELPER:-$(netops_python_helper_path netops_ingest netops_ingest.py)}"
+        if [[ -r "$ingest_helper" ]] && hardware=$(printf '%s\n' "$raw_data" | python3 "$ingest_helper" parse-cli-hardware --family "$family"); then
+            IFS='|' read -r model serial mac <<< "$hardware"
+        fi
+        case "$family" in
+            cisco-ios) plat="Cisco IOS" ;;
+            aruba-aos-cx) plat="Aruba AOS-CX" ;;
+            *) plat="Aruba AOS-S" ;;
+        esac
     elif [[ "$family" == "ruckus-fastiron" ]]; then
         local sys_name
         sys_name=$(echo "$raw_data" | sed -nE 's/^[[:space:]]*(System name|Hostname)[[:space:]]*:[[:space:]]*//Ip' | head -1 | tr -d '\r')
@@ -311,7 +331,7 @@ refine_inventory_from_ssh() {
         plat="Ruckus FastIron"
     fi
     
-    db_update_device "$ip" "${hostname:-N/A}" "$plat" "${model:-Unknown}" "${serial:-N/A}" "${mac:-N/A}" "SSH"
+    db_update_device "$ip" "${hostname:-N/A}" "$plat" "${model:-N/A}" "${serial:-N/A}" "${mac:-N/A}" "SSH"
 }
 
 format_mac_for_plat() {
@@ -337,11 +357,26 @@ format_mac_for_plat() {
 }
 
 generate_command_stream() {
-    local plat="$1" mode="$2" helper
-    shift 2
+    local plat="$1" mode="$2" model="$3" hostname="$4" helper
+    shift 4
     helper="${NETOPS_DEVICE_DRIVER_HELPER:-$(netops_python_helper_path netops_devices netops_devices.py)}"
     [[ -r "$helper" ]] || { error "Device driver helper is unavailable: $helper"; return 5; }
-    python3 "$helper" stream --platform "$plat" --action "$mode" -- "$@"
+    local extra_args=()
+    if [[ "$mode" == "config" ]]; then
+        # Only "config" actually enforces the certified-firmware gate inside
+        # command_plan(), so only it needs these -- model/hostname round out
+        # the evidence text (device_certified_firmware/_min match against
+        # platform+model+hostname, and $plat alone is often just a generic
+        # vendor label like "Cisco IOS" with no version/model in it).
+        [[ "${CONFIG[device_writes_enabled]:-false}" =~ ^(1|true|yes|on)$ ]] && extra_args+=(--writes-enabled)
+        extra_args+=(--certified-patterns "${CONFIG[device_certified_firmware]:-}")
+        extra_args+=(--certified-floors "${CONFIG[device_certified_firmware_min]:-}")
+        # --skip-verification (from netrune device config --danger-skip-verification)
+        # bypasses firmware certification specifically -- device_writes_enabled
+        # is still required, same as every other config write.
+        [[ "${SKIP_VERIFICATION:-false}" == "true" ]] && extra_args+=(--skip-verification)
+    fi
+    python3 "$helper" stream --platform "$plat" --model "$model" --hostname "$hostname" --action "$mode" "${extra_args[@]}" -- "$@"
 }
 
 sanitize_output() {
@@ -532,6 +567,16 @@ analyze_locate_vlan() {
     fi
 }
 
+control_management_vlan() {
+    # Prefer what the device states. `show vlan` prints the field and leaves it
+    # blank when unset, and the running-config states it explicitly; only fall
+    # back to VLAN 4 when the device says nothing at all.
+    local raw_data="$1" vlan=""
+    vlan=$(printf '%s\n' "$raw_data" | sed -nE 's/^[[:space:]]*Management VLAN[[:space:]]*:[[:space:]]*([0-9]+)[[:space:]]*$/\1/Ip' | head -1)
+    [[ -z "$vlan" ]] && vlan=$(printf '%s\n' "$raw_data" | sed -nE 's/^[[:space:]]*management-vlan[[:space:]]+([0-9]+).*/\1/Ip' | head -1)
+    printf '%s' "${vlan:-4}"
+}
+
 analyze_propagation() {
     local ip="$1" vlan_id="$2" raw_data="$3" is_deep="$4" plat="$5"
     local family
@@ -580,7 +625,9 @@ analyze_propagation() {
         }
         ')
     elif [[ "$family" == "aruba-aos-switch" || "$family" == "ruckus-fastiron" ]]; then
-        trunk_report=$(echo "$raw_data" | awk -v target="$vlan_id" '
+        local mgmt_vlan
+        mgmt_vlan=$(control_management_vlan "$raw_data")
+        trunk_report=$(echo "$raw_data" | awk -v target="$vlan_id" -v mgmt="${mgmt_vlan:-4}" '
         function add_port(port, tagged, range, p) {
             gsub(/^[ \t]+|[ \t]+$/, "", port)
             if (port == "" || tolower(port) == "ethernet" || tolower(port) == "to") return
@@ -590,10 +637,31 @@ analyze_propagation() {
                 return
             }
             if_vlans[port] = if_vlans[port] "," vlan_id
-            if (vlan_id == 4) vlan4_ifs[port] = 1
+            if (vlan_id == mgmt) mgmt_ifs[port] = 1
             if (vlan_id == target) if_has_target[port] = 1
         }
-        BEGIN { in_vlan = 0; vlan_id = "" }
+        BEGIN { in_vlan = 0; vlan_id = ""; stp_ports = 0; root_port = "" }
+
+        # Spanning-tree header and port table. A forwarding, non-edge port is
+        # facing other infrastructure, which is a fact rather than the guess
+        # that a port carrying many VLANs must be an uplink.
+        /^[ \t]*CST Root Port[ \t]*:/ { split($0, rp, ":"); gsub(/[ \t]/, "", rp[2]); root_port = rp[2]; next }
+        /\|/ {
+            n = split($0, seg, "|")
+            if (n >= 3) {
+                hn = split(seg[1], head, " ")
+                mn = split(seg[2], mid, " ")
+                tn = split(seg[3], tail, " ")
+                if (hn >= 1 && mn >= 3 && tn >= 3 && head[1] ~ /^[0-9]/ &&
+                    mid[3] ~ /^(Forwarding|Blocking|Disabled|Learning|Listening)$/) {
+                    stp_seen[head[1]] = mid[3]
+                    stp_ports++
+                    if (mid[3] == "Forwarding" && tolower(tail[tn]) == "no") stp_uplink[head[1]] = 1
+                    next
+                }
+            }
+        }
+
         /^vlan / {
             in_vlan = 1
             vlan_id = $2
@@ -608,13 +676,23 @@ analyze_propagation() {
             for (i in ports) if (ports[i] ~ /[0-9]/) add_port(ports[i])
         }
         END {
-            for (iface in vlan4_ifs) {
-                split(if_vlans[iface], vlans, ",")
-                count = 0
-                for (v in vlans) if (vlans[v] != "") count++
-                if (count > 5) {
+            if (stp_ports > 0) {
+                for (iface in stp_uplink) {
                     status = (if_has_target[iface] ? "YES" : "NO")
-                    print iface "|" status
+                    role = (iface == root_port) ? "root" : "designated"
+                    print iface "|" status "|" role "|" (mgmt_ifs[iface] ? "YES" : "NO")
+                }
+            } else {
+                # No spanning-tree output: fall back to the VLAN-count heuristic
+                # so FastIron and STP-disabled switches still report something.
+                for (iface in mgmt_ifs) {
+                    split(if_vlans[iface], vlans, ",")
+                    count = 0
+                    for (v in vlans) if (vlans[v] != "") count++
+                    if (count > 5) {
+                        status = (if_has_target[iface] ? "YES" : "NO")
+                        print iface "|" status "|heuristic|YES"
+                    }
                 }
             }
         }')
@@ -641,23 +719,340 @@ analyze_propagation() {
     if [[ -z "$trunk_report" ]]; then
         out+="    \033[1;33mNo valid uplinks found.\033[0m"
     else
-        while IFS='|' read -r port status; do
+        # The per-port lines keep their exact established shape: netrune parses
+        # them, and anything after the status or the `-> Adj Switch` clause
+        # stops the line from matching. Extra detail goes in summary lines.
+        local mgmt_gaps="" selection="" root_port=""
+        while IFS='|' read -r port status role carries_mgmt; do
+            [[ -n "$role" && -z "$selection" ]] && selection="$role"
+            [[ "$role" == "root" ]] && root_port="$port"
             if [[ "$status" == "YES" ]]; then
-                out+="    - $port: \033[0;32mPROPAGATED\033[0m\n"
+                out+="    - $port: \033[0;32mPROPAGATED\033[0m"
             else
                 out+="    - $port: \033[0;31mMISSING\033[0m"
-                if [[ "$is_deep" == "true" && -f "$NEIGHBOR_DB" ]]; then
-                    local n_entry=$(grep -i "^$ip|.*|${port}|" "$NEIGHBOR_DB" | head -1)
-                    if [[ -n "$n_entry" ]]; then
-                        local n_ip=$(echo "$n_entry" | cut -d'|' -f6)
-                        local n_name=$(echo "$n_entry" | cut -d'|' -f4)
-                        [[ "$n_ip" != "?.?.?.?" ]] && out+=" -> \033[1;33mAdj Switch: $n_name ($n_ip)\033[0m\n" || out+=" -> Adj Switch: $n_name\n"
-                    else out+="\n"; fi
-                else out+="\n"; fi
             fi
+            if [[ "$is_deep" == "true" && -f "$NEIGHBOR_DB" ]]; then
+                local n_entry=$(grep -i "^$ip|.*|${port}|" "$NEIGHBOR_DB" | head -1)
+                if [[ -n "$n_entry" ]]; then
+                    local n_ip=$(echo "$n_entry" | cut -d'|' -f6)
+                    local n_name=$(echo "$n_entry" | cut -d'|' -f4)
+                    [[ "$n_ip" != "?.?.?.?" ]] && out+=" -> \033[1;33mAdj Switch: $n_name ($n_ip)\033[0m" || out+=" -> Adj Switch: $n_name"
+                fi
+            fi
+            out+="\n"
+            [[ "$carries_mgmt" == "NO" ]] && mgmt_gaps+="$port "
         done <<< "$trunk_report"
+        if [[ "$selection" == "heuristic" ]]; then
+            out+="  \033[0;36mUplink selection:\033[0m VLAN-count heuristic (no spanning-tree output)\n"
+        elif [[ -n "$selection" ]]; then
+            out+="  \033[0;36mUplink selection:\033[0m spanning tree (forwarding, non-edge ports)"
+            [[ -n "$root_port" ]] && out+=" | root port: $root_port"
+            out+="\n"
+        fi
+        if [[ -n "$mgmt_gaps" ]]; then
+            out+="  \033[1;33mManagement VLAN ${mgmt_vlan:-4} is not carried on:\033[0m ${mgmt_gaps% }\n"
+        fi
     fi
     echo -e "${out%\\n}"
+}
+
+# --- SNMP interface counters -------------------------------------------------
+# One bulk walk per switch answers for every port, which is what makes polling
+# an estate on a short interval affordable. SSH would need a login per sample.
+
+snmp_interface_index() {
+    # Emit "ifIndex|ifName|ifAlias" for every interface on the switch.
+    local ip="$1" names aliases
+    names=$(netops_snmp_walk "$ip" "IF-MIB::ifName" "-Oqn")
+    if [[ -z "$names" ]]; then
+        local gap
+        gap=$(netops_snmp_credential_gap "$ip")
+        [[ -n "$gap" ]] && { echo "ERROR: $gap" >&2; return 1; }
+        echo "ERROR: no SNMP response for ifName" >&2
+        return 1
+    fi
+    aliases=$(netops_snmp_walk "$ip" "IF-MIB::ifAlias" "-Oqn")
+    awk -v aliases="$aliases" '
+        BEGIN {
+            split(aliases, alias_lines, "\n")
+            for (i in alias_lines) {
+                if (match(alias_lines[i], /\.([0-9]+) /, m)) {
+                    idx = m[1]
+                    value = alias_lines[i]
+                    sub(/^[^ ]+ /, "", value)
+                    gsub(/"/, "", value)
+                    alias_of[idx] = value
+                }
+            }
+        }
+        {
+            if (match($0, /\.([0-9]+) /, m)) {
+                idx = m[1]
+                name = $0
+                sub(/^[^ ]+ /, "", name)
+                gsub(/"/, "", name)
+                printf "%s|%s|%s\n", idx, name, (idx in alias_of ? alias_of[idx] : "")
+            }
+        }' <<< "$names"
+}
+
+snmp_interface_counters() {
+    # Emit one pipe-delimited line per requested interface:
+    #   ifIndex|inOctets|outOctets|speedBps|operStatus|ifName|inErrors|outErrors|inDiscards|outDiscards|adminStatus|counterWidth
+    # plus a leading "sysUpTime|<ticks>" line so a device restart is visible.
+    #
+    # Counters are emitted raw and monotonic. Rates are not computed here: the
+    # consumer decides whether to derive them, and a time-series database does
+    # it better than a shell function can.
+    local ip="$1"; shift
+    local -a wanted=()
+    IFS=',' read -r -a wanted <<< "${1:-}"
+    ((${#wanted[@]} > 0)) || { echo "ERROR: no interface index requested" >&2; return 2; }
+
+    local -a oids=("DISMAN-EVENT-MIB::sysUpTimeInstance")
+    local index
+    for index in "${wanted[@]}"; do
+        [[ "$index" =~ ^[0-9]+$ ]] || continue
+        # 64-bit octet counters: the 32-bit ones wrap in minutes on a busy 10G port.
+        oids+=("IF-MIB::ifHCInOctets.$index" "IF-MIB::ifHCOutOctets.$index"
+               "IF-MIB::ifHighSpeed.$index" "IF-MIB::ifOperStatus.$index"
+               "IF-MIB::ifAdminStatus.$index" "IF-MIB::ifName.$index"
+               "IF-MIB::ifInErrors.$index" "IF-MIB::ifOutErrors.$index"
+               "IF-MIB::ifInDiscards.$index" "IF-MIB::ifOutDiscards.$index")
+    done
+
+    # A GET carrying every varbind at once can exceed the agent's PDU limit, so
+    # the request is chunked well inside a single UDP datagram.
+    local -A value_of=()
+    local -a chunk=()
+    local oid line name value
+    for oid in "${oids[@]}"; do
+        chunk+=("$oid")
+        if ((${#chunk[@]} >= 30)); then
+            while IFS=$'\t' read -r name value; do
+                [[ -n "$name" ]] && value_of["$name"]="$value"
+            done < <(netops_snmp_get_many "$ip" "${chunk[@]}")
+            chunk=()
+        fi
+    done
+    if ((${#chunk[@]} > 0)); then
+        while IFS=$'\t' read -r name value; do
+            [[ -n "$name" ]] && value_of["$name"]="$value"
+        done < <(netops_snmp_get_many "$ip" "${chunk[@]}")
+    fi
+
+    _snmp_field() {
+        local key="$1" raw="${value_of[$1]:-}"
+        [[ "$raw" =~ (No[[:space:]]Such|Timeout|Error|noSuch) ]] && raw=""
+        printf '%s' "$raw"
+    }
+
+    local uptime
+    uptime=$(_snmp_field "DISMAN-EVENT-MIB::sysUpTimeInstance")
+    [[ -n "$uptime" ]] || uptime=$(_snmp_field "sysUpTimeInstance")
+    printf 'sysUpTime|%s\n' "${uptime:-0}"
+
+    local in_octets out_octets speed status admin name in_err out_err in_disc out_disc width
+    for index in "${wanted[@]}"; do
+        [[ "$index" =~ ^[0-9]+$ ]] || continue
+        in_octets=$(_snmp_field "IF-MIB::ifHCInOctets.$index")
+        out_octets=$(_snmp_field "IF-MIB::ifHCOutOctets.$index")
+        width=64
+        if [[ -z "$in_octets" ]]; then
+            # An agent without the 64-bit table still answers the 32-bit one.
+            # These are different counters, not two spellings of one, so the
+            # width is reported alongside: a consumer that mixed them would
+            # compute a delta between two unrelated numbers.
+            in_octets=$(netops_snmp_get "$ip" "IF-MIB::ifInOctets.$index")
+            out_octets=$(netops_snmp_get "$ip" "IF-MIB::ifOutOctets.$index")
+            width=32
+        fi
+        speed=$(_snmp_field "IF-MIB::ifHighSpeed.$index")
+        if [[ "$speed" =~ ^[0-9]+$ && "$speed" != "0" ]]; then
+            speed=$((speed * 1000000))
+        else
+            speed=$(netops_snmp_get "$ip" "IF-MIB::ifSpeed.$index")
+        fi
+        status=$(_snmp_field "IF-MIB::ifOperStatus.$index")
+        admin=$(_snmp_field "IF-MIB::ifAdminStatus.$index")
+        name=$(_snmp_field "IF-MIB::ifName.$index")
+        in_err=$(_snmp_field "IF-MIB::ifInErrors.$index")
+        out_err=$(_snmp_field "IF-MIB::ifOutErrors.$index")
+        in_disc=$(_snmp_field "IF-MIB::ifInDiscards.$index")
+        out_disc=$(_snmp_field "IF-MIB::ifOutDiscards.$index")
+        printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+            "$index" "${in_octets:-}" "${out_octets:-}" "${speed:-}" "${status:-}" "${name:-}" \
+            "${in_err:-}" "${out_err:-}" "${in_disc:-}" "${out_disc:-}" "${admin:-}" "$width"
+    done
+}
+
+# --- SNMP device health ------------------------------------------------------
+# Switch-level facts that give the interface graphs their context. A port whose
+# throughput fell off reads differently depending on whether the switch rebooted,
+# ran out of CPU, or is simply quiet, and none of that is visible in the IF-MIB.
+#
+# Everything here is optional by design: an OID the agent does not implement
+# emits no line, and the consumer records only what arrived. That is what lets
+# one function serve Cisco, Aruba, and Ruckus without being told which it is.
+#
+# On login attempts: no standard MIB exposes failed SSH or console logins, and
+# the vendor MIBs that come close are not present on these platforms. What SNMP
+# does answer is who is logged in now, how many TCP connections were attempted
+# and refused, and how many SNMP requests arrived with the wrong community --
+# which is the signal that somebody is probing the management plane. The switch's
+# syslog remains the place failed logins are actually recorded.
+
+snmp_device_health() {
+    local ip="$1"
+    local db_entry plat model family
+    db_entry=$(db_get_device "$ip")
+    plat=$(echo "$db_entry" | cut -d'|' -f3)
+    model=$(echo "$db_entry" | cut -d'|' -f4)
+    family=$(netops_platform_family "$plat" "$model")
+
+    local -A value_of=()
+    _health_collect() {
+        local name value
+        while IFS=$'\t' read -r name value; do
+            [[ -n "$name" ]] || continue
+            [[ "$value" =~ (No[[:space:]]Such|Timeout|Error|noSuch) ]] && continue
+            value_of["$name"]="$value"
+        done < <(netops_snmp_get_many "$ip" "$@")
+    }
+    # An OID may come back MIB-qualified or numeric depending on which MIB files
+    # are installed, so a reading is found by the tail of its name either way.
+    _health_get() {
+        local needle="$1" key
+        for key in "${!value_of[@]}"; do
+            [[ "$key" == *"$needle" ]] && { printf '%s' "${value_of[$key]}"; return 0; }
+        done
+        return 1
+    }
+    _health_emit() {
+        local key="$1" raw="$2"
+        [[ -n "$raw" ]] || return 0
+        printf '%s|%s\n' "$key" "$raw"
+    }
+    _health_number() {
+        # Vendor agents pad values with units and quotes; keep the digits.
+        local raw="$1"
+        raw="${raw//[^0-9]/}"
+        printf '%s' "$raw"
+    }
+
+    # Scalars every SNMP agent implements, in one request.
+    _health_collect \
+        "DISMAN-EVENT-MIB::sysUpTimeInstance" \
+        "SNMPv2-MIB::sysName.0" "SNMPv2-MIB::sysDescr.0" \
+        "SNMPv2-MIB::sysLocation.0" "SNMPv2-MIB::sysContact.0" \
+        "IF-MIB::ifNumber.0" \
+        "SNMPv2-MIB::snmpInBadCommunityNames.0" "SNMPv2-MIB::snmpInBadCommunityUses.0" \
+        "SNMPv2-MIB::snmpInBadVersions.0" "SNMPv2-MIB::snmpInASNParseErrs.0" \
+        "TCP-MIB::tcpCurrEstab.0" "TCP-MIB::tcpPassiveOpens.0" \
+        "TCP-MIB::tcpActiveOpens.0" "TCP-MIB::tcpAttemptFails.0" \
+        "HOST-RESOURCES-MIB::hrSystemNumUsers.0"
+
+    _health_emit "sysUpTime"          "$(_health_get 'sysUpTimeInstance')"
+    _health_emit "sysName"            "$(_health_get 'sysName.0')"
+    _health_emit "sysDescr"           "$(_health_get 'sysDescr.0')"
+    _health_emit "sysLocation"        "$(_health_get 'sysLocation.0')"
+    _health_emit "sysContact"         "$(_health_get 'sysContact.0')"
+    _health_emit "interfaces"         "$(_health_get 'ifNumber.0')"
+    _health_emit "bad_community"      "$(_health_get 'snmpInBadCommunityNames.0')"
+    _health_emit "bad_community_use"  "$(_health_get 'snmpInBadCommunityUses.0')"
+    _health_emit "bad_version"        "$(_health_get 'snmpInBadVersions.0')"
+    _health_emit "asn_parse_errors"   "$(_health_get 'snmpInASNParseErrs.0')"
+    _health_emit "tcp_established"    "$(_health_get 'tcpCurrEstab.0')"
+    _health_emit "tcp_opens_in"       "$(_health_get 'tcpPassiveOpens.0')"
+    _health_emit "tcp_opens_out"      "$(_health_get 'tcpActiveOpens.0')"
+    _health_emit "tcp_attempt_fails"  "$(_health_get 'tcpAttemptFails.0')"
+    _health_emit "logged_in_users"    "$(_health_get 'hrSystemNumUsers.0')"
+
+    # Where inventory has nothing to say, sysDescr does. A poller reads counters
+    # over SNMP and has no reason to hold an inventory or to have run a scan, so
+    # deriving the family from the description the device just gave us is what
+    # keeps CPU and memory working there rather than silently reporting nothing.
+    if [[ -z "$family" || "$family" == "unknown" ]]; then
+        family=$(netops_platform_family "$(_health_get 'sysDescr.0')")
+    fi
+
+    # CPU and memory have no standard scalar, so each family gets its own OIDs.
+    # The whole set goes in one request: a varbind the agent does not implement
+    # comes back as an exception beside the ones it does, not as a failure.
+    local -a vendor=()
+    case "$family" in
+        cisco-ios)
+            vendor=(
+                ".1.3.6.1.4.1.9.9.109.1.1.1.1.8.1"   # cpmCPUTotal5minRev
+                ".1.3.6.1.4.1.9.2.1.58.0"            # avgBusy5, pre-CISCO-PROCESS-MIB
+                ".1.3.6.1.4.1.9.9.48.1.1.1.5.1"      # ciscoMemoryPoolUsed
+                ".1.3.6.1.4.1.9.9.48.1.1.1.6.1"      # ciscoMemoryPoolFree
+            ) ;;
+        aruba-aos-switch)
+            vendor=(
+                ".1.3.6.1.4.1.11.2.14.11.5.1.9.6.1.0"          # hpSwitchCpuStat
+                ".1.3.6.1.4.1.11.2.14.11.5.1.1.2.1.1.1.5.1"    # total bytes
+                ".1.3.6.1.4.1.11.2.14.11.5.1.1.2.1.1.1.7.1"    # allocated bytes
+            ) ;;
+        ruckus-fastiron)
+            vendor=(
+                ".1.3.6.1.4.1.1991.1.1.2.1.52.0"     # snAgGblCpuUtil5MinAvg
+                ".1.3.6.1.4.1.1991.1.1.2.1.54.0"     # snAgGblDynMemTotal
+                ".1.3.6.1.4.1.1991.1.1.2.1.55.0"     # snAgGblDynMemFree
+            ) ;;
+    esac
+    # Every platform that answers HOST-RESOURCES gets a CPU reading regardless,
+    # which covers AOS-CX and anything not named above.
+    ((${#vendor[@]} > 0)) && _health_collect "${vendor[@]}"
+
+    local cpu="" used="" free="" total=""
+    case "$family" in
+        cisco-ios)
+            cpu=$(_health_get '9.9.109.1.1.1.1.8.1' || _health_get '9.2.1.58.0')
+            used=$(_health_get '9.9.48.1.1.1.5.1')
+            free=$(_health_get '9.9.48.1.1.1.6.1')
+            [[ -n "$used" && -n "$free" ]] && total=$(( $(_health_number "$used") + $(_health_number "$free") )) ;;
+        aruba-aos-switch)
+            cpu=$(_health_get '11.2.14.11.5.1.9.6.1.0')
+            total=$(_health_get '11.5.1.1.2.1.1.1.5.1')
+            used=$(_health_get '11.5.1.1.2.1.1.1.7.1') ;;
+        ruckus-fastiron)
+            cpu=$(_health_get '1991.1.1.2.1.52.0')
+            total=$(_health_get '1991.1.1.2.1.54.0')
+            free=$(_health_get '1991.1.1.2.1.55.0')
+            [[ -n "$total" && -n "$free" ]] && used=$(( $(_health_number "$total") - $(_health_number "$free") )) ;;
+    esac
+    if [[ -z "$cpu" ]]; then
+        # hrProcessorLoad is per core; a switch control plane reports one, and a
+        # multi-core box is fairly described by the busiest of them.
+        cpu=$(netops_snmp_walk "$ip" "HOST-RESOURCES-MIB::hrProcessorLoad" "-Oqv" \
+              | awk 'BEGIN{m=""} /^[0-9]+$/ { if (m=="" || $1>m) m=$1 } END{ if (m!="") print m }')
+    fi
+    _health_emit "cpu_percent"        "$(_health_number "$cpu")"
+    _health_emit "memory_used_bytes"  "$(_health_number "$used")"
+    _health_emit "memory_total_bytes" "$(_health_number "$total")"
+
+    # Temperature: ENTITY-SENSOR is the standard table and type 8 is celsius.
+    # Cisco IOS switches often populate CISCO-ENVMON instead, so that is tried
+    # when the standard table is empty rather than in addition to it.
+    local temps
+    temps=$(netops_snmp_walk "$ip" "ENTITY-SENSOR-MIB::entPhySensorType" "-Oqn" \
+            | awk '$2 == 8 { if (match($1, /\.([0-9]+)$/, m)) print m[1] }')
+    if [[ -n "$temps" ]]; then
+        local values index
+        values=$(netops_snmp_walk "$ip" "ENTITY-SENSOR-MIB::entPhySensorValue" "-Oqn")
+        while read -r index; do
+            [[ -n "$index" ]] || continue
+            local reading
+            reading=$(awk -v idx="$index" '$1 ~ ("\\." idx "$") { print $2 }' <<< "$values" | head -1)
+            [[ -n "$reading" ]] && _health_emit "temperature_celsius" "$reading" && break
+        done <<< "$temps"
+    else
+        local envmon
+        envmon=$(netops_snmp_walk "$ip" ".1.3.6.1.4.1.9.9.13.1.3.1.3" "-Oqv" \
+                 | awk '/^[0-9]+$/ && $1 > 0 { if ($1 > m) m = $1 } END { if (m != "") print m }')
+        _health_emit "temperature_celsius" "$envmon"
+    fi
 }
 
 perform_task() {
@@ -672,8 +1067,9 @@ perform_task() {
         return $?
     fi
 
-    local db_entry plat model family
+    local db_entry plat model hostname family
     db_entry=$(db_get_device "$ip")
+    hostname=$(echo "$db_entry" | cut -d'|' -f2)
     plat=$(echo "$db_entry" | cut -d'|' -f3)
     model=$(echo "$db_entry" | cut -d'|' -f4)
     family=$(netops_platform_family "$plat" "$model")
@@ -686,11 +1082,24 @@ perform_task() {
     esac
 
     local raw_output transport_rc
+    if [[ "$mode" == "show-batch" ]]; then
+        # Several reads in one login. The wrapper marks each command boundary
+        # so the caller can split the transcript back apart.
+        raw_output=$(NETOPS_CMD_MARKERS=1 generate_command_stream "$plat" "show-batch" "$model" "$hostname" "${cmds[@]}" | NETOPS_CMD_MARKERS=1 netops_ssh_prompted "$ip" 2>&1 | tr -d '\r')
+        transport_rc=$?
+        if ((transport_rc != 0)); then
+            error "[$ip] SSH transport failed (exit $transport_rc)."
+            [[ -n "$raw_output" ]] && sanitize_output "$raw_output" >&2
+            return 1
+        fi
+        sanitize_output "$raw_output"
+        return 0
+    fi
     if [[ "$mode" == "show" ]]; then
-        raw_output=$(generate_command_stream "$plat" "$mode" "${cmds[@]}" | netops_ssh_prompted "$ip" 2>&1 | tr -d '\r')
+        raw_output=$(generate_command_stream "$plat" "$mode" "$model" "$hostname" "${cmds[@]}" | netops_ssh_prompted "$ip" 2>&1 | tr -d '\r')
         transport_rc=$?
     else
-        raw_output=$(generate_command_stream "$plat" "$mode" "${cmds[@]}" | netops_ssh "$ip" 2>&1 | tr -d '\r')
+        raw_output=$(generate_command_stream "$plat" "$mode" "$model" "$hostname" "${cmds[@]}" | netops_ssh "$ip" 2>&1 | tr -d '\r')
         transport_rc=$?
     fi
     if ((transport_rc != 0)); then
@@ -838,21 +1247,21 @@ resolve_commands() {
 
 show_help() {
     cat <<EOF
-${CYAN}${BOLD}NetOps Internal Device Control Adapter${NC}
-Version: ${NETOPS_VERSION} | Integrated with NetOps Unified Platform
+${CYAN}${BOLD}Netrune Internal Device Control Adapter${NC}
+Version: ${NETOPS_VERSION} | Integrated with Netrune Unified Platform
 
 ${BOLD}DESCRIPTION:${NC}
   Internal Cisco/Aruba/Ruckus transport adapter. Normal operators should use the
   guarded public 'netops' CLI; direct config/vlan execution is blocked.
 
 ${BOLD}USAGE:${NC}
-  netops-control <command> [target] [options] [arguments]
+  netrune-control <command> [target] [options] [arguments]
 
 ${BOLD}COMMANDS:${NC}
 
   ${GREEN}shell${NC} <target>
       Open interactive SSH session to a device.
-      Example: netops-control shell 192.0.2.5
+      Example: netrune-control shell 192.0.2.5
 
   ${GREEN}backup${NC} <target> [-o <dir>]
       Backup running-config from online devices to local files.
@@ -864,34 +1273,34 @@ ${BOLD}COMMANDS:${NC}
       Diff the last two changed backups for a device.
       Options:
         -o, --output <dir>   Specify backup directory (default: ~/network_backups)
-      Example: netops-control backup "198.51.100." -o /backups
+      Example: netrune-control backup "198.51.100." -o /backups
 
   ${GREEN}inventory${NC} [--view | <target>]
       Synchronize device inventory via SSH or view current inventory.
       Subcommands:
         --view                Display current inventory database
         <target>              Scan targets and update inventory via SSH
-      Example: netops-control inventory "192.0.2."
-      Example: netops-control inventory --view
+      Example: netrune-control inventory "192.0.2."
+      Example: netrune-control inventory --view
 
   ${GREEN}propagated${NC} <target> <vlan_id> [--deep]
       Check VLAN propagation across the network.
       Analyzes trunk ports and identifies uplinks carrying the VLAN.
       Options:
         --deep                Show adjacent switches on missing uplinks
-      Example: netops-control propagated "192.0.2." 50 --deep
+      Example: netrune-control propagated "192.0.2." 50 --deep
 
   ${GREEN}locate-vlan${NC} <target> <vlan_id> [--config-only]
       Locate where a specific VLAN is defined and which ports carry it.
       Options:
         --config-only         Parse from running-config (faster for large networks)
-      Example: netops-control locate-vlan "192.0.2." 50
-      Example: netops-control locate-vlan "core-switch" 100 --config-only
+      Example: netrune-control locate-vlan "192.0.2." 50
+      Example: netrune-control locate-vlan "core-switch" 100 --config-only
 
   ${GREEN}config${NC} <target> [commands...] [@snippet]
       Internal write adapter. Direct execution is denied; the public core must
       supply its audited-confirmation capability after policy validation.
-      Public preview: netops device config <target> <commands...> --dry-run
+      Public preview: netrune device config <target> <commands...> --dry-run
 
   ${GREEN}vlan${NC} <target> <interface> [options]
       Internal guarded-VLAN adapter. Direct execution is denied; use the public
@@ -901,24 +1310,24 @@ ${BOLD}COMMANDS:${NC}
         --trunk <vlan_list>   Set trunk mode with allowed VLANs
         --native <vlan>       Set native VLAN for trunk
         --replace             Replace allowed list instead of adding
-      Public preview: netops vlan set switch1 gi1/0/48 --trunk 10,20,30 --native 99 --dry-run
+      Public preview: netrune vlan set switch1 gi1/0/48 --trunk 10,20,30 --native 99 --dry-run
 
   ${GREEN}show${NC} <target> <command> [--detail]
       Execute a validated read-only show, ping, or cable-diagnostic command.
       Options:
         --detail              Show full raw output without sanitization
-      Example: netops-control show "192.0.2." "show version"
-      Example: netops-control show "core-switch" "show interfaces status" --detail
+      Example: netrune-control show "192.0.2." "show version"
+      Example: netrune-control show "core-switch" "show interfaces status" --detail
 
   ${GREEN}core-lookup${NC} <ip_address | mac_address>
       Look up an IP or MAC address on the core switch.
       Uses configured core_switch_ip from config file.
-      Example: netops-control core-lookup 192.0.2.50
-      Example: netops-control core-lookup 02:00:00:00:00:25
+      Example: netrune-control core-lookup 192.0.2.50
+      Example: netrune-control core-lookup 02:00:00:00:00:25
 
   ${GREEN}mac-lookup${NC} <target>  <mac_address>
       Look up a MAC address from any device in the inventory.
-      Example: netops-control mac-lookup access-switch 02:00:00:00:00:25
+      Example: netrune-control mac-lookup access-switch 02:00:00:00:00:25
 
 ${BOLD}TARGET SPECIFICATIONS:${NC}
   Single IP:       198.51.100.10
@@ -941,7 +1350,7 @@ ${BOLD}GLOBAL OPTIONS:${NC}
 
 ${BOLD}COMMAND-SPECIFIC HELP:${NC}
   To get detailed help for any command:
-    netops-control <command> --help
+    netrune-control <command> --help
   
   Available commands:
     shell, backup, backup-history, diff, inventory, propagated, locate-vlan,
@@ -949,55 +1358,55 @@ ${BOLD}COMMAND-SPECIFIC HELP:${NC}
 
 ${BOLD}EXAMPLES:${NC}
   # Interactive shell to a device
-  netops-control shell 192.0.2.5
+  netrune-control shell 192.0.2.5
 
   # Backup all devices in a subnet
-  netops-control backup "192.0.2." -o /backups
+  netrune-control backup "192.0.2." -o /backups
 
   # View current inventory
-  netops-control inventory --view
+  netrune-control inventory --view
 
   # Update inventory for a range of IPs
-  netops-control inventory 192.0.2.10-50
+  netrune-control inventory 192.0.2.10-50
 
   # Check VLAN 50 propagation across network with deep analysis
-  netops-control propagated "192.0.2." 50 --deep
+  netrune-control propagated "192.0.2." 50 --deep
 
   # Locate where VLAN 50 is configured
-  netops-control locate-vlan "192.0.2." 50
+  netrune-control locate-vlan "192.0.2." 50
 
   # Locate VLAN using running-config (faster for many devices)
-  netops-control locate-vlan "192.0.2." 100 --config-only
+  netrune-control locate-vlan "192.0.2." 100 --config-only
 
   # Preview configuration through the public policy boundary
-  netops device config "core-switch" "interface Gi1/0/1" --dry-run
+  netrune device config "core-switch" "interface Gi1/0/1" --dry-run
 
   # Preview a guarded VLAN change through the public policy boundary
-  netops vlan set "distribution-sw" Gi1/0/24 --trunk 10,20,30,40 --native 99 --dry-run
+  netrune vlan set "distribution-sw" Gi1/0/24 --trunk 10,20,30,40 --native 99 --dry-run
 
   # Execute show command on devices
-  netops-control show "192.0.2." "show version"
+  netrune-control show "192.0.2." "show version"
 
   # Look up IP address on core switch
-  netops-control core-lookup 192.0.2.50
+  netrune-control core-lookup 192.0.2.50
 
   # Get help for config command
-  netops-control config --help
+  netrune-control config --help
 
 ${BOLD}NOTES:${NC}
   • Devices are classified as Cisco IOS, Aruba AOS-S/AOS-CX, or Ruckus FastIron
   • Inventory database stores device info from both SNMP and SSH sources
   • Propagation analysis identifies VLAN 4 as uplink indicator (heuristic)
-  • SSH credentials are set locally with 'netops-connect --set-password'
+  • SSH credentials are set locally with 'netrune-connect --set-password'
   • Legacy SSH mode enables only algorithms still present in the local OpenSSH build
   • Vendor command streams come from the device-driver registry
-  • core-lookup requires core_switch_ip configured in netops config
+  • core-lookup requires core_switch_ip configured in netrune config
 
 ${BOLD}SEE ALSO:${NC}
-  netops --help          General NetOps help
-  netops inventory scan  Network discovery
-  netops diagnose        Network diagnostics
-  netops-connect --help  Local SSH credential maintenance
+  netrune --help          General Netrune help
+  netrune inventory scan  Network discovery
+  netrune diagnose        Network diagnostics
+  netrune-connect --help  Local SSH credential maintenance
 EOF
 }
 # --- Main execution with help handling ---
@@ -1017,10 +1426,10 @@ MODE="$1"
 shift
 
 case "$MODE" in
-    shell|backup|backup-history|diff|inventory|propagated|locate-vlan|show|core-lookup|mac-lookup|config|vlan) ;;
+    shell|backup|backup-history|diff|inventory|propagated|locate-vlan|show|show-batch|core-lookup|mac-lookup|config|vlan|snmp-index|snmp-counters|snmp-health) ;;
     *)
         error "Unknown control command: $MODE"
-        echo "Run 'netops-control --help' for available commands." >&2
+        echo "Run 'netrune-control --help' for available commands." >&2
         exit 2
         ;;
 esac
@@ -1031,105 +1440,106 @@ if [[ $# -ge 1 ]] && ([[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]); then
         shell)
             echo -e "${CYAN}${BOLD}Shell Command${NC}"
             echo "Open interactive SSH session to a device."
-            echo "Usage: netops-control shell <target>"
-            echo "Example: netops-control shell 192.0.2.5"
+            echo "Usage: netrune-control shell <target>"
+            echo "Example: netrune-control shell 192.0.2.5"
             ;;
         backup)
             echo -e "${CYAN}${BOLD}Backup Command${NC}"
             echo "Backup running-config from online devices."
             echo "Devices marked OFFLINE in discovery DB are skipped."
-            echo "Usage: netops-control backup <target> [-o <dir>] [--changed-only] [--summary]"
+            echo "Usage: netrune-control backup <target> [-o <dir>] [--changed-only] [--summary]"
             echo "Options:"
             echo "  -o, --output <dir>   Backup directory (default: ~/network_backups)"
-            echo "  --online-only        Explicitly skip devices marked OFFLINE (default behavior)"
+            echo "  --online-only        Skip devices recorded OFFLINE even when only one is named"
+            echo "  --include-offline    Attempt every device, including ones recorded OFFLINE"
             echo "  --changed-only       Do not rewrite configs whose hash matches latest saved backup"
             echo "  --summary            Print saved/unchanged counts at the end"
             echo "  --redact-secrets     Redact common secret lines before writing"
-            echo "Example: netops-control backup 192.0.2. -o /backups --changed-only --summary"
+            echo "Example: netrune-control backup 192.0.2. -o /backups --changed-only --summary"
             ;;
         backup-history)
             echo -e "${CYAN}${BOLD}Backup History Command${NC}"
             echo "Show newest-first backup metadata for one device."
-            echo "Usage: netops-control backup-history <target> [--json]"
-            echo "Example: netops-control backup-history 192.0.2.5"
+            echo "Usage: netrune-control backup-history <target> [--json]"
+            echo "Example: netrune-control backup-history 192.0.2.5"
             ;;
         diff)
             echo -e "${CYAN}${BOLD}Backup Diff Command${NC}"
             echo "Compare the two most recent changed backups for one device."
-            echo "Usage: netops-control diff <target> [--last]"
-            echo "Example: netops-control diff 192.0.2.5 --last"
+            echo "Usage: netrune-control diff <target> [--last]"
+            echo "Example: netrune-control diff 192.0.2.5 --last"
             ;;
         locate-vlan)
             echo -e "${CYAN}${BOLD}Locate VLAN Command${NC}"
             echo "Locate where a specific VLAN is defined and which ports carry it."
-            echo "Usage: netops-control locate-vlan <target> <vlan_id> [--config-only]"
+            echo "Usage: netrune-control locate-vlan <target> <vlan_id> [--config-only]"
             echo "Options:"
             echo "  --config-only         Parse from running-config instead of show commands"
-            echo "Example: netops-control locate-vlan 192.0.2. 50"
-            echo "Example: netops-control locate-vlan core-switch 100 --config-only"
+            echo "Example: netrune-control locate-vlan 192.0.2. 50"
+            echo "Example: netrune-control locate-vlan core-switch 100 --config-only"
             ;;
         show)
             echo -e "${CYAN}${BOLD}Show Command${NC}"
             echo "Execute a validated read-only show, ping, or cable-diagnostic command."
-            echo "Usage: netops-control show <target> <quoted-command> [--detail]"
+            echo "Usage: netrune-control show <target> <quoted-command> [--detail]"
             echo "Options:"
             echo "  --detail              Show full raw output without sanitization"
-            echo "Example: netops-control show '192.0.2.' 'show version'"
-            echo "Example: netops-control show 'core-switch' 'show interfaces status' --detail"
+            echo "Example: netrune-control show '192.0.2.' 'show version'"
+            echo "Example: netrune-control show 'core-switch' 'show interfaces status' --detail"
             ;;
         core-lookup)
             echo -e "${CYAN}${BOLD}Core Lookup Command${NC}"
             echo "Look up an IP or MAC address on the core switch."
-            echo "Usage: netops-control core-lookup <ip_address | mac_address>"
-            echo "Note: Uses core_switch_ip from netops configuration"
-            echo "Example: netops-control core-lookup 192.0.2.50"
-            echo "Example: netops-control core-lookup 02:00:00:00:00:25"
+            echo "Usage: netrune-control core-lookup <ip_address | mac_address>"
+            echo "Note: Uses core_switch_ip from netrune configuration"
+            echo "Example: netrune-control core-lookup 192.0.2.50"
+            echo "Example: netrune-control core-lookup 02:00:00:00:00:25"
             ;;
         mac-lookup)
             echo -e "${CYAN}${BOLD}MAC Lookup Command${NC}"
             echo "Search one device forwarding table for a normalized MAC address."
-            echo "Usage: netops-control mac-lookup <target> <mac_address>"
-            echo "Example: netops-control mac-lookup access-switch 02:00:00:00:00:25"
+            echo "Usage: netrune-control mac-lookup <target> <mac_address>"
+            echo "Example: netrune-control mac-lookup access-switch 02:00:00:00:00:25"
             ;;
         inventory)
             echo -e "${CYAN}${BOLD}Inventory Command${NC}"
             echo "Manage device inventory database."
-            echo "Usage: netops-control inventory [--view | <target>]"
+            echo "Usage: netrune-control inventory [--view | <target>]"
             echo "  --view               Display current inventory"
             echo "  <target>             Scan and update inventory via SSH"
-            echo "Example: netops-control inventory --view"
-            echo "Example: netops-control inventory 192.0.2."
+            echo "Example: netrune-control inventory --view"
+            echo "Example: netrune-control inventory 192.0.2."
             ;;
         propagated)
             echo -e "${CYAN}${BOLD}Propagated Command${NC}"
             echo "Check VLAN propagation across network."
-            echo "Usage: netops-control propagated <target> <vlan_id> [--deep]"
+            echo "Usage: netrune-control propagated <target> <vlan_id> [--deep]"
             echo "Options:"
             echo "  --deep               Show adjacent switches on missing uplinks"
-            echo "Example: netops-control propagated 192.0.2. 50 --deep"
+            echo "Example: netrune-control propagated 192.0.2. 50 --deep"
             ;;
         config)
             echo -e "${CYAN}${BOLD}Config Command${NC}"
             echo "Internal write adapter; direct execution is denied."
-            echo "Usage: netops-control config <target> <commands...>"
-            echo "Public preview: netops device config <target> <commands...> --dry-run"
-            echo "Public confirmed execution requires the netops core policy boundary."
+            echo "Usage: netrune-control config <target> <commands...>"
+            echo "Public preview: netrune device config <target> <commands...> --dry-run"
+            echo "Public confirmed execution requires the netrune core policy boundary."
             ;;
         vlan)
             echo -e "${CYAN}${BOLD}VLAN Command${NC}"
             echo "Internal guarded-VLAN adapter; direct execution is denied."
-            echo "Usage: netops-control vlan <target> <interface> [options]"
-            echo "Public usage: netops vlan set <target> <interface> [options] --dry-run|--confirm"
+            echo "Usage: netrune-control vlan <target> <interface> [options]"
+            echo "Public usage: netrune vlan set <target> <interface> [options] --dry-run|--confirm"
             echo "Options:"
             echo "  --access <vlan>      Set access mode with VLAN ID"
             echo "  --trunk <list>       Set trunk mode with allowed VLANs (comma-separated)"
             echo "  --native <vlan>      Set native VLAN for trunk"
             echo "  --replace            Replace allowed list instead of adding"
-            echo "Preview: netops vlan set switch1 Gi1/0/48 --trunk 10,20,30 --native 99 --dry-run"
+            echo "Preview: netrune vlan set switch1 Gi1/0/48 --trunk 10,20,30 --native 99 --dry-run"
             ;;
         *)
             echo -e "${CYAN}${BOLD}Unknown Command: $MODE${NC}"
-            echo "Run 'netops-control --help' for available commands."
+            echo "Run 'netrune-control --help' for available commands."
             exit 1
             ;;
     esac
@@ -1146,7 +1556,7 @@ if [[ "$MODE" == "inventory" && "$1" == "--view" ]]; then
                 ip: .[0], hostname: .[1], platform: .[2], model: .[3], serial: .[4], mac: .[5], source: .[6], last_seen: (.[7] | tonumber? // 0), status: .[8]
             })'
     else
-        inventory_tmp=$(mktemp /tmp/netops-inventory.XXXXXX) || { error "Could not create inventory view state."; exit 1; }
+        inventory_tmp=$(mktemp /tmp/netrune-inventory.XXXXXX) || { error "Could not create inventory view state."; exit 1; }
         control_track_tmp "$inventory_tmp"
         echo -e "\033[0;36mIP|HOSTNAME|PLATFORM|MODEL|SERIAL|MAC|SOURCE|STATUS\033[0m" > "$inventory_tmp"
         awk -F'|' -v OFS='|' '{print $1,$2,$3,$4,$5,$6,$7,$9}' "$DEVICES_DB" >> "$inventory_tmp"
@@ -1174,7 +1584,7 @@ if [[ "$MODE" == "backup-history" || "$MODE" == "diff" ]]; then
     exit $?
 fi
 
-CMD_ARGS=(); RAW_INPUT=(); VLAN_ARGS=(); BACKUP_OUT=""; DEEP_MODE="false"; CONFIG_ONLY="false"; DETAIL_MODE="false"; DRY_RUN="false"; JSON_OUTPUT="false"; CHANGED_ONLY="false"; SUMMARY_MODE="false"; REDACT_SECRETS="false"; RUN_STARTED=$(date +%s)
+CMD_ARGS=(); RAW_INPUT=(); VLAN_ARGS=(); BACKUP_OUT=""; DEEP_MODE="false"; CONFIG_ONLY="false"; DETAIL_MODE="false"; DRY_RUN="false"; JSON_OUTPUT="false"; CHANGED_ONLY="false"; SUMMARY_MODE="false"; REDACT_SECRETS="false"; INCLUDE_OFFLINE="false"; ONLINE_ONLY="false"; SKIP_VERIFICATION="false"; RUN_STARTED=$(date +%s)
 
 if [[ "$MODE" == "core-lookup" ]]; then
     TARGET_INPUT="${CONFIG[core_switch_ip]}"
@@ -1197,7 +1607,7 @@ if [[ "$MODE" == "core-lookup" ]]; then
     CMD_ARGS=("$tgt")
     TARGETS=("$TARGET_INPUT")
 else
-[[ $# -lt 1 ]] && { error "Missing target. Use 'netops-control --help' for usage."; exit 1; }
+[[ $# -lt 1 ]] && { error "Missing target. Use 'netrune-control --help' for usage."; exit 1; }
 TARGET_INPUT="$1"; shift
 
     while [[ $# -gt 0 ]]; do
@@ -1213,10 +1623,14 @@ TARGET_INPUT="$1"; shift
             --detail) DETAIL_MODE="true" ;;
             --dry-run) DRY_RUN="true" ;;
             --json) JSON_OUTPUT="true" ;;
-            --online-only) ;;
+            --online-only) ONLINE_ONLY="true" ;;
+            --include-offline) INCLUDE_OFFLINE="true" ;;
             --changed-only) CHANGED_ONLY="true" ;;
             --summary) SUMMARY_MODE="true" ;;
             --redact-secrets) REDACT_SECRETS="true" ;;
+            --skip-verification)
+                [[ "$MODE" == "config" ]] || { error "--skip-verification is only valid with config."; exit 2; }
+                SKIP_VERIFICATION="true" ;;
             *) [[ "$MODE" == "vlan" ]] && VLAN_ARGS+=("$1") || RAW_INPUT+=("$1") ;;
         esac
         shift
@@ -1238,7 +1652,8 @@ TARGET_INPUT="$1"; shift
     [[ ${#TARGETS[@]} -eq 0 ]] && { error "No targets resolved."; exit 1; }
 fi
 
-[[ "$MODE" == "backup" ]] && filter_backup_targets
+# Every mode that can span more than one device, not only backup.
+filter_offline_targets
 
 if [[ "$MODE" == "vlan" ]]; then
     intf="${VLAN_ARGS[0]:-}"
@@ -1278,6 +1693,26 @@ if [[ "$MODE" == "vlan" ]]; then
     fi
     CMD_ARGS+=("no shutdown")
     MODE="config"
+elif [[ "$MODE" == "snmp-index" ]]; then
+    ((${#RAW_INPUT[@]} == 0)) || { error "snmp-index takes only a target."; exit 2; }
+elif [[ "$MODE" == "snmp-counters" ]]; then
+    ((${#RAW_INPUT[@]} == 1)) || { error "snmp-counters requires one comma-separated list of interface indexes."; exit 2; }
+    [[ "${RAW_INPUT[0]}" =~ ^[0-9]+(,[0-9]+)*$ ]] || { error "Interface indexes must be comma-separated integers."; exit 2; }
+    CMD_ARGS+=("${RAW_INPUT[0]}")
+elif [[ "$MODE" == "snmp-health" ]]; then
+    ((${#RAW_INPUT[@]} == 0)) || { error "snmp-health takes only a target."; exit 2; }
+elif [[ "$MODE" == "show-batch" ]]; then
+    ((${#RAW_INPUT[@]} >= 1)) || { error "show-batch requires at least one quoted command after the target."; exit 2; }
+    ((${#RAW_INPUT[@]} <= 24)) || { error "show-batch accepts at most 24 commands."; exit 2; }
+    # Batching must not widen what may be run: every command in the batch
+    # passes the same read-only allowlist a single show would.
+    for _batch_cmd in "${RAW_INPUT[@]}"; do
+        control_read_command_allowed "$_batch_cmd" || {
+            error "Rejected command: only bounded read-only show, ping, and cable-diagnostic commands are allowed."
+            exit 2
+        }
+    done
+    CMD_ARGS+=("${RAW_INPUT[@]}")
 elif [[ "$MODE" == "propagated" || "$MODE" == "locate-vlan" || "$MODE" == "show" || "$MODE" == "mac-lookup" ]]; then
     ((${#RAW_INPUT[@]} == 1)) || {
         error "$MODE requires exactly one ${MODE/show/quoted command} argument after the target."
@@ -1300,7 +1735,7 @@ elif [[ "$MODE" != "core-lookup" ]]; then
         while IFS= read -r line; do [[ -n "$line" ]] && RAW_INPUT+=("$line"); done
     fi
     if [[ "$MODE" == "config" && ${#RAW_INPUT[@]} -eq 0 ]]; then
-        tf=$(mktemp /tmp/netops-config.XXXXXX) || { error "Could not create editor state."; exit 1; }
+        tf=$(mktemp /tmp/netrune-config.XXXXXX) || { error "Could not create editor state."; exit 1; }
         control_track_tmp "$tf"
         read -r -a editor_command <<< "${EDITOR:-vim}"
         ((${#editor_command[@]})) || { error "EDITOR is empty."; exit 1; }
@@ -1328,7 +1763,7 @@ if [[ "$DRY_RUN" == "true" ]]; then
 fi
 
 if [[ "$MODE" == "config" && "${NETOPS_CORE_WRITE_REQUEST:-}" != "audited-confirmation" ]]; then
-    error "Direct configuration execution is blocked. Use 'netops device config ... --confirm' or 'netops vlan set ... --confirm' so preview, confirmation, and audit policy are applied."
+    error "Direct configuration execution is blocked. Use 'netrune device config ... --confirm' or 'netrune vlan set ... --confirm' so preview, confirmation, and audit policy are applied."
     exit 7
 fi
 
@@ -1347,7 +1782,11 @@ if [[ "$MODE" == "config" && ${#TARGETS[@]} -gt 1 ]]; then
     [[ ! "$resp" =~ ^[yY]$ ]] && { error "Aborted."; exit 0; }
 fi
 
-get_password_from_store || exit $?
+# SNMP reads carry their own credential and never open an SSH session, so a
+# background collector must not touch the sudo-gated vault to run one.
+if [[ "$MODE" != "snmp-index" && "$MODE" != "snmp-counters" && "$MODE" != "snmp-health" ]]; then
+    get_password_from_store || exit $?
+fi
 
 if [[ "$MODE" == "shell" ]]; then
     tty_fd=""
@@ -1363,9 +1802,23 @@ fi
 
 run=0
 overall_rc=0
+
 for ip in "${TARGETS[@]}"; do
-    if [[ "$MODE" == "core-lookup" ]] || verify_target "$ip"; then
-        ( perform_task "$ip" "$MODE" "$BACKUP_OUT" "$DETAIL_MODE" "${CMD_ARGS[@]}" ) &
+    # SNMP reads need no platform driver, so they need no platform detection.
+    # verify_target falls back to an SSH probe for an address it does not
+    # recognise, which is what made a machine that only reads counters demand
+    # an inventory, a scan, and SSH credentials to reach a switch it can
+    # already talk to. For these modes the SNMP reply is the verification.
+    if [[ "$MODE" == "core-lookup" || "$MODE" == snmp-* ]] || verify_target "$ip"; then
+        if [[ "$MODE" == "snmp-index" ]]; then
+            ( snmp_interface_index "$ip" ) &
+        elif [[ "$MODE" == "snmp-counters" ]]; then
+            ( snmp_interface_counters "$ip" "${CMD_ARGS[@]}" ) &
+        elif [[ "$MODE" == "snmp-health" ]]; then
+            ( snmp_device_health "$ip" ) &
+        else
+            ( perform_task "$ip" "$MODE" "$BACKUP_OUT" "$DETAIL_MODE" "${CMD_ARGS[@]}" ) &
+        fi
         CONTROL_CHILD_PIDS+=("$!")
         ((run++))
         if [[ $run -ge ${CONFIG[scan_workers]} ]]; then
