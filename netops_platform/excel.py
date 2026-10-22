@@ -18,6 +18,7 @@ import copy
 import datetime as dt
 import ipaddress
 import re
+import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,13 +28,13 @@ from netops_platform.identity import _host_label, normalize_mac
 from netops_platform.inventory_ingest import _meaningful_model
 
 
-FIELDS = ("hostname", "ip", "model", "serial", "mac", "platform", "status", "last_seen")
+FIELDS = ("hostname", "ip", "manufacturer", "model", "serial", "mac", "platform", "status", "last_seen")
 IDENTITY_FIELDS = ("serial", "mac", "ip", "hostname")
 # Status and Last Seen are opt-in (--fields): an asset sheet's "Status" is
 # usually lifecycle ("In stock", "Decommissioned"), not reachability.
-DEFAULT_FIELDS = ("hostname", "ip", "model", "serial", "mac", "platform")
+DEFAULT_FIELDS = ("hostname", "ip", "manufacturer", "model", "serial", "mac", "platform")
 FIELD_LABELS = {
-    "hostname": "Hostname", "ip": "IP Address", "model": "Model", "serial": "Serial Number",
+    "hostname": "Hostname", "ip": "IP Address", "manufacturer": "Manufacturer", "model": "Model", "serial": "Serial Number",
     "mac": "Base MAC", "platform": "Platform", "status": "Status", "last_seen": "Last Seen",
 }
 
@@ -49,10 +50,39 @@ HEADER_SYNONYMS: Dict[str, Set[str]] = {
                "systemserialnumber", "chassisserial", "motherboardserial", "motherboardserialnumber"},
     "model": {"model", "modelnumber", "modelno", "devicemodel", "switchmodel", "hardwaremodel",
               "hardware", "pid", "productmodel"},
-    "platform": {"platform", "vendor", "os", "manufacturer", "make", "devicetype"},
+    # A Vendor/Make column wants the maker (Cisco), not netrune's driver label
+    # (Cisco IOS); Platform/OS keeps the label.
+    "manufacturer": {"manufacturer", "vendor", "make", "brand", "oem", "mfr", "mfg", "devicevendor"},
+    "platform": {"platform", "os", "devicetype", "operatingsystem"},
     "status": {"status", "state", "reachability", "onlinestatus", "netrunestatus"},
     "last_seen": {"lastseen", "lastpolled", "lastcontact", "lastupdated", "lastchecked"},
+    # Free text, never a device value: only --remarks / --free-ips write it.
+    "remarks": {"remarks", "remark", "comments", "comment", "notes", "note"},
 }
+REMARKS = "remarks"
+REMARKS_HEADER = "Remarks"
+REMARK_LABELS = {
+    "hostname": "name", "ip": "IP", "manufacturer": "vendor", "model": "model", "serial": "serial",
+    "mac": "MAC", "platform": "platform", "status": "status", "last_seen": "last seen",
+}
+# Remarks this module writes about an address or a switch's state. They are
+# replaced on every run, so "Free to use" never outlives the address being
+# free; anything else in the cell is the operator's and is kept.
+OWN_REMARK = re.compile(
+    r"^(?:free to use(?: \((?:was .+ until \d{4}-\d{2}-\d{2}|old entry)\))?"
+    r"|in use \((?:answers ping|answers on port \d+|switch .+|AP .+|device .+)\)"
+    r"|used by .+ until \d{4}-\d{2}-\d{2}|no reply, was .+ until \d{4}-\d{2}-\d{2}"
+    r"|allocated, offline|offline|last seen \d{4}-\d{2}-\d{2})$",
+    re.IGNORECASE,
+)
+FREE_OLD_ENTRY = "Free to use (old entry)"
+ALLOCATED_OFFLINE = "Allocated, offline"
+# An operator remark like these means the address is spoken for even when
+# nothing answers on it.
+RESERVED_WORDS = re.compile(
+    r"reserv|assign|allocat|in use|used by|dhcp|gateway|\bgw\b|hsrp|vrrp|\bvip\b|do not|don'?t|static|spare for",
+    re.IGNORECASE,
+)
 
 # Parts of a workbook openpyxl does not carry through a load/save round trip.
 FEATURES_LOST_ON_SAVE = {
@@ -67,6 +97,21 @@ FEATURES_LOST_ON_SAVE = {
 }
 
 PLACEHOLDERS = {"", "n/a", "na", "none", "null", "unknown", "-", "--", "tbd", "?"}
+
+# Every written cell is shaded by how sure Netrune is of it, on five steps:
+# certain (a serial/MAC match), strong (two keys agree, or a new row), fair (one
+# key filling a blank), weak (one key overwriting), doubtful (a forced tiebreak).
+# The fills were searched for, not picked: every pair stays at least 15 CIEDE2000
+# apart under normal, deutan, protan, and tritan vision (the old three-step
+# palette was 6.4 under protan), black text stays at 6.5:1 or better, and the
+# warm three darken as doubt grows, so the order survives a greyscale print.
+CONFIDENCE_LEVELS = ("doubtful", "weak", "fair", "strong", "certain")
+CONFIDENCE_FILLS = {"certain": "AAFCCE", "strong": "7A99E7", "fair": "FDE543", "weak": "D7A569", "doubtful": "ED5C8B"}
+CONFIDENCE_SHADES = {"certain": "green", "strong": "blue", "fair": "yellow", "weak": "tan", "doubtful": "red"}
+# Weak and doubtful cells are the ones a remark or note marks "(verify)".
+VERIFY_LEVELS = {"weak", "doubtful"}
+HARDWARE_KEYS = {"serial", "mac"}
+STALE_AFTER_DAYS = 30
 IPV4 = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])")
 
 
@@ -118,8 +163,7 @@ def header_field(value: Any) -> str:
     return ""
 
 
-def name_key(value: Any) -> str:
-    return re.sub(r"[^A-Z0-9]", "", _host_label(value).upper())
+from netops_platform.identity import name_key  # noqa: E402  (one matching key, ADR 0008)
 
 
 def ip_key(value: Any) -> str:
@@ -279,10 +323,36 @@ def parse_column_map(spec: str) -> Dict[str, str]:
             raise ExcelError(f"--map entry '{part}' must look like 'Header=field' or 'C=field'.")
         left, _, right = part.rpartition("=")
         target = right.strip().lower().replace("-", "_")
-        if target not in FIELDS:
-            raise ExcelError(f"--map field '{right.strip()}' is not one of: {', '.join(FIELDS)}.")
+        if target not in FIELDS + (REMARKS,):
+            raise ExcelError(f"--map field '{right.strip()}' is not one of: {', '.join(FIELDS + (REMARKS,))}.")
         mapping[left.strip()] = target
     return mapping
+
+
+def select_sheets(sheetnames: Sequence[str], spec: str) -> List[str]:
+    """`--sheet`: a name (any case/spacing), a 1-based position, or a comma list of either."""
+    def resolve(item: str) -> str:
+        item = item.strip()
+        if item in sheetnames:
+            return item
+        folded = [name for name in sheetnames if header_key(name) == header_key(item)]
+        if len(folded) == 1:
+            return folded[0]
+        if item.isdigit() and 1 <= int(item) <= len(sheetnames):
+            return sheetnames[int(item) - 1]
+        listing = ", ".join(f"{number}={name}" for number, name in enumerate(sheetnames, start=1))
+        raise ExcelError(f"No sheet named '{item}'. Sheets: {listing}")
+    spec = (spec or "").strip()
+    if spec in sheetnames:
+        return [spec]  # a sheet whose own name has a comma in it
+    chosen: List[str] = []
+    for item in [part for part in spec.split(",") if part.strip()]:
+        name = resolve(item)
+        if name not in chosen:
+            chosen.append(name)
+    if not chosen:
+        raise ExcelError("--sheet needs a sheet name or number.")
+    return chosen
 
 
 def detect_layout(ws: Any, overrides: Optional[Mapping[str, str]] = None, scan_rows: int = 30) -> Optional[SheetLayout]:
@@ -385,7 +455,9 @@ class CellChange:
     new: Any
     matched_by: str
     device: str
-    kind: str = "update"  # update | fill | add
+    kind: str = "update"  # update | fill | add | refresh (same value, rewritten)
+    confidence: str = "certain"
+    why: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         from openpyxl.utils import get_column_letter
@@ -393,6 +465,7 @@ class CellChange:
             "sheet": self.sheet, "cell": f"{get_column_letter(self.column)}{self.row}", "row": self.row,
             "column": self.header, "field": self.field, "old": _display(self.old), "new": _display(self.new),
             "matched_by": self.matched_by, "device": self.device, "kind": self.kind,
+            "confidence": self.confidence, "why": self.why,
         }
 
 
@@ -407,6 +480,145 @@ class SheetPlan:
     duplicates: List[Dict[str, Any]] = field(default_factory=list)
     matched_devices: Set[int] = field(default_factory=set)
     additions: List[Dict[str, Any]] = field(default_factory=list)
+    ip_checks: List[Dict[str, Any]] = field(default_factory=list)
+    remarks_column: int = 0  # set when the sheet had no Remarks column and one is added
+    probe_note: str = ""  # what the free-IP probe could not use on this machine
+
+
+@dataclass
+class IpFinding:
+    """What a free-IP check concluded about one sheet row's address.
+
+    state: free | in_use | recent (used within STALE_AFTER_DAYS) |
+    unconfirmed (names something unknown and silent; awaiting the operator) |
+    allocated (the operator said it is still spoken for) | reserved (a
+    remark reserves it). `priority` orders allocation suggestions: 1 for an
+    empty row, 2 for one last used long ago, 3 for a confirmed old entry.
+    """
+    state: str
+    remark: str
+    confidence: str
+    why: str
+    priority: int = 0
+    # What Netrune holds for a device on an empty row's address (name, mac,
+    # last_seen): the device is real but missing from the sheet.
+    fill: Dict[str, Any] = field(default_factory=dict)
+
+
+def ip_candidates(ws: Any, layout: SheetLayout, index: Optional["DeviceIndex"] = None) -> List[Dict[str, Any]]:
+    """Rows with an address that no Netrune switch matches, by any key.
+
+    `empty` rows name nothing (no hostname, serial, or MAC); the others name
+    something Netrune does not know. A row a switch matches is the switch's,
+    and plan_sheet fills it instead.
+    """
+    if "ip" not in layout.columns:
+        return []
+    found: List[Dict[str, Any]] = []
+    for row in range(layout.first_row, layout.last_row + 1):
+        cells = {name: ws.cell(row=row, column=col).value for name, col in layout.columns.items()}
+        ip = ip_key(cells.get("ip"))
+        if not ip or ip.endswith((".0", ".255")):
+            continue
+        if index is not None and any(index.lookup(kind, cells.get(kind)) for kind in IDENTITY_FIELDS if not _blank(cells.get(kind))):
+            continue
+        named = [str(cells[name]).strip() for name in ("hostname", "serial", "mac") if not _blank(cells.get(name))]
+        found.append({"sheet": layout.title, "row": row, "ip": ip, "empty": not named,
+                      "label": named[0] if named else "", "remark": cells.get(REMARKS)})
+    return found
+
+
+def prior_decision(remark: Any) -> str:
+    """An earlier answer to "is this old entry free?", kept in the remark itself."""
+    parts = {part.lower() for part in _remark_parts(remark)}
+    if FREE_OLD_ENTRY.lower() in parts:
+        return "accepted"
+    if ALLOCATED_OFFLINE.lower() in parts:
+        return "rejected"
+    return ""
+
+
+def classify_ip(ip: str, *, empty: bool, known: Mapping[str, str], history: Mapping[str, Tuple[str, int]],
+                reply: str, now: float, decision: str = "", details: Optional[Mapping[str, Mapping[str, Any]]] = None) -> IpFinding:
+    """Whether one row's address is free to use.
+
+    Never free when a device Netrune knows (online or offline) holds it, or
+    one was seen on it within STALE_AFTER_DAYS, or anything answers on it
+    (`reply`; every candidate is probed, empty rows included). Otherwise an
+    empty row is free, while a row naming something Netrune never saw is free
+    only if the operator agrees (`decision` "accepted"); "rejected" keeps it
+    allocated, offline. A known device on an empty row carries `details` into
+    the finding so its name and MAC can be written into the sheet.
+    """
+    if known.get(ip):
+        return IpFinding("in_use", f"In use ({known[ip]})", "certain", "in inventory",
+                         fill=dict((details or {}).get(ip) or {}) if empty else {})
+    if reply:
+        return IpFinding("in_use", f"In use ({reply})", "certain", reply + (", not in sheet" if empty else ""))
+    name, seen = history.get(ip, ("", 0))
+    days = int((now - seen) // 86400) if seen else -1
+    until = dt.datetime.fromtimestamp(seen).strftime("%Y-%m-%d") if seen else ""
+    if seen and days <= STALE_AFTER_DAYS:
+        return IpFinding("recent", f"Used by {name} until {until}", "weak", f"used {days} days ago")
+    if empty:
+        if seen:
+            return IpFinding("free", f"Free to use (was {name} until {until})", "fair", f"no reply; last used {days} days ago", 2)
+        return IpFinding("free", "Free to use", "certain", "empty row, no reply, no record", 1)
+    if decision == "accepted":
+        return IpFinding("free", FREE_OLD_ENTRY, "fair", "old entry, confirmed free", 3)
+    if decision == "rejected":
+        return IpFinding("allocated", ALLOCATED_OFFLINE, "fair", "kept allocated")
+    return IpFinding("unconfirmed", "", "weak", "unknown entry, no reply")
+
+
+def _remark_parts(value: Any) -> List[str]:
+    if _blank(value):
+        return []
+    return [part.strip() for part in re.split(r";\s*", str(value).strip()) if part.strip()]
+
+
+def _join_labels(fields: Sequence[str]) -> str:
+    labels = [REMARK_LABELS.get(name, name) for name in fields]
+    return labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " and " + labels[-1]
+
+
+def change_remark(changes: Sequence["CellChange"]) -> str:
+    """What one row's writes amount to, as the tech would note it."""
+    phrases = []
+    renamed = [change for change in changes if change.field == "hostname" and change.kind == "update"]
+    if renamed:
+        phrases.append(f"Renamed from {_display(renamed[0].old)}")
+    updated = [change.field for change in changes if change.kind == "update" and change.field != "hostname"]
+    if updated:
+        phrases.append("Updated " + _join_labels(updated))
+    filled = [change.field for change in changes if change.kind == "fill"]
+    if filled:
+        phrases.append("Added " + _join_labels(filled))
+    text = "; ".join(phrases)
+    if text and any(change.confidence in VERIFY_LEVELS for change in changes):
+        text += " (verify)"
+    return text
+
+
+def state_remark(device: Mapping[str, Any], now: float) -> str:
+    try:
+        seen = int(device.get("last_seen") or 0)
+    except (TypeError, ValueError):
+        seen = 0
+    if seen and (now - seen) // 86400 > STALE_AFTER_DAYS:
+        return "Last seen " + dt.datetime.fromtimestamp(seen).strftime("%Y-%m-%d")
+    return "Offline" if str(device.get("status") or "").upper() == "OFFLINE" else ""
+
+
+def merge_remark(existing: Any, new: Sequence[str]) -> str:
+    """The operator's text kept, this module's own state remarks replaced, new notes appended once."""
+    wanted = {phrase.lower() for phrase in new if phrase}
+    # Own remarks that still hold keep their place, so a re-run changes nothing.
+    merged = [part for part in _remark_parts(existing) if not OWN_REMARK.match(part) or part.lower() in wanted]
+    for phrase in new:
+        if phrase and phrase.lower() not in {part.lower() for part in merged}:
+            merged.append(phrase)
+    return "; ".join(merged)
 
 
 def _display(value: Any) -> str:
@@ -425,10 +637,51 @@ def _equivalent(field_name: str, current: Any, desired: Any) -> bool:
             return abs((current - desired).total_seconds()) < 60
         return False
     have, want = str(current).strip().lower(), str(desired).strip().lower()
-    if field_name == "platform":
-        # "Cisco" in a Vendor column already agrees with "Cisco IOS".
+    if field_name in {"platform", "manufacturer"}:
+        # "Cisco" in a Platform column already agrees with "Cisco IOS", and
+        # "Cisco Systems" in a Vendor column with "Cisco".
         return have in want or want in have
     return have == want
+
+
+def change_confidence(*, matched_by: str, forced: bool, kind: str, field_name: str,
+                      device: Mapping[str, Any], now: float) -> Tuple[str, str]:
+    """How sure Netrune is of one written cell, and the short reason why.
+
+    The match decides most of it: a serial or base MAC pins the row to one
+    switch (certain); two other keys agreeing nearly does (strong); an IP or
+    hostname alone can belong to a replaced switch, so it fills a blank at fair
+    and overwrites at weak. A --prefer tiebreak is doubtful. A switch Netrune
+    has not heard from lately drops any of it one step.
+    """
+    keys = set(matched_by.split("+"))
+    hardware = sorted(keys & HARDWARE_KEYS, key=lambda key: key != "serial")
+    match = f"{hardware[0]} match" if hardware else f"{len(keys)} keys match" if len(keys) > 1 else f"{matched_by} only"
+    if kind == "refresh":
+        return "certain", "same value, reformatted"
+    if kind == "add":
+        level, why = 3, "new row from inventory"
+    elif forced:
+        level, why = 0, "--prefer overrode a conflict"
+    elif kind == "update" and field_name in HARDWARE_KEYS and (hardware or len(keys) > 1):
+        # A sheet serial or MAC that disagrees with a switch pinned by its
+        # other keys is a typo or a hardware swap: either way, glance at it.
+        level, why = 2, f"{match}; replaced value"
+    elif hardware or len(keys) > 1:
+        level, why = (4 if hardware else 3), f"{match}; " + ("blank filled" if kind == "fill" else "replaced value")
+    elif kind == "fill":
+        level, why = 2, f"{match}; blank filled"
+    else:
+        level, why = 1, f"{match}; replaced value"
+    try:
+        seen = int(device.get("last_seen") or 0)
+    except (TypeError, ValueError):
+        seen = 0
+    age_days = int((now - seen) // 86400) if seen > 0 else -1
+    if age_days < 0 or age_days > STALE_AFTER_DAYS:
+        level = max(0, level - 1)
+        why = "never polled" if age_days < 0 else f"last seen {age_days} days ago"
+    return CONFIDENCE_LEVELS[level], why
 
 
 def _cell_text_for(layout: SheetLayout, field_name: str, value: Any) -> Any:
@@ -449,11 +702,32 @@ def plan_sheet(
     fill_only: bool = False,
     prefer: str = "",
     add_missing: bool = False,
+    refresh: Sequence[str] = (),
+    now: Optional[float] = None,
+    remarks: bool = False,
+    ip_findings: Optional[Mapping[int, IpFinding]] = None,
+    row_prefer: Optional[Mapping[int, Mapping[str, str]]] = None,
 ) -> SheetPlan:
+    """Plan the cell writes for one sheet.
+
+    `refresh` names columns to rewrite on every matched row, even where the
+    cell already holds the same value in another notation, and even under
+    `fill_only`. A column being refreshed is one the operator does not trust,
+    so it only matches rows that have no other key to go by.
+
+    `remarks` adds one brief note per row to the Remarks column (adding the
+    column when the sheet has none): what was changed, a switch that is
+    offline or long unseen, a row that conflicts or repeats another, and, from
+    `ip_findings` (keyed by row), whether the row's address is free to use.
+    """
     from openpyxl.cell.cell import MergedCell
     plan = SheetPlan(layout)
-    writable = [name for name in FIELDS if name in layout.columns and name in fields]
+    refresh = set(refresh)
+    now = time.time() if now is None else now
+    writable = [name for name in FIELDS if name in layout.columns and (name in fields or name in refresh)]
     owners: Dict[int, List[int]] = {}
+    row_device: Dict[int, Dict[str, Any]] = {}
+    row_notes: Dict[int, List[Tuple[str, str, str]]] = {}  # row -> (remark, confidence, why)
     for row in range(layout.first_row, layout.last_row + 1):
         cells = {name: ws.cell(row=row, column=col).value for name, col in layout.columns.items()}
         if all(_blank(cells.get(name)) for name in IDENTITY_FIELDS):
@@ -469,19 +743,62 @@ def plan_sheet(
             elif len(hits) > 1:
                 ambiguous.append(kind)
         label = next((str(cells[k]) for k in ("hostname", "ip", "serial", "mac") if not _blank(cells.get(k))), f"row {row}")
+        trusted = {kind: pos for kind, pos in votes.items() if kind not in refresh}
+        if trusted:
+            votes = trusted
         distinct = set(votes.values())
+        forced = False
         if not distinct:
             plan.unmatched.append({"sheet": layout.title, "row": row, "row_label": label,
                                    "reason": "ambiguous " + "/".join(ambiguous) if ambiguous else "no Netrune device has these values"})
+            finding = (ip_findings or {}).get(row)
+            if finding:
+                plan.ip_checks.append({"sheet": layout.title, "row": row, "ip": ip_key(cells.get("ip")),
+                                       "named": label if label != ip_key(cells.get("ip")) else "",
+                                       "state": finding.state, "remark": finding.remark, "why": finding.why,
+                                       "priority": finding.priority})
+                for name in ("hostname", "mac"):
+                    value = finding.fill.get(name)
+                    column = layout.columns.get(name)
+                    if not value or not column or not _blank(ws.cell(row=row, column=column).value):
+                        continue
+                    level, why = change_confidence(matched_by="ip", forced=False, kind="fill", field_name=name,
+                                                   device=finding.fill, now=now)
+                    plan.changes.append(CellChange(layout.title, row, column, layout.headers.get(column, name), name, None,
+                                                   _cell_text_for(layout, name, value), "ip", finding.remark[8:-1],
+                                                   "fill", level, why))
+                if finding.state == "unconfirmed":
+                    # Nothing new is said until the operator answers, but a
+                    # "Free to use" from when the row was empty is cleared.
+                    row_notes.setdefault(row, []).append(("", "certain", "cleared old remark"))
+                    continue
+                row_notes.setdefault(row, []).append((finding.remark, finding.confidence, finding.why))
+            elif ip_findings is not None:
+                # Not an open address any more (someone named a device on it):
+                # an old "Free to use" here is cleared.
+                row_notes.setdefault(row, []).append(("", "certain", "cleared old remark"))
             continue
         if len(distinct) > 1:
-            if prefer and prefer in votes:
-                distinct = {votes[prefer]}
+            # An answer given for this row (`health review`) counts only while
+            # the row still reads the same, so a stale one never lands elsewhere.
+            answered = (row_prefer or {}).get(row) or {}
+            chosen = answered.get("kind") if answered.get("label") == label else ""
+            chosen = chosen if chosen in votes else prefer
+            if chosen and chosen in votes:
+                distinct = {votes[chosen]}
+                forced = True
             else:
                 plan.conflicts.append({
                     "sheet": layout.title, "row": row, "row_label": label,
                     "points_to": ", ".join(f"{kind}->{_device_label(index.devices[pos])}" for kind, pos in votes.items()),
+                    "votes": {kind: _device_label(index.devices[pos]) for kind, pos in votes.items()},
                 })
+                keys_by_device: Dict[int, List[str]] = {}
+                for kind, pos in votes.items():
+                    keys_by_device.setdefault(pos, []).append(REMARK_LABELS[kind])
+                said = ", ".join(f"{'/'.join(keys)} is {_host_label(index.devices[pos].get('hostname') or index.devices[pos].get('name') or index.devices[pos].get('ip'))}"
+                                 for pos, keys in keys_by_device.items())
+                row_notes.setdefault(row, []).append((f"Check: {said}", "doubtful", "keys disagree"))
                 continue
         position = next(iter(distinct))
         device = index.devices[position]
@@ -489,9 +806,13 @@ def plan_sheet(
         plan.matched_rows += 1
         plan.matched_devices.add(position)
         owners.setdefault(position, []).append(row)
+        row_device[row] = device
         for name in writable:
             desired = device_value(device, name)
             if desired is None:
+                if name in refresh and not _blank(ws.cell(row=row, column=layout.columns[name]).value):
+                    plan.kept.append({"sheet": layout.title, "row": row, "column": layout.headers.get(layout.columns[name], name),
+                                      "reason": f"--refresh: Netrune has no {name} for it"})
                 continue
             column = layout.columns[name]
             cell = ws.cell(row=row, column=column)
@@ -502,20 +823,28 @@ def plan_sheet(
                 if not _equivalent(name, current, desired):
                     plan.kept.append({"sheet": layout.title, "row": row, "column": layout.headers.get(column, name), "reason": "formula cell left as-is"})
                 continue
+            text = _cell_text_for(layout, name, desired)
             if _equivalent(name, current, desired):
-                continue
-            if fill_only and not _blank(current):
+                if name not in refresh or _display(current) == _display(text):
+                    continue
+                kind = "refresh"
+            elif fill_only and not _blank(current) and name not in refresh:
                 plan.kept.append({"sheet": layout.title, "row": row, "column": layout.headers.get(column, name),
-                                  "reason": f"--fill-only kept '{_display(current)}' (Netrune: '{_display(_cell_text_for(layout, name, desired))}')"})
+                                  "reason": f"--fill-only kept '{_display(current)}' (Netrune: '{_display(text)}')"})
                 continue
+            else:
+                kind = "fill" if _blank(current) else "update"
+            confidence, why = change_confidence(matched_by=matched_by, forced=forced, kind=kind,
+                                                field_name=name, device=device, now=now)
             plan.changes.append(CellChange(
                 layout.title, row, column, layout.headers.get(column, name), name, current,
-                _cell_text_for(layout, name, desired), matched_by, _device_label(device),
-                "fill" if _blank(current) else "update",
+                text, matched_by, _device_label(device), kind, confidence, why,
             ))
     for position, rows in owners.items():
         if len(rows) > 1:
             plan.duplicates.append({"sheet": layout.title, "device": _device_label(index.devices[position]), "rows": ", ".join(map(str, rows))})
+            for row in rows[1:]:
+                row_notes.setdefault(row, []).append((f"Duplicate of row {rows[0]}", "fair", "switch on several rows"))
     if add_missing:
         next_row = layout.last_row + 1
         for position, device in enumerate(index.devices):
@@ -529,12 +858,69 @@ def plan_sheet(
                 if values.get(name) is None:
                     continue
                 column = layout.columns[name]
+                confidence, why = change_confidence(matched_by="", forced=False, kind="add",
+                                                    field_name=name, device=device, now=now)
                 plan.changes.append(CellChange(
                     layout.title, next_row, column, layout.headers.get(column, name), name, None,
                     _cell_text_for(layout, name, values[name]), "not in sheet", _device_label(device), "add",
+                    confidence, why,
                 ))
             next_row += 1
+    if remarks:
+        _plan_remarks(ws, plan, row_device, row_notes, now)
     return plan
+
+
+def _plan_remarks(ws: Any, plan: SheetPlan, row_device: Mapping[int, Mapping[str, Any]],
+                  row_notes: Dict[int, List[Tuple[str, str, str]]], now: float) -> None:
+    from openpyxl.cell.cell import MergedCell
+    layout = plan.layout
+    by_row: Dict[int, List[CellChange]] = {}
+    for change in plan.changes:
+        by_row.setdefault(change.row, []).append(change)
+    for row, changes in by_row.items():
+        noted = change_remark([change for change in changes if change.kind != "refresh"])
+        if any(change.kind == "add" for change in changes):
+            row_notes.setdefault(row, []).append(("Added, found on network", "strong", "new row from inventory"))
+        elif noted:
+            worst = min((change.confidence for change in changes), key=CONFIDENCE_LEVELS.index)
+            row_notes.setdefault(row, []).append((noted, worst, "row updated"))
+    for row, device in row_device.items():
+        status = state_remark(device, now)
+        # Run for every matched row, so a stale "Offline" or "Free to use" is cleared.
+        row_notes.setdefault(row, []).append((status, "fair" if status else "certain", "switch state"))
+    column = layout.columns.get(REMARKS)
+    if not column:
+        if not any(note for notes in row_notes.values() for note, _, _ in notes):
+            return
+        column = max(layout.headers) + 1 if layout.headers else 1
+        while any(not _blank(ws.cell(row=r, column=column).value) for r in range(layout.header_row, layout.last_row + 1)):
+            column += 1
+        plan.remarks_column = column
+        plan.changes.append(CellChange(layout.title, layout.header_row, column, REMARKS_HEADER, REMARKS, None,
+                                       REMARKS_HEADER, "", "", "header", "certain", "new Remarks column"))
+    for row in sorted(row_notes):
+        cell = ws.cell(row=row, column=column)
+        if isinstance(cell, MergedCell) or cell.data_type == "f":
+            continue
+        notes = [(text, level, why) for text, level, why in row_notes[row]]
+        finding_free = any(text.lower().startswith("free to use") for text, _, _ in notes)
+        theirs = [part for part in _remark_parts(cell.value) if not OWN_REMARK.match(part)]
+        if finding_free and any(RESERVED_WORDS.search(part) for part in theirs):
+            plan.kept.append({"sheet": layout.title, "row": row, "column": layout.headers.get(column, REMARKS_HEADER),
+                              "reason": f"no reply, but the remark says '{'; '.join(theirs)[:40]}'"})
+            notes = [note for note in notes if not note[0].lower().startswith("free to use")]
+            for check in plan.ip_checks:
+                if check["row"] == row:
+                    check.update(state="reserved", remark="(kept: " + "; ".join(theirs)[:40] + ")", why="remark reserves it")
+        merged = merge_remark(cell.value, [text for text, _, _ in notes])
+        if merged == ("; ".join(_remark_parts(cell.value))) or (not merged and _blank(cell.value)):
+            continue
+        written = [(text, level, why) for text, level, why in notes if text] or [("", "certain", "cleared old remark")]
+        level, why = min(((lvl, w) for _, lvl, w in written), key=lambda item: CONFIDENCE_LEVELS.index(item[0]))
+        plan.changes.append(CellChange(layout.title, row, column, layout.headers.get(column, REMARKS_HEADER), REMARKS,
+                                       cell.value, merged or None, "", "", "fill" if _blank(cell.value) else "update",
+                                       level, why))
 
 
 def _device_label(device: Mapping[str, Any]) -> str:
@@ -546,14 +932,16 @@ def _device_label(device: Mapping[str, Any]) -> str:
 # Applying
 
 
-def apply_plans(wb: Any, plans: Sequence[SheetPlan], *, comments: bool = True, highlight: bool = False,
+def apply_plans(wb: Any, plans: Sequence[SheetPlan], *, shade: bool = True, comments: bool = False,
                 stamp: str = "") -> int:
     from openpyxl.comments import Comment
     from openpyxl.formula.translate import Translator
     from openpyxl.styles import PatternFill
     from openpyxl.utils import get_column_letter
-    fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
-    stamp = stamp or dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    from openpyxl.worksheet.table import TableColumn
+    fills = {level: PatternFill(start_color=color, end_color=color, fill_type="solid") for level, color in CONFIDENCE_FILLS.items()}
+    stamp = stamp or dt.datetime.now().strftime("%Y-%m-%d")
+    author = _operator_name()
     applied = 0
     for plan in plans:
         ws = wb[plan.layout.title]
@@ -570,18 +958,43 @@ def apply_plans(wb: Any, plans: Sequence[SheetPlan], *, comments: bool = True, h
                 if source.data_type == "f" and isinstance(source.value, str):
                     origin = f"{get_column_letter(col)}{template_row}"
                     target.value = Translator(source.value, origin=origin).translate_formula(f"{get_column_letter(col)}{row}")
+        if plan.remarks_column:
+            # The new Remarks column looks like the header and the column beside it.
+            left = plan.remarks_column - 1
+            for row in range(plan.layout.header_row, max([plan.layout.last_row] + added_rows) + 1):
+                source = ws.cell(row=row, column=left) if left >= 1 else None
+                if source is not None and source.has_style:
+                    ws.cell(row=row, column=plan.remarks_column)._style = copy.copy(source._style)
+            letter = get_column_letter(plan.remarks_column)
+            if left >= 1 and ws.column_dimensions[get_column_letter(left)].width:
+                ws.column_dimensions[letter].width = max(ws.column_dimensions[get_column_letter(left)].width, 30)
+            else:
+                ws.column_dimensions[letter].width = 30
+            for table in ws.tables.values():
+                start, _, end = table.ref.partition(":")
+                end_col = re.sub(r"[0-9]", "", end)
+                start_row = int(re.sub(r"[A-Z]", "", start))
+                if start_row == plan.layout.header_row and end_col == get_column_letter(left):
+                    table.ref = f"{start}:{letter}{re.sub(r'[A-Z]', '', end)}"
+                    table.tableColumns.append(TableColumn(id=max((c.id for c in table.tableColumns), default=0) + 1, name=REMARKS_HEADER))
+                    if table.autoFilter is not None:
+                        table.autoFilter.ref = table.ref
         for change in plan.changes:
             cell = ws.cell(row=change.row, column=change.column)
             cell.value = change.new
             if isinstance(change.new, dt.datetime) and cell.number_format in {"General", ""}:
                 cell.number_format = "yyyy-mm-dd hh:mm"
-            if comments:
-                note = (f"Netrune {stamp}: added {change.device}" if change.kind == "add"
-                        else f"Netrune {stamp}: was '{_display(change.old)}'" if change.kind == "update"
-                        else f"Netrune {stamp}: filled from {change.device}")
-                cell.comment = Comment(note, "Netrune", width=260, height=60)
-            if highlight:
-                cell.fill = fill
+            if change.kind == "header":
+                applied += 1
+                continue
+            if comments and change.field != REMARKS:
+                note = ("Added, found on network" if change.kind == "add"
+                        else f"Was '{_display(change.old)}'" if change.kind in {"update", "refresh"}
+                        else "Filled in")
+                cell.comment = Comment(f"{stamp}: {note}" + (" (verify)" if change.confidence in VERIFY_LEVELS else ""),
+                                       author, width=220, height=50)
+            if shade:
+                cell.fill = fills[change.confidence]
             applied += 1
         if added_rows:
             last = max(added_rows)
@@ -594,6 +1007,14 @@ def apply_plans(wb: Any, plans: Sequence[SheetPlan], *, comments: bool = True, h
                     if table.autoFilter is not None:
                         table.autoFilter.ref = table.ref
     return applied
+
+
+def _operator_name() -> str:
+    import getpass
+    try:
+        return getpass.getuser()
+    except (KeyError, OSError):  # pragma: no cover - no passwd entry
+        return "Network team"
 
 
 def verify_saved(path: Path, plans: Sequence[SheetPlan]) -> List[str]:
@@ -653,7 +1074,7 @@ def build_tracker(devices: Sequence[Mapping[str, Any]], path: Path, *, generated
     wb = openpyxl.Workbook()
     inv = wb.active
     inv.title = "Inventory"
-    columns = ["Hostname", "IP Address", "Platform", "Model", "Serial Number", "Base MAC", "Status",
+    columns = ["Hostname", "IP Address", "Manufacturer", "Platform", "Model", "Serial Number", "Base MAC", "Status",
                "Last Seen", "Days Since Seen", "Site", "Owner", "Notes"]
     inv.append(columns)
     rows = sorted(devices, key=lambda d: (_host_label(d.get("hostname") or d.get("name") or "").lower(), str(d.get("ip") or "")))
@@ -661,26 +1082,27 @@ def build_tracker(devices: Sequence[Mapping[str, Any]], path: Path, *, generated
         inv.append([
             _host_label(device.get("hostname") or device.get("name") or "") or None,
             device.get("ip") or None,
+            device_value(device, "manufacturer"),
             device_value(device, "platform"),
             device_value(device, "model"),
             device_value(device, "serial"),
             format_mac_as(device.get("mac"), "colon", False) or None,
             device_value(device, "status"),
             device_value(device, "last_seen"),
-            f'=IF(H{number}="","",INT(TODAY()-H{number}))',
+            f'=IF(I{number}="","",INT(TODAY()-I{number}))',
             None, None, None,
         ])
-        inv.cell(row=number, column=8).number_format = "yyyy-mm-dd hh:mm"
+        inv.cell(row=number, column=9).number_format = "yyyy-mm-dd hh:mm"
     last = max(2, len(rows) + 1)
     table = Table(displayName="Inventory", ref=f"A1:{get_column_letter(len(columns))}{last}")
     table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
     inv.add_table(table)
     inv.freeze_panes = "B2"
-    for col, width in zip("ABCDEFGHIJKL", (30, 15, 14, 24, 16, 19, 10, 17, 10, 16, 14, 40)):
+    for col, width in zip("ABCDEFGHIJKLM", (30, 15, 14, 14, 24, 16, 19, 10, 17, 10, 16, 14, 40)):
         inv.column_dimensions[col].width = width
-    inv.conditional_formatting.add(f"G2:G{last}", CellIsRule(operator="equal", formula=['"OFFLINE"'], fill=red))
-    inv.conditional_formatting.add(f"G2:G{last}", CellIsRule(operator="equal", formula=['"ONLINE"'], fill=green))
-    inv.conditional_formatting.add(f"I2:I{last}", FormulaRule(formula=[f'AND(ISNUMBER(I2),I2>7)'], fill=amber))
+    inv.conditional_formatting.add(f"H2:H{last}", CellIsRule(operator="equal", formula=['"OFFLINE"'], fill=red))
+    inv.conditional_formatting.add(f"H2:H{last}", CellIsRule(operator="equal", formula=['"ONLINE"'], fill=green))
+    inv.conditional_formatting.add(f"J2:J{last}", FormulaRule(formula=[f'AND(ISNUMBER(J2),J2>7)'], fill=amber))
 
     summary = wb.create_sheet("Summary", 0)
     summary["A1"] = "Network inventory summary"
@@ -690,18 +1112,19 @@ def build_tracker(devices: Sequence[Mapping[str, Any]], path: Path, *, generated
     rng = lambda col: f"Inventory!${col}$2:${col}${last}"  # noqa: E731
     kpis = [
         ("Devices", f'=COUNTA({rng("A")})'),
-        ("Online", f'=COUNTIF({rng("G")},"ONLINE")'),
-        ("Offline", f'=COUNTIF({rng("G")},"OFFLINE")'),
+        ("Online", f'=COUNTIF({rng("H")},"ONLINE")'),
+        ("Offline", f'=COUNTIF({rng("H")},"OFFLINE")'),
         ("Online %", "=IF(B4=0,0,B5/B4)"),
-        ("Not seen for 7+ days", f'=COUNTIF({rng("I")},">7")'),
-        ("Missing serial", f'=COUNTBLANK({rng("E")})'),
-        ("Missing base MAC", f'=COUNTBLANK({rng("F")})'),
+        ("Not seen for 7+ days", f'=COUNTIF({rng("J")},">7")'),
+        ("Missing serial", f'=COUNTBLANK({rng("F")})'),
+        ("Missing base MAC", f'=COUNTBLANK({rng("G")})'),
     ]
     for offset, (label, formula) in enumerate(kpis, start=4):
         summary.cell(row=offset, column=1, value=label).font = Font(bold=True)
         summary.cell(row=offset, column=2, value=formula)
     summary["B7"].number_format = "0.0%"
     models = sorted({str(device_value(d, "model")) for d in rows if device_value(d, "model")})
+    makers = sorted({str(d.get("manufacturer")) for d in rows if not _blank(d.get("manufacturer"))})
     platforms = sorted({str(d.get("platform")) for d in rows if not _blank(d.get("platform"))})
     start = 13
     for col, title in ((1, "Model"), (2, "Devices"), (3, "Online"), (4, "Offline")):
@@ -710,9 +1133,9 @@ def build_tracker(devices: Sequence[Mapping[str, Any]], path: Path, *, generated
     for offset, model in enumerate(models):
         row = start + offset
         summary.cell(row=row, column=1, value=model)
-        summary.cell(row=row, column=2, value=f"=COUNTIF({rng('D')},A{row})")
-        summary.cell(row=row, column=3, value=f'=COUNTIFS({rng("D")},A{row},{rng("G")},"ONLINE")')
-        summary.cell(row=row, column=4, value=f'=COUNTIFS({rng("D")},A{row},{rng("G")},"OFFLINE")')
+        summary.cell(row=row, column=2, value=f"=COUNTIF({rng('E')},A{row})")
+        summary.cell(row=row, column=3, value=f'=COUNTIFS({rng("E")},A{row},{rng("H")},"ONLINE")')
+        summary.cell(row=row, column=4, value=f'=COUNTIFS({rng("E")},A{row},{rng("H")},"OFFLINE")')
     if models:
         chart = BarChart()
         chart.type = "bar"
@@ -726,13 +1149,20 @@ def build_tracker(devices: Sequence[Mapping[str, Any]], path: Path, *, generated
         chart.set_categories(cats)
         chart.legend = None
         summary.add_chart(chart, "F4")
-    prow = start + len(models) + 2
+    mrow = start + len(models) + 2
+    for col, title in ((1, "Manufacturer"), (2, "Devices")):
+        cell = summary.cell(row=mrow, column=col, value=title)
+        cell.font, cell.fill = header_font, header_fill
+    for offset, maker in enumerate(makers, start=1):
+        summary.cell(row=mrow + offset, column=1, value=maker)
+        summary.cell(row=mrow + offset, column=2, value=f"=COUNTIF({rng('C')},A{mrow + offset})")
+    prow = mrow + len(makers) + 2
     for col, title in ((1, "Platform"), (2, "Devices")):
         cell = summary.cell(row=prow, column=col, value=title)
         cell.font, cell.fill = header_font, header_fill
     for offset, platform in enumerate(platforms, start=1):
         summary.cell(row=prow + offset, column=1, value=platform)
-        summary.cell(row=prow + offset, column=2, value=f"=COUNTIF({rng('C')},A{prow + offset})")
+        summary.cell(row=prow + offset, column=2, value=f"=COUNTIF({rng('D')},A{prow + offset})")
     summary.column_dimensions["A"].width = 30
     summary.column_dimensions["B"].width = 12
 
@@ -744,7 +1174,7 @@ def build_tracker(devices: Sequence[Mapping[str, Any]], path: Path, *, generated
     for row in range(2, end + 1):
         lookup = f"MATCH(A{row},Inventory!$A$2:$A${last},0)"
         mig.cell(row=row, column=2, value=f'=IF(A{row}="","",IFERROR(INDEX(Inventory!$B$2:$B${last},{lookup}),"not in inventory"))')
-        mig.cell(row=row, column=3, value=f'=IF(A{row}="","",IFERROR(INDEX(Inventory!$D$2:$D${last},{lookup}),""))')
+        mig.cell(row=row, column=3, value=f'=IF(A{row}="","",IFERROR(INDEX(Inventory!$E$2:$E${last},{lookup}),""))')
         mig.cell(row=row, column=10, value=f'=IF(OR(G{row}="",H{row}="Done",H{row}="Cancelled"),"",MAX(0,INT(TODAY()-G{row})))')
         mig.cell(row=row, column=7).number_format = "yyyy-mm-dd"
         mig.cell(row=row, column=9).number_format = "yyyy-mm-dd"

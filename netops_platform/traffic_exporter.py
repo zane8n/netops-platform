@@ -20,6 +20,9 @@ from netops_platform.traffic_metrics import MetricsExporter
 
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+# Inside the stack's default 5s scrape interval, so a busy answer reaches the
+# scraper rather than the scraper giving up on a thread that is still waiting.
+RENDER_WAIT_SECONDS = 4.0
 
 
 # Tailscale hands out addresses from the CGNAT range. A bind there is reachable
@@ -72,15 +75,25 @@ class _Handler(BaseHTTPRequestHandler):
     sys_version = ""
     exporter: MetricsExporter = None  # type: ignore[assignment]
     logger = None
+    # One render at a time. Every scrape gets its own thread, so a render slower
+    # than the scrape interval would otherwise stack up threads, connections,
+    # and result sets without bound -- the process has to stay small for weeks.
+    render_lock: threading.Lock = None  # type: ignore[assignment]
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's interface
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
         if path in {"/metrics", "/"}:
+            if not self.render_lock.acquire(timeout=RENDER_WAIT_SECONDS):
+                self._respond(503, b"exposition busy: a previous scrape is still rendering\n",
+                              "text/plain; charset=utf-8")
+                return
             try:
                 body = self.exporter.render().encode("utf-8")
             except Exception as exc:  # pragma: no cover - reported to the scraper
                 self._respond(500, f"exposition failed: {exc}\n".encode("utf-8"), "text/plain; charset=utf-8")
                 return
+            finally:
+                self.render_lock.release()
             self._respond(200, body, CONTENT_TYPE)
             return
         if path == "/health":
@@ -127,6 +140,7 @@ def build_server(monitor: Any, host: str, port: int, logger: Optional[Any] = Non
     handler = type("NetruneMetricsHandler", (_Handler,), {
         "exporter": MetricsExporter(monitor),
         "logger": logger,
+        "render_lock": threading.Lock(),
     })
     family = socket.AF_INET
     try:

@@ -35,6 +35,38 @@ from netops_platform.profiles import environment_value
 
 
 class DiagnoseCommandsMixin:
+    def _latency_target(self, target: str, opts: Any) -> Optional[str]:
+        """A latency target typed as a name, resolved to one address: an exact
+        name or IP wins; several switches/APs matching open the same
+        numbered picker as `device ssh`. Addresses, abbreviations, ranges,
+        and target files go to the probe unchanged, as does a name nothing in
+        the inventory matches (DNS may know it). None means the operator
+        cancelled the pick.
+        """
+        from netops_platform.core import GlobalOptions, clean_display_name
+        if not target or re.fullmatch(r"[0-9./-]+", target) or Path(target).is_file():
+            return target
+        rows = [row for row in self.inventory_rows(target, GlobalOptions(limit=1_000_000)) if row.get("ip")]
+        needle = target.lower()
+        exact = [row for row in rows if needle in {str(row.get("ip") or "").lower(),
+                                                    str(row.get("hostname") or row.get("name") or "").lower()}]
+        choices = exact or rows
+        if len(choices) == 1:
+            return str(choices[0]["ip"])
+        if len(choices) < 2:
+            return target
+
+        def label(row: Dict[str, Any]) -> str:
+            name = clean_display_name(row.get("hostname") or row.get("name") or "") or "(unnamed)"
+            kind = "AP" if row.get("kind") == "ap" else "switch"
+            return f"{name:<28} {str(row.get('ip') or ''):<15} {kind:<6} {str(row.get('platform') or '')[:24]:<24} {row.get('status') or ''}"
+        if not (sys.stdin.isatty() and sys.stdout.isatty()) or opts.json or opts.plain:
+            # The probe's own numbered list handles a plain terminal; a pipe
+            # gets its "ambiguous target" error, as before.
+            return target
+        picked = self._select_row(choices, opts, label=label, prompt=f"{len(choices)} switches/APs match '{target}':")
+        return str(picked["ip"]) if picked else None
+
 
     def resolve_one(self,target:str)->str:
         from netops_platform.core import IP_RE, normalize_target_literal
@@ -796,6 +828,11 @@ class DiagnoseCommandsMixin:
         if verb=="latency":
             if not rest: return self.usage_error("diagnose","latency",opts,"Missing target.","netrune diagnose latency 1.1.1.1")
             target=normalize_target_literal(rest[0]); extra=[]; i=1
+            picked = self._latency_target(target, opts)
+            if picked is None:
+                self.emit({"ok": False, "cancelled": True}, opts, "Cancelled.")
+                return SUCCESS
+            target = picked
             while i < len(rest):
                 if rest[i] in {"--count","-c"} and i+1<len(rest): extra += ["-c",rest[i+1]]; i+=2
                 elif rest[i] in {"--port","-p"} and i+1<len(rest): extra += ["-p",rest[i+1]]; i+=2

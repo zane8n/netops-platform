@@ -10,6 +10,7 @@ from netops_devices import (
     DeviceDriverRegistry,
     UnsupportedDeviceAction,
     detect_device_family,
+    device_manufacturer,
     driver_for,
     firmware_certification,
     main,
@@ -29,6 +30,39 @@ class DeviceDriverTest(unittest.TestCase):
         for evidence, family in fixtures:
             with self.subTest(family=family):
                 self.assertEqual(detect_device_family(**evidence).family, family)
+
+    def test_manufacturer_comes_from_the_model_before_any_label(self):
+        fixtures = (
+            ({"platform": "Cisco IOS", "model": "C9200CX-12P-2X2G"}, "Cisco"),
+            ({"platform": "Ruckus FastIron", "model": "C9200L-24P-4G"}, "Cisco"),
+            ({"platform": "Cisco IOS", "model": "IE-3300-8U2X"}, "Cisco"),
+            ({"platform": "Aruba AOS-S", "model": "2930F-8G-PoE+-2SFP+"}, "Aruba"),
+            ({"platform": "Aruba AOS-S", "model": "5412Rzl2"}, "Aruba"),
+            ({"platform": "", "model": "JL258A"}, "Aruba"),
+            ({"platform": "Ruckus R610 Multimedia Hotzone Wireless AP"}, "Ruckus"),
+            ({"platform": "cisco C9136I-ROW"}, "Cisco"),
+            ({"platform": "Cisco-AP"}, "Cisco"),
+            ({"platform": "UAP-AC-Mesh-Pro, 4.3.21.11325"}, "Ubiquiti"),
+            ({"platform": "Cisco IOS", "model": "N/A"}, "Cisco"),
+            ({"platform": "", "model": "N/A", "family": "aruba-aos-cx"}, "Aruba"),
+            ({"platform": "ex House14 AP"}, ""),
+        )
+        for evidence, maker in fixtures:
+            with self.subTest(evidence=evidence):
+                self.assertEqual(device_manufacturer(**evidence), maker)
+
+    def test_model_number_overrides_a_label_naming_another_maker(self):
+        # A stored platform label is netrune's own earlier verdict; fed back in
+        # it used to keep a mislabelled switch on the wrong driver forever.
+        cisco = detect_device_family(platform="Ruckus FastIron", model="C9200L-24P-4G", hostname="SW1")
+        self.assertEqual(cisco.family, "cisco-ios")
+        self.assertIn("model C9200L-24P-4G is Cisco", cisco.reasons[0])
+        self.assertEqual(detect_device_family(platform="Cisco IOS", model="2930F-8G-PoE+-2SFP+").family, "aruba-aos-switch")
+        # A hostname left over from the vendor a switch replaced is a stale label too.
+        self.assertEqual(detect_device_family(platform="Cisco IOS", model="C9300", hostname="ARUBA-SW").family, "cisco-ios")
+        # Agreement, and a model that names no maker, change nothing.
+        self.assertEqual(detect_device_family(platform="Cisco IOS", model="C9300-48P").reasons, ("Cisco IOS platform marker",))
+        self.assertEqual(detect_device_family(platform="RUCKUS ICX7150 FastIron", model="N/A").family, "ruckus-fastiron")
 
     def test_family_command_plans_are_semantic_and_vendor_specific(self):
         cisco = driver_for(family="cisco-ios").command_plan("mac_lookup", mac="02:00:00:00:00:25")

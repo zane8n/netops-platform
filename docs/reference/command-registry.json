@@ -14,6 +14,36 @@
         "target"
       ],
       "cancellable": true,
+      "command": "netrune ap controller '<target>'",
+      "description": "Show what the wireless controllers last reported per AP: model, serial, firmware, connection status, uptime, and poll time.",
+      "domain": "ap",
+      "examples": [],
+      "id": "ap-controller",
+      "label": "Controller AP details",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
       "command": "netrune ap list '<target>'",
       "description": "Search current reconciled AP inventory.",
       "domain": "ap",
@@ -115,6 +145,29 @@
       "state_effects": [],
       "timeout_seconds": 0,
       "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune ap neighbors --all",
+      "description": "Read switches' CDP/LLDP neighbour tables over SSH and record which port each AP is on.",
+      "domain": "ap",
+      "examples": [],
+      "id": "ap-neighbors",
+      "label": "AP attachment from CDP/LLDP",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
     },
     {
       "arg_schema": [
@@ -539,6 +592,1252 @@
       "writes_local": false
     },
     {
+      "arg_schema": [
+        {
+          "label": "Device[,...]",
+          "name": "device[,...]",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "device[,...]"
+      ],
+      "cancellable": true,
+      "command": "netrune check alive '<device[,...]>'",
+      "description": "Ping just these devices now and say which answer.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-alive",
+      "label": "Shortcut \"alive\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Ap",
+          "name": "ap",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "ap"
+      ],
+      "cancellable": true,
+      "command": "netrune check ap-history '<ap>'",
+      "description": "Where one AP has been attached over time.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-ap-history",
+      "label": "Shortcut \"ap-history\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check ap-moves",
+      "description": "APs that changed switch or port, newest first.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-ap-moves",
+      "label": "Shortcut \"ap-moves\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Switch[,...]",
+          "name": "switch[,...]",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "switch[,...]"
+      ],
+      "cancellable": true,
+      "command": "netrune check ap-ports '<switch[,...]>'",
+      "description": "Live: read CDP/LLDP and the MAC table to confirm which port each AP is on.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-ap-ports",
+      "label": "Shortcut \"ap-ports\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check ap-refresh",
+      "description": "Re-read APs from the controllers and switches.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-ap-refresh",
+      "label": "Shortcut \"ap-refresh\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check ap-unjoined",
+      "description": "APs the controller lists as not joined.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-ap-unjoined",
+      "label": "Shortcut \"ap-unjoined\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Switch",
+          "name": "switch",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "switch"
+      ],
+      "cancellable": true,
+      "command": "netrune check aps-on '<switch>'",
+      "description": "Which APs hang off a switch, and on which ports.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-aps-on",
+      "label": "Shortcut \"aps-on\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check attention",
+      "description": "Everything that wants a look: outages, flapping, link changes, AP moves, failed backups, merge candidates.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-attention",
+      "label": "Shortcut \"attention\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check backup-all",
+      "description": "Back up every online device whose config changed.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-backup-all",
+      "label": "Shortcut \"backup-all\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Device",
+          "name": "device",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "device"
+      ],
+      "cancellable": true,
+      "command": "netrune check backups '<device>'",
+      "description": "Backup history for a device.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-backups",
+      "label": "Shortcut \"backups\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Switch",
+          "name": "switch",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Port",
+          "max": 65535,
+          "min": 1,
+          "name": "port",
+          "required": false,
+          "type": "number"
+        }
+      ],
+      "args": [
+        "switch",
+        "port"
+      ],
+      "cancellable": true,
+      "command": "netrune check cable '<switch>' '<port>'",
+      "description": "The last recorded cable (TDR) result for a port; starts no test.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-cable",
+      "label": "Shortcut \"cable\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Device",
+          "name": "device",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "device"
+      ],
+      "cancellable": true,
+      "command": "netrune check config-diff '<device>'",
+      "description": "What changed between a device's last two different configs.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-config-diff",
+      "label": "Shortcut \"config-diff\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check db",
+      "description": "Quick database health: storage, references, labels, identities, merges, caches, stuck jobs.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-db",
+      "label": "Shortcut \"db\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check db-deep",
+      "description": "Full SQLite integrity check (slower).",
+      "domain": "check",
+      "examples": [],
+      "id": "check-db-deep",
+      "label": "Shortcut \"db-deep\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check db-fix",
+      "description": "The same, and fix what has one right answer (re-apply merges, relabel, drop switches filed as APs).",
+      "domain": "check",
+      "examples": [],
+      "id": "check-db-fix",
+      "label": "Shortcut \"db-fix\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check db-size",
+      "description": "Where the database is, its size, schema, and record counts.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-db-size",
+      "label": "Shortcut \"db-size\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Name|Ip",
+          "name": "name|ip",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "name|ip"
+      ],
+      "cancellable": true,
+      "command": "netrune check device '<name|ip>'",
+      "description": "Everything Netrune knows about one device: identity, history, relationships.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-device",
+      "label": "Shortcut \"device\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check doctor",
+      "description": "Is this machine set up right: tools, routes, trust, core settings.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-doctor",
+      "label": "Shortcut \"doctor\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check down",
+      "description": "What is down right now, from the last pulse.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-down",
+      "label": "Shortcut \"down\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check find",
+      "description": "Find a switch or AP by any part of its name, IP, MAC, serial, or model.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-find",
+      "label": "Shortcut \"find\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Ip|Mac",
+          "name": "ip|mac",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "ip|mac"
+      ],
+      "cancellable": true,
+      "command": "netrune check find-ip '<ip|mac>'",
+      "description": "Ask the core switch's ARP/MAC tables who an IP or MAC is.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-find-ip",
+      "label": "Shortcut \"find-ip\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Mac",
+          "name": "mac",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "mac"
+      ],
+      "cancellable": true,
+      "command": "netrune check find-mac '<mac>'",
+      "description": "Live: which switch port a MAC is on now (access port, not the uplinks it crosses).",
+      "domain": "check",
+      "examples": [],
+      "id": "check-find-mac",
+      "label": "Shortcut \"find-mac\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Device",
+          "name": "device",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "device"
+      ],
+      "cancellable": true,
+      "command": "netrune check hardware '<device>'",
+      "description": "Live: re-read model, Motherboard serial, and base MAC over SSH.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-hardware",
+      "label": "Shortcut \"hardware\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check internet",
+      "description": "Is the Internet reachable and unfiltered: DNS, TLS, and filtering checks.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-internet",
+      "label": "Shortcut \"internet\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Ip",
+          "name": "ip",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "ip"
+      ],
+      "cancellable": true,
+      "command": "netrune check ip-history '<ip>'",
+      "description": "Who has held an IP over time.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-ip-history",
+      "label": "Shortcut \"ip-history\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Target",
+          "name": "target",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "target"
+      ],
+      "cancellable": true,
+      "command": "netrune check latency '<target>'",
+      "description": "Round-trip time, jitter, and loss to a target.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-latency",
+      "label": "Shortcut \"latency\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check link-changes",
+      "description": "Links that appeared or disappeared, newest first.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-link-changes",
+      "label": "Shortcut \"link-changes\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check links",
+      "description": "Quick: switch-to-switch links Netrune knows, with how sure it is of each.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-links",
+      "label": "Shortcut \"links\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Mac",
+          "name": "mac",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "mac"
+      ],
+      "cancellable": true,
+      "command": "netrune check mac-history '<mac>'",
+      "description": "Every port and identity a MAC has had, newest first.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-mac-history",
+      "label": "Shortcut \"mac-history\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check merges",
+      "description": "Manual device merges in force.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-merges",
+      "label": "Shortcut \"merges\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check morning",
+      "description": "The daily routine: reachability, topology, realign memory, database health, filtering, the attention queue.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-morning",
+      "label": "Shortcut \"morning\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check neighbours",
+      "description": "What one switch sees on each port (LLDP/CDP).",
+      "domain": "check",
+      "examples": [],
+      "id": "check-neighbours",
+      "label": "Shortcut \"neighbours\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Endpoint",
+          "name": "endpoint",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Vlan",
+          "max": 4094,
+          "min": 1,
+          "name": "vlan",
+          "required": true,
+          "type": "number"
+        }
+      ],
+      "args": [
+        "endpoint",
+        "vlan"
+      ],
+      "cancellable": true,
+      "command": "netrune check path '<endpoint>' '<vlan>'",
+      "description": "The L2/L3 path to an endpoint on a VLAN, hop by hop, with findings.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-path",
+      "label": "Shortcut \"path\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Switch",
+          "name": "switch",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Port",
+          "max": 65535,
+          "min": 1,
+          "name": "port",
+          "required": false,
+          "type": "number"
+        }
+      ],
+      "args": [
+        "switch",
+        "port"
+      ],
+      "cancellable": true,
+      "command": "netrune check port-health '<switch>' '<port>'",
+      "description": "Live: speed/duplex negotiation and error-counter growth on one port.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-port-health",
+      "label": "Shortcut \"port-health\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Switch",
+          "name": "switch",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Port",
+          "max": 65535,
+          "min": 1,
+          "name": "port",
+          "required": false,
+          "type": "number"
+        }
+      ],
+      "args": [
+        "switch",
+        "port"
+      ],
+      "cancellable": true,
+      "command": "netrune check port-history '<switch>' '<port>'",
+      "description": "What has been plugged into one switch port over time.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-port-history",
+      "label": "Shortcut \"port-history\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check pulse",
+      "description": "Ping every known switch and AP (or one target) and record who is up or down now.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-pulse",
+      "label": "Shortcut \"pulse\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Device",
+          "name": "device",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Device",
+          "name": "device",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "device",
+        "device"
+      ],
+      "cancellable": true,
+      "command": "netrune check same '<device>' '<device>'",
+      "description": "Are these two records the same switch? Evidence and conflicts.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-same",
+      "label": "Shortcut \"same\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check speed",
+      "description": "This machine's Internet speed.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-speed",
+      "label": "Shortcut \"speed\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check status",
+      "description": "Up/down state, flaps, and outage start for everything.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-status",
+      "label": "Shortcut \"status\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Device",
+          "name": "device",
+          "placeholder": "hostname, IP, or site token",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "device"
+      ],
+      "cancellable": true,
+      "command": "netrune check support '<device>'",
+      "description": "Manufacturer, model, driver, and what Netrune can safely do on it.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-support",
+      "label": "Shortcut \"support\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check topology-refresh",
+      "description": "Re-read LLDP/CDP neighbours from every switch.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-topology-refresh",
+      "label": "Shortcut \"topology-refresh\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Switch",
+          "name": "switch",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "switch"
+      ],
+      "cancellable": true,
+      "command": "netrune check uplinks '<switch>'",
+      "description": "Live spanning tree on a switch: root, blocked ports, which ports are uplinks.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-uplinks",
+      "label": "Shortcut \"uplinks\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check uptime",
+      "description": "Up/down changes, newest first: when things went down and came back.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-uptime",
+      "label": "Shortcut \"uptime\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check vault",
+      "description": "Is the SSH vault locked or open, and until when.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-vault",
+      "label": "Shortcut \"vault\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Switch",
+          "name": "switch",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Vlan",
+          "max": 4094,
+          "min": 1,
+          "name": "vlan",
+          "required": true,
+          "type": "number"
+        }
+      ],
+      "args": [
+        "switch",
+        "vlan"
+      ],
+      "cancellable": true,
+      "command": "netrune check vlan-trace '<switch>' '<vlan>'",
+      "description": "Live: follow a VLAN switch by switch from a root and show where it stops.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-vlan-trace",
+      "label": "Shortcut \"vlan-trace\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Switch",
+          "name": "switch",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "label": "Vlan",
+          "max": 4094,
+          "min": 1,
+          "name": "vlan",
+          "required": true,
+          "type": "number"
+        }
+      ],
+      "args": [
+        "switch",
+        "vlan"
+      ],
+      "cancellable": true,
+      "command": "netrune check vlan-where '<switch>' '<vlan>'",
+      "description": "Live: where a VLAN exists, starting from a switch.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-vlan-where",
+      "label": "Shortcut \"vlan-where\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check weekly",
+      "description": "Every long scan, SSH reads of every switch (hardware, AP ports, spanning tree), backups.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-weekly",
+      "label": "Shortcut \"weekly\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune check weekly-resume",
+      "description": "Run only the weekly SSH steps that waited for the vault.",
+      "domain": "check",
+      "examples": [],
+      "id": "check-weekly-resume",
+      "label": "Shortcut \"weekly-resume\"",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
       "arg_schema": [],
       "args": [],
       "cancellable": true,
@@ -778,6 +2077,26 @@
       "arg_schema": [],
       "args": [],
       "cancellable": true,
+      "command": "netrune db coherence",
+      "description": "Fast storage health and cross-table coherence checks; --realign also refreshes memory and fixes model-contradicted platform labels.",
+      "domain": "db",
+      "examples": [],
+      "id": "db-coherence",
+      "label": "Database coherence",
+      "output_type": "table",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": true,
+      "safety_class": "read-only",
+      "state_effects": [],
+      "timeout_seconds": 0,
+      "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
       "command": "netrune db history",
       "description": "Show recorded command executions with exit codes.",
       "domain": "db",
@@ -965,7 +2284,7 @@
       ],
       "cancellable": true,
       "command": "netrune device config '<target>' '<commands>'",
-      "description": "Preview/confirmed config command wrapper, one device or a batch (comma list, --target, or --file; --commands-file, --skip-offline, --cisco/--aruba/--ruckus). Confirmed execution stays in the CLI.",
+      "description": "Preview/confirmed config command wrapper, one device or a batch (comma list, --target, --file, or --all for every inventory device; --commands-file, --skip-offline, --cisco/--aruba/--ruckus). Confirmed execution stays in the CLI.",
       "domain": "device",
       "examples": [],
       "id": "device-config",
@@ -1843,6 +3162,38 @@
         "workbook"
       ],
       "cancellable": true,
+      "command": "netrune excel report '<workbook>'",
+      "description": "Write active AP/switch, transition, and switch/AP history reports from Netrune's memory into one workbook.",
+      "domain": "excel",
+      "examples": [],
+      "id": "excel-report",
+      "label": "Write Excel reports",
+      "output_type": "text",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "local-write",
+      "state_effects": [
+        "workbook file",
+        "audit_events"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Workbook",
+          "name": "workbook",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "workbook"
+      ],
+      "cancellable": true,
       "command": "netrune excel sync '<workbook>' --dry-run",
       "description": "Fill and update a workbook's switch rows from Netrune's inventory. Apply explicitly in the CLI with --confirm.",
       "domain": "excel",
@@ -1944,6 +3295,29 @@
       "state_effects": [],
       "timeout_seconds": 0,
       "writes_local": false
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune health review",
+      "description": "Go through every decision waiting for you (replaced switches/APs, rename clusters, workbook questions), one yes/no or pick at a time.",
+      "domain": "health",
+      "examples": [],
+      "id": "health-review",
+      "label": "Review decisions",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
     },
     {
       "arg_schema": [
@@ -3457,6 +4831,68 @@
       "writes_local": true
     },
     {
+      "arg_schema": [
+        {
+          "label": "Bundle",
+          "name": "bundle",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "bundle"
+      ],
+      "cancellable": true,
+      "command": "netrune profile export '<bundle>'",
+      "description": "Write the active profile (configuration, caches; optionally memory and encrypted SNMP communities) to one file for another machine.",
+      "domain": "profile",
+      "examples": [],
+      "id": "profile-export",
+      "label": "Export profile",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [
+        {
+          "label": "Bundle",
+          "name": "bundle",
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "args": [
+        "bundle"
+      ],
+      "cancellable": true,
+      "command": "netrune profile import '<bundle>'",
+      "description": "Restore a profile bundle from another machine and make it the active profile.",
+      "domain": "profile",
+      "examples": [],
+      "id": "profile-import",
+      "label": "Import profile",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "config-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
       "arg_schema": [],
       "args": [],
       "cancellable": true,
@@ -3501,6 +4937,28 @@
       "risk_level": "safe",
       "run_supported": true,
       "safety_class": "local-write",
+      "state_effects": [
+        "local-state"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune profile pack --confirm",
+      "description": "Write configuration, caches, memory, and SNMP communities to one passphrase-encrypted file; preview without --confirm.",
+      "domain": "profile",
+      "examples": [],
+      "id": "profile-pack",
+      "label": "Pack profile for a new machine",
+      "output_type": "terminal",
+      "preview_supported": true,
+      "read_only": false,
+      "risk_level": "warning",
+      "run_supported": false,
+      "safety_class": "config-write",
       "state_effects": [
         "local-state"
       ],
@@ -4990,7 +6448,7 @@
       "args": [],
       "cancellable": true,
       "command": "netrune workflow morning-check",
-      "description": "Health, topology refresh, memory, filtering, and attention summary.",
+      "description": "Health, topology refresh, memory realignment, database coherence, filtering, and attention summary.",
       "domain": "workflow",
       "examples": [],
       "id": "workflow-morning-check",
@@ -5032,6 +6490,29 @@
       "writes_local": true
     },
     {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune workflow schedule weekly",
+      "description": "Install a persistent systemd user timer for the weekly workflow.",
+      "domain": "workflow",
+      "examples": [],
+      "id": "workflow-schedule",
+      "label": "Schedule weekly workflow",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
+      "safety_class": "local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
       "arg_schema": [
         {
           "label": "Target",
@@ -5056,6 +6537,29 @@
       "read_only": true,
       "risk_level": "safe",
       "run_supported": true,
+      "safety_class": "network-read/local-write",
+      "state_effects": [
+        "local-state",
+        "sqlite"
+      ],
+      "timeout_seconds": 0,
+      "writes_local": true
+    },
+    {
+      "arg_schema": [],
+      "args": [],
+      "cancellable": true,
+      "command": "netrune workflow weekly",
+      "description": "Every scan, SSH hardware/neighbour/STP reads of every switch, backups, realignment, and attention.",
+      "domain": "workflow",
+      "examples": [],
+      "id": "workflow-weekly",
+      "label": "Weekly",
+      "output_type": "log",
+      "preview_supported": true,
+      "read_only": true,
+      "risk_level": "safe",
+      "run_supported": false,
       "safety_class": "network-read/local-write",
       "state_effects": [
         "local-state",

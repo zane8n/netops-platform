@@ -52,6 +52,7 @@ from netops_platform.identity import (
     ap_rows_match,
     cluster_rename_candidates,
     identity_continuity_candidates,
+    neighbor_port_transitions,
     identity_match_evidence,
     normalize_mac,
     reconcile_ap_rows,
@@ -242,6 +243,24 @@ def fmt_time(value: Any) -> str:
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
     except (OverflowError, OSError, ValueError):
         return ""
+
+
+def duration_text(seconds: Any) -> str:
+    """Seconds as the two largest units an operator reads at a glance: 5d 3h, 4h 12m, 9m."""
+    try:
+        total = int(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if total < 0:
+        return ""
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
 
 
 def is_timestamp_field(name: Any) -> bool:
@@ -580,6 +599,7 @@ CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL,
 INSERT OR IGNORE INTO schema_meta(key,value,updated_at) VALUES('schema_version','13',strftime('%s','now'));
 CREATE TABLE IF NOT EXISTS devices(ip TEXT PRIMARY KEY,hostname TEXT,platform TEXT,model TEXT,serial TEXT,mac TEXT,source TEXT,last_seen INTEGER,status TEXT);
 CREATE TABLE IF NOT EXISTS aps(ip TEXT PRIMARY KEY,name TEXT,platform TEXT,switch_ip TEXT,switch_name TEXT,switch_port TEXT,mac TEXT,last_seen INTEGER,status TEXT);
+CREATE TABLE IF NOT EXISTS ap_controller_state(mac TEXT NOT NULL,controller_ip TEXT NOT NULL,controller TEXT,name TEXT,ip TEXT,model TEXT,serial TEXT,firmware TEXT,status TEXT,uptime_s INTEGER,join_uptime_s INTEGER,polled_at INTEGER,detail TEXT,PRIMARY KEY(mac,controller_ip));
 CREATE TABLE IF NOT EXISTS neighbors(local_ip TEXT,local_name TEXT,local_port TEXT,remote_name TEXT,remote_port TEXT,remote_ip TEXT,PRIMARY KEY(local_ip,local_port,remote_name,remote_port));
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,action TEXT NOT NULL,command TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER,started_at INTEGER,finished_at INTEGER,exit_code INTEGER,read_only INTEGER NOT NULL DEFAULT 1,writes_local INTEGER NOT NULL DEFAULT 0,request_json TEXT,result_json TEXT,summary TEXT,duration_ms INTEGER,actor TEXT,actor_uid INTEGER,session_id TEXT,reason TEXT,ticket TEXT,preview_hash TEXT,parent_job_id TEXT,workflow_step TEXT);
 CREATE TABLE IF NOT EXISTS job_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL,created_at INTEGER NOT NULL,stream TEXT NOT NULL,line TEXT NOT NULL,event_type TEXT NOT NULL DEFAULT 'log',phase TEXT,progress_current INTEGER,progress_total INTEGER,payload_json TEXT);
@@ -718,6 +738,7 @@ CREATE INDEX IF NOT EXISTS idx_path_findings_run ON path_findings(run_id,severit
 class State:
     def __init__(self, paths: Paths):
         self.inventory_dirty = False
+        self.last_inventory_rows: Optional[List[Dict[str, Any]]] = None
         self.paths = paths
         self.init_db()
 
@@ -738,6 +759,13 @@ class State:
 
     def init_db(self) -> None:
         with self.connect() as con:
+            # Before the schema, which creates the identity index that a store
+            # holding duplicates could not take. Once the index exists there is
+            # nothing to collapse, and the check is the only cost every
+            # invocation pays rather than a pass over every stored reading.
+            if not con.execute("SELECT 1 FROM sqlite_master WHERE type='index'"
+                               " AND name='idx_traffic_samples_identity'").fetchone():
+                self._deduplicate_traffic_samples(con)
             con.executescript(SCHEMA)
             self._repair_legacy_jobs_schema(con)
             self._add_missing_columns(con, "traffic_watch", {
@@ -745,7 +773,6 @@ class State:
                 "display_name": "TEXT", "subscribed_down_bps": "INTEGER",
                 "subscribed_up_bps": "INTEGER", "faces_lan": "INTEGER",
                 "display_color": "TEXT"})
-            self._deduplicate_traffic_samples(con)
             con.execute(
                 "INSERT OR REPLACE INTO schema_meta(key,value,updated_at) VALUES('schema_version',?,?)",
                 (SCHEMA_VERSION, now()),
@@ -1206,6 +1233,60 @@ class State:
         self.inventory_dirty = True
         return removed
 
+    def device_observation_history(self, since: int = 0) -> List[Dict[str, Any]]:
+        """Switch field changes rebuilt from raw per-address observations.
+
+        `inventory_history` is written from reconciled (merged) rows, so a
+        reconciliation mistake is recorded as if the devices themselves had
+        changed. The `observations` table keeps what each scan saw at each
+        address, before any merging; diffing an address's consecutive
+        observations gives history that a corrected reconciliation cannot
+        contradict (ADR 0008 phase 3). Rows have the inventory_history shape:
+        name/mac/serial/model/platform changes under identity_kind `ip`, and
+        `IP changed` under `mac` when a real MAC turns up at a new address
+        after leaving the old one.
+        """
+        def real(field: str, value: Any) -> str:
+            text = str(value or "").strip()
+            if text.upper() in {"", "N/A", "NA", "NONE", "UNKNOWN", "-"}:
+                return ""
+            return normalize_mac(text) if field == "mac" else text
+        rows = self.rows(
+            "SELECT stable_source_id, observed_at, facts_json FROM observations "
+            "WHERE entity_kind='device' ORDER BY observed_at, id")
+        events: List[Dict[str, Any]] = []
+        last: Dict[str, Dict[str, str]] = {}
+        mac_seen: Dict[str, Tuple[str, int]] = {}
+        for row in rows:
+            ip = str(row["stable_source_id"] or "")
+            try:
+                facts = json.loads(row["facts_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            when = int(row["observed_at"] or 0)
+            current = {field: real(field, facts.get(field)) for field in ("hostname", "mac", "serial", "model", "platform")}
+            snapshot = {"ip": ip, "mac": current["mac"], "name": current["hostname"], "serial": current["serial"],
+                        "model": current["model"], "platform": current["platform"], "switch_ip": "", "switch_name": "", "switch_port": ""}
+            before = last.get(ip)
+            if before and when >= since:
+                for field, value in current.items():
+                    # A value appearing where there was none is a fill, not a change.
+                    if value and before[field] and value != before[field]:
+                        events.append({"created_at": when, "entity_type": "device", "identity_kind": "ip", "identity_value": ip,
+                                       "event_type": "field_changed", "field_name": "name" if field == "hostname" else field,
+                                       "previous_value": before[field], "current_value": value, **snapshot})
+            last[ip] = {field: value or (before or {}).get(field, "") for field, value in current.items()}
+            mac = current["mac"]
+            if mac:
+                previous = mac_seen.get(mac)
+                if previous and previous[0] != ip and when >= since and previous[1] <= when:
+                    events.append({"created_at": when, "entity_type": "device", "identity_kind": "mac", "identity_value": mac,
+                                   "event_type": "field_changed", "field_name": "ip", "previous_value": previous[0],
+                                   "current_value": ip, **snapshot})
+                mac_seen[mac] = (ip, when)
+        events.sort(key=lambda event: (event["created_at"], event["identity_value"]))
+        return events
+
     def get_marker(self, key: str) -> str:
         """A small piece of state a command needs to remember between runs."""
         row = self.one("SELECT value FROM schema_meta WHERE key=?", (f"marker:{key}",))
@@ -1415,9 +1496,24 @@ class State:
         aps_raw = self._read_pipe(self.paths.aps_file, 9)
         aps = self._dedupe_ap_pipe_rows(aps_raw)
         neighbors = self._read_pipe(self.paths.neighbors_file, 6)
+        # What each controller said about its APs beyond the pipe row (model,
+        # serial, firmware, status, uptime, when polled); written by the AP
+        # scan's controller poll, absent until the first one.
+        controller_file = self.paths.aps_file.with_name("ap_controller.db")
+        from netops_platform.wlc import CONTROLLER_FIELDS
+        controller_rows = self._read_pipe(controller_file, len(CONTROLLER_FIELDS)) if controller_file.is_file() else None
         ts = now()
         with self.connect() as con:
             con.execute("DELETE FROM devices"); con.execute("DELETE FROM aps"); con.execute("DELETE FROM neighbors")
+            if controller_rows is not None:
+                con.execute("DELETE FROM ap_controller_state")
+                for p in controller_rows:
+                    if not norm_mac(p[0]) or not p[1]:
+                        continue
+                    con.execute("INSERT OR REPLACE INTO ap_controller_state(mac,controller_ip,controller,name,ip,model,serial,firmware,status,uptime_s,join_uptime_s,polled_at,detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                (norm_mac(p[0]), p[1], p[2], p[3], p[4], p[5], p[6], p[7], norm_status(p[8]),
+                                 int(p[9]) if p[9].isdigit() else None, int(p[10]) if p[10].isdigit() else None,
+                                 self._as_int(p[11], ts), p[12]))
             for p in devices:
                 con.execute("INSERT OR REPLACE INTO devices(ip,hostname,platform,model,serial,mac,source,last_seen,status) VALUES(?,?,?,?,?,?,?,?,?)", (p[0], p[1], p[2], p[3], p[4], p[5] if norm_mac(p[5]) else "", p[6], self._as_int(p[7], ts), norm_status(p[8])))
             for p in aps:
@@ -1427,7 +1523,19 @@ class State:
         reconciliation = self.sync_derived_state()
         if int(reconciliation.get("manual_merges", {}).get("suppressed") or 0) or int(reconciliation.get("manual_ap_merges", {}).get("suppressed") or 0):
             self.export_flat_files()
+        self.set_marker("flat_import", self.flat_cache_signature())
         return {"devices": len(devices), "aps": len(aps), "neighbors": len(neighbors), "aps_raw": len(aps_raw), "aps_deduped": max(0, len(aps_raw) - len(aps)), "reconciliation": reconciliation}
+
+    def flat_cache_signature(self) -> str:
+        """Size and mtime of the three flat caches, recorded at each import so
+        a later refresh can tell it would re-import exactly what SQLite
+        already holds."""
+        parts = []
+        for path in (self.paths.devices_file, self.paths.aps_file, self.paths.neighbors_file):
+            with contextlib.suppress(OSError):
+                stat = path.stat()
+                parts.append(f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}")
+        return "|".join(parts)
 
     def export_flat_files(self) -> Dict[str, int]:
         devices = self.rows("SELECT ip,hostname,platform,model,serial,mac,source,last_seen,status FROM devices ORDER BY ip")
@@ -1470,6 +1578,9 @@ class State:
             merge_application = self._apply_manual_merges(con, ts)
             ap_merge_application = self._apply_manual_ap_merges(con, ts)
             inventory_rows = self._current_inventory_rows(con)
+            # Kept for a caller in the same process that needs the reconciled
+            # rows next (db coherence), so it doesn't reconcile them again.
+            self.last_inventory_rows = inventory_rows
             self._sync_identity_history(con, ts, inventory_rows)
             self._sync_health(con, ts, inventory_rows)
             self._sync_topology(con, ts)
@@ -2207,6 +2318,62 @@ class State:
                 return int(found[0])
         return None
 
+    CONTINUITY_RESOLVED_MARKER = "continuity_resolved"
+
+    def continuity_resolved(self) -> Dict[str, Dict[str, Any]]:
+        """Swap candidates an operator answered in `health review` (verdict
+        same or different), by rel_key: never proposed again either way."""
+        try:
+            value = json.loads(self.get_marker(self.CONTINUITY_RESOLVED_MARKER) or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def resolve_continuity_candidate(self, rel_key: str, verdict: str, actor: str, note: str = "") -> None:
+        """Close one swap candidate with the operator's verdict: recorded
+        with the candidate's own history (a `resolved` relationship event)
+        and in the resolved set the candidate search skips."""
+        resolved = self.continuity_resolved()
+        resolved[rel_key] = {"verdict": verdict, "actor": actor, "at": now(), "note": note}
+        self.set_marker(self.CONTINUITY_RESOLVED_MARKER, json.dumps(resolved, sort_keys=True))
+        with self.connect() as con:
+            row = con.execute("SELECT * FROM relationships_current WHERE rel_key=?", (rel_key,)).fetchone()
+            if row is None or row["status"] == "disappeared":
+                return
+            current = dict(row)
+            closed = dict(current, status="disappeared")
+            con.execute("UPDATE relationships_current SET status='disappeared',updated_at=? WHERE rel_key=?", (now(), rel_key))
+            self._insert_rel_event(con, now(), "resolved", closed, self._rel_json(current), self._rel_json(closed),
+                                   f"operator verdict: {verdict}" + (f" ({note})" if note else ""))
+
+    @staticmethod
+    def _is_identity_rekey(entity_type: str, old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:
+        """The same AP under a new identity key, not a replacement: the same
+        name, and either two MACs a step or two apart (a switch's port MAC,
+        then the controller's base MAC) or an address or name-signature key
+        that became a MAC key once the controller reported one; or a default
+        name (`AP<dotted MAC>`) given a real one, the MAC it spelled out
+        being the new record's."""
+        from netops_platform.ap_merge import good_name, near_mac
+        if entity_type != "ap":
+            return False
+        old_name = compact_name(old.get("name") or old.get("hostname")).lower()
+        new_name = compact_name(new.get("name") or new.get("hostname")).lower()
+        old_id = str(old.get("canonical_id") or "").lower()
+        new_id = str(new.get("canonical_id") or "").lower()
+        if not new_id.startswith("mac:"):
+            return False
+        # The raw name: compact_name would read the dots as a domain.
+        default = re.fullmatch(r"ap([0-9a-f]{4})\.([0-9a-f]{4})\.([0-9a-f]{4})", str(old.get("name") or old.get("hostname") or "").strip().lower())
+        if default:
+            spelled = "".join(default.groups())
+            return spelled == new_id[4:] or near_mac(spelled, new_id[4:])
+        if not old_name or old_name != new_name or not good_name(old_name):
+            return False
+        if old_id.startswith("mac:"):
+            return near_mac(old_id[4:], new_id[4:])
+        return old_id.startswith(("ip:", "sig:"))
+
     def _continuity_candidate_rels(self, con: sqlite3.Connection, canonical_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Propose that a newly-appeared device/AP continues one that just
         disappeared, using signals beyond plain identity (attachment, a
@@ -2230,6 +2397,8 @@ class State:
             for entity_type in ("device", "ap")
             for merge in self._active_merges(con, entity_type)
         }
+        # Pairs the operator already answered in `health review`.
+        resolved = set(self.continuity_resolved())
 
         old_pools: Dict[str, List[Dict[str, Any]]] = {"device": [], "ap": []}
         seen_old: set = set()
@@ -2258,6 +2427,10 @@ class State:
             pool_row["canonical_id"] = str(row.get("canonical_id")).lower()
             new_pools[entity_type].append(pool_row)
 
+        # A neighbour port that saw the old device now sees the new one: the
+        # topology scan's own link history, read by the same engine.
+        port_swaps = neighbor_port_transitions(
+            [dict(row) for row in con.execute("SELECT * FROM topology_events WHERE created_at>=?", (cutoff,))])["swaps"]
         rels: List[Dict[str, Any]] = []
         for entity_type in ("device", "ap"):
             old_pool = old_pools[entity_type]
@@ -2271,9 +2444,22 @@ class State:
             # sharing a site-rename pattern can be told apart at display
             # time. `identity_continuity_candidates` already only returns
             # structurally-grounded pairs (never timing alone).
-            for candidate in identity_continuity_candidates(old_pool, new_pool, kind, window_days=config["window_days"]):
+            for candidate in identity_continuity_candidates(old_pool, new_pool, kind, window_days=config["window_days"], port_swaps=port_swaps):
                 old, new = candidate["old"], candidate["new"]
                 if (entity_type, old["canonical_id"].lower(), new["canonical_id"].lower()) in merged_pairs:
+                    continue
+                if f"identity_swap_candidate|{entity_type}|{old['canonical_id']}|{new['canonical_id']}" in resolved:
+                    continue
+                if self._is_identity_rekey(entity_type, old, new):
+                    # Linked, not proposed (ADR 0007 amendment): one AP whose
+                    # key changed when its true MAC became known.
+                    rels.append({
+                        "rel_key": f"identity_rekey|{entity_type}|{old['canonical_id']}|{new['canonical_id']}",
+                        "rel_type": "identity_rekey", "subject_kind": entity_type, "subject_id": old["canonical_id"],
+                        "object_kind": entity_type, "object_id": new["canonical_id"], "source": "identity_continuity",
+                        "confidence": 100, "status": "active",
+                        "attrs": {"entity_type": entity_type, "old": old, "new": new, "signals": candidate["signals"]},
+                    })
                     continue
                 rel_key = f"identity_swap_candidate|{entity_type}|{old['canonical_id']}|{new['canonical_id']}"
                 rels.append({
@@ -2293,7 +2479,7 @@ class State:
         # did not happen to regenerate them (e.g. the "new" side is no longer
         # inside the first-seen window but is still the only plausible match).
         fresh_keys = {rel["rel_key"] for rel in rels}
-        for raw in con.execute("SELECT * FROM relationships_current WHERE rel_type='identity_swap_candidate' AND status!='disappeared'"):
+        for raw in con.execute("SELECT * FROM relationships_current WHERE rel_type IN ('identity_swap_candidate','identity_rekey') AND status!='disappeared'"):
             existing = dict(raw)
             if existing["rel_key"] in fresh_keys:
                 continue
@@ -2308,15 +2494,25 @@ class State:
                 continue  # old reappeared, or the new side itself vanished -- let it lapse
             if (entity_type, old_id, new_id) in merged_pairs:
                 continue  # already resolved via a confirmed manual merge
+            if existing["rel_key"] in resolved:
+                continue  # answered in `health review`
+            rel_type = existing["rel_type"]
+            rel_key = existing["rel_key"]
+            if rel_type == "identity_swap_candidate" and self._is_identity_rekey(entity_type, attrs.get("old") or {}, attrs.get("new") or {}):
+                # Proposed before re-keys were recognized: becomes the link,
+                # and the candidate lapses.
+                rel_type, rel_key = "identity_rekey", "identity_rekey|" + existing["rel_key"].split("|", 1)[1]
+                if rel_key in fresh_keys:
+                    continue
             rels.append({
-                "rel_key": existing["rel_key"],
-                "rel_type": "identity_swap_candidate",
+                "rel_key": rel_key,
+                "rel_type": rel_type,
                 "subject_kind": existing["subject_kind"],
                 "subject_id": existing["subject_id"],
                 "object_kind": existing["object_kind"],
                 "object_id": existing["object_id"],
                 "source": existing.get("source") or "identity_continuity",
-                "confidence": existing.get("confidence"),
+                "confidence": 100 if rel_type == "identity_rekey" else existing.get("confidence"),
                 "status": "active",
                 "attrs": attrs,
             })
@@ -2461,7 +2657,7 @@ class State:
         con.execute("INSERT INTO relationship_events(created_at,event_type,rel_key,rel_type,subject_kind,subject_id,object_kind,object_id,previous_json,current_json,source,confidence,detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (ts,event_type,rel.get("rel_key"),rel.get("rel_type"),rel.get("subject_kind"),rel.get("subject_id"),rel.get("object_kind"),rel.get("object_id"),prev,curr,rel.get("source"),int(rel.get("confidence") or 0),detail))
 
     def _sync_relationships(self, con: sqlite3.Connection, ts: int, inventory_rows: Optional[Sequence[Dict[str, Any]]] = None) -> None:
-        desired = self._relationship_desired(con, inventory_rows); existing = {r["rel_key"]: dict(r) for r in con.execute("SELECT * FROM relationships_current")}; managed = {"identity_ip","identity_mac","identity_alias","device_alias","manual_identity_merge","ap_attachment","neighbor_link","port_occupancy","identity_swap_candidate"}
+        desired = self._relationship_desired(con, inventory_rows); existing = {r["rel_key"]: dict(r) for r in con.execute("SELECT * FROM relationships_current")}; managed = {"identity_ip","identity_mac","identity_alias","device_alias","manual_identity_merge","ap_attachment","neighbor_link","port_occupancy","identity_swap_candidate","identity_rekey"}
         for key, rel in desired.items():
             ex = existing.get(key); curr = self._rel_json(rel)
             if not ex:
@@ -2897,9 +3093,11 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
         "summary": "Wireless AP inventory, AP-on-switch lookup, AP move history, unjoined WLC records, and AP timelines.",
         "usage": "netrune ap <action> [arguments] [global flags]",
         "actions": {
-            "scan": {"usage": "netrune ap scan", "about": "Refresh AP inventory from wireless/controller sources.", "examples": ["netrune ap scan"]},
+            "scan": {"usage": "netrune ap scan", "about": "Refresh AP inventory from wireless/controller sources. The Ruckus SmartZone AP table is read in one SNMP GETBULK pass (every AP, with MAC, model, serial, firmware, uptime, and connection state; checked against the controller's own AP count). The Cisco WLC's AP tables are read the same way (address, Ethernet MAC, model, serial, uptime since reboot and since join), its join statistics over SSH add the APs that are not joined, and a shared controller is cut to this site by cisco_wlc_ap_ip_filter OR cisco_wlc_ap_name_prefix/_contains (rows recorded for other sites are removed). Everything the controllers report is kept for ap controller.", "examples": ["netrune ap scan"]},
+            "controller": {"usage": "netrune ap controller [pattern] [--limit N]", "about": "Show what the wireless controllers last reported for each AP: name, IP, MAC, model, serial, firmware, the controller's own connection status, uptime, and when the AP scan polled it. JSON adds uptime_s, polled_at, and booted_at (poll time minus uptime).", "args": [{"name":"pattern", "text":"Optional name, IP, MAC, model, serial, firmware, status, controller, or detail (e.g. Disconnect) filter."}], "examples": ["netrune ap controller", "netrune ap controller T300", "netrune ap controller Disconnect --json"]},
+            "neighbors": {"usage": "netrune ap neighbors (<switch>[,<switch>...] | --all) [--dry-run]", "about": "Read each switch's own CDP/LLDP neighbour tables over SSH (Cisco: show cdp neighbors detail + show lldp neighbors detail; Aruba AOS-S: show lldp info remote-device, then per-port detail, + show cdp neighbors detail) and record which port every AP is on. A neighbour is an AP on the WLAN capability, an AP model number, or an AP software banner; known switches, self-described switches, and phones are left out. APs are matched to inventory by MAC, then name, then IP; a corrected attachment is recorded through the same import as ap scan, so it appears in ap moves. Read-only on the switches; --dry-run lists the switches and commands without connecting.", "examples": ["netrune ap neighbors --all", "netrune ap neighbors SITE-A-CORE-SW01", "netrune ap neighbors --all --dry-run"]},
             "list": {"usage": "netrune ap list [pattern] [--status ONLINE|OFFLINE]", "about": "Search AP inventory.", "args": [{"name":"pattern", "text":"Optional AP name, IP, platform, switch, or port pattern."}], "examples": ["netrune ap list ZONE10", "netrune ap list --status OFFLINE"]},
-            "unjoined": {"usage": "netrune ap unjoined [pattern] [--limit N]", "about": "Show Cisco WLC APs seen in join statistics but not currently joined.", "args": [{"name":"pattern", "text":"Optional AP name/MAC/site filter."}], "examples": ["netrune ap unjoined", "netrune ap unjoined SITE-A --json"]},
+            "unjoined": {"usage": "netrune ap unjoined [pattern] [--limit N]", "about": "Show Cisco WLC APs seen in join statistics but not currently joined, with the address each last had and the controller's last failure and disconnect reason. Old hardware of an AP that has since joined under the same name is not listed.", "args": [{"name":"pattern", "text":"Optional AP name/MAC/site filter."}], "examples": ["netrune ap unjoined", "netrune ap unjoined SITE-A --json"]},
             "show": {"usage": "netrune ap show [pattern]", "about": "Alias of ap list for quick lookup.", "examples": ["netrune ap show SITEA"]},
             "on-switch": {"usage": "netrune ap on-switch <switch>", "about": "Show APs currently attached to a switch, using controller and memory state.", "args": [{"name":"switch", "text":"Switch hostname, short name, site token, or IP."}], "examples": ["netrune ap on-switch ZONE10", "netrune ap on-switch SITEAZONE34SW01"]},
             "moves": {"usage": "netrune ap moves [--limit N]", "about": "Show recorded AP switch/port movement events.", "examples": ["netrune ap moves", "netrune ap moves --limit 50"]},
@@ -2944,6 +3142,7 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
             "check": {"usage": "netrune health check [target]", "about": "Run fast reachability checks and refresh health state.", "examples": ["netrune health check", "netrune health check ZONE10"]},
             "status": {"usage": "netrune health status [--limit N]", "about": "Show current health state for devices and APs.", "examples": ["netrune health status"]},
             "offline": {"usage": "netrune health offline [--limit N]", "about": "List current offline devices/APs.", "examples": ["netrune health offline"]},
+            "review": {"usage": "netrune health review [--list] [--kind identity|excel] | netrune health review answer <id> <choice>", "about": "Go through every decision waiting for you, one at a time: a switch or AP that looks replaced (same one: merge; different: never asked again), a site-rename cluster, and workbook questions from excel --free-ips (is this address free? which switch is this row?). Answer y/n or a number, s to skip, q to stop. Workbook answers are written by the next excel sync of that workbook. Without a terminal, or with --list, it lists the waiting decisions and their ids; answer one with 'health review answer <id> <choice>'. The morning check offers this at its end.", "examples": ["netrune health review", "netrune health review --list --json", "netrune health review --kind excel", "netrune health review answer s1a2b3c n"]},
             "attention": {"usage": "netrune health attention [--limit N]", "about": "Show items needing operator review: offline, flapping, topology changes, AP moves, backup issues.", "examples": ["netrune health attention"]},
             "timeline": {"usage": "netrune health timeline [--limit N]", "about": "Show health events over time.", "examples": ["netrune health timeline"]},
         },
@@ -2964,7 +3163,7 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
         "actions": {
             "ssh": {"usage": "netrune device ssh [-l|--legacy] <target>", "about": "Open an interactive SSH session using netrune-connect. If SSH negotiation reports legacy algorithms, retry with -l/--legacy.", "examples": ["netrune device ssh ZONE34", "netrune device ssh -l ZONE34", "netrune device ssh 198.51.100.92"]},
             "show": {"usage": "netrune device show <target> <show-command>", "about": "Run a read-only show command through netrune-control.", "args": [{"name":"target", "text":"Hostname, IP, or inventory match."}, {"name":"show-command", "text":"Command text after the target, for example show interface status."}], "examples": ["netrune device show ZONE34 show version", "netrune device show 198.51.100.92 show interface status"]},
-            "config": {"usage": "netrune device config <target[,target...]> <commands...> --dry-run|--confirm | netrune device config --file devices.txt [--target T] <commands...> [--commands-file F] [--skip-offline] [--skip-unverified] [--cisco] [--aruba] [--ruckus] --dry-run|--confirm", "about": "Run configuration commands on one or many devices (comma list, --target, --file) through the guarded backup/apply/verify lifecycle. Requires --dry-run or --confirm.", "args": [{"name":"--file", "text":"Text file with one hostname or IP per line. Blank lines and # comments are ignored."}, {"name":"--target", "text":"Add a device (or comma list); repeatable, combinable with --file."}, {"name":"--commands-file", "text":"Read the config commands from a file, one per line, instead of the command line."}, {"name":"--skip-offline", "text":"Ping every device before starting and skip (and report) the ones that don't reply."}, {"name":"--skip-unverified", "text":"Skip targets that don't resolve or fail the write gate instead of refusing the whole batch."}, {"name":"--cisco/--aruba/--ruckus", "text":"Only let devices of that vendor through (combine for several); the rest are listed as filtered, not run."}], "examples": ["netrune device config ZONE34 'interface Gi1/0/7' 'description AP' --dry-run", "netrune device config SW1,SW2,SW3 'ntp server 198.51.100.5' --skip-offline --dry-run", "netrune device config --file ./devices.txt --commands-file ./snmp.txt --skip-offline --confirm", "netrune device config --file ./site-a.txt --cisco 'ip ssh version 2' --dry-run"]},
+            "config": {"usage": "netrune device config <target[,target...]> <commands...> --dry-run|--confirm | netrune device config --file devices.txt [--target T] <commands...> [--commands-file F] [--skip-offline] [--skip-unverified] [--cisco] [--aruba] [--ruckus] --dry-run|--confirm | netrune device config --all [--cisco] [--aruba] [--ruckus] <commands...> --dry-run|--confirm", "about": "Run configuration commands on one or many devices (comma list, --target, --file, or --all) through the guarded backup/apply/verify lifecycle. Naming no device requires --all. Requires --dry-run or --confirm.", "args": [{"name":"--all", "text":"Every inventory device; the vendor filters, --site, and --status narrow it. Required when no target, --file, or --target is given."}, {"name":"--file", "text":"Text file with one hostname or IP per line. Blank lines and # comments are ignored."}, {"name":"--target", "text":"Add a device (or comma list); repeatable, combinable with --file."}, {"name":"--commands-file", "text":"Read the config commands from a file, one per line, instead of the command line."}, {"name":"--skip-offline", "text":"Ping every device before starting and skip (and report) the ones that don't reply."}, {"name":"--skip-unverified", "text":"Skip targets that don't resolve or fail the write gate instead of refusing the whole batch."}, {"name":"--cisco/--aruba/--ruckus", "text":"Only let devices from that manufacturer through (combine for several); the rest are listed as filtered, not run."}], "examples": ["netrune device config --all --cisco 'ip ssh version 2' --skip-offline --dry-run", "netrune device config ZONE34 'interface Gi1/0/7' 'description AP' --dry-run", "netrune device config SW1,SW2,SW3 'ntp server 198.51.100.5' --skip-offline --dry-run", "netrune device config --file ./devices.txt --commands-file ./snmp.txt --skip-offline --confirm", "netrune device config --file ./site-a.txt --cisco 'ip ssh version 2' --dry-run"]},
             "inventory": {"usage": "netrune device inventory [target|--view]", "about": "View or enrich device inventory through netrune-control.", "examples": ["netrune device inventory --view", "netrune device inventory ZONE34"]},
             "support": {"usage": "netrune device support [target]", "about": "Show registered Cisco, Aruba, and Ruckus driver capabilities, or classify one inventory target.", "examples": ["netrune device support", "netrune device support ZONE34 --json"]},
             "identity": {"usage": "netrune device identity <first> <second>", "about": "Explain name, IP, MAC, serial, model, and attachment evidence used to assess two switch records.", "examples": ["netrune device identity SITE-A-PLNT-PLN-SW01 SITEAPLNTPLANSW01"]},
@@ -3029,11 +3228,13 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
         "summary": "Safe multi-step operator workflows.",
         "usage": "netrune workflow <name> [arguments] [global flags]",
         "actions": {
-            "morning-check": {"usage": "netrune workflow morning-check", "about": "Import cache, check reachability, refresh LLDP/CDP topology, refresh memory, review topology changes, check filtering, and build the attention queue.", "examples": ["netrune workflow morning-check --dry-run"]},
+            "morning-check": {"usage": "netrune workflow morning-check", "about": "Import cache, check reachability, refresh LLDP/CDP topology, realign memory (re-apply merges, fix model-contradicted platform labels) and check database coherence, review topology changes, check filtering, build the attention queue, and list the decisions waiting for you; in a terminal it then offers to go through them (health review) so the morning ends on a clean slate.", "examples": ["netrune workflow morning-check --dry-run"]},
             "refresh-inventory": {"usage": "netrune workflow refresh-inventory", "about": "Health check, AP scan, topology scan, memory refresh, and attention summary.", "examples": ["netrune workflow refresh-inventory"]},
             "backup-online": {"usage": "netrune workflow backup-online [target]", "about": "Run changed-only backups for online devices.", "examples": ["netrune workflow backup-online ZONE10"]},
             "site-health": {"usage": "netrune workflow site-health <target>", "about": "Latency and filtering checks for a target/site.", "examples": ["netrune workflow site-health google.com"]},
             "ap-audit": {"usage": "netrune workflow ap-audit", "about": "Refresh AP data, recompute memory, show AP moves and attention.", "examples": ["netrune workflow ap-audit"]},
+            "weekly": {"usage": "netrune workflow weekly [--resume]", "about": "Every long-running task: import, reachability, inventory scan, AP scan, topology scan, then over SSH a hardware refresh of every switch (Motherboard serials), AP ports from CDP/LLDP checked against MAC tables, a spanning-tree sweep, and changed-only backups, then realignment and the attention queue. The SSH steps share one vault session opened before the first of them; when the vault cannot be unlocked they are DEFERRED, the attention queue lists them, and --resume runs just those.", "examples": ["netrune workflow weekly --dry-run", "netrune workflow weekly --resume"]},
+            "schedule": {"usage": "netrune workflow schedule weekly [--when 'Sun *-*-* 02:00:00'] [--remove]", "about": "Install (or --remove) a systemd user timer that runs the weekly workflow. Persistent=true runs a week the laptop missed while off as soon as it is back. The service may raise the Windows Hello prompt once for the SSH steps; unanswered, they are deferred to --resume. --dry-run prints the units.", "examples": ["netrune workflow schedule weekly", "netrune workflow schedule weekly --when 'Sat *-*-* 22:00:00'", "netrune workflow schedule weekly --remove"]},
         },
     },
     "commands": {
@@ -3054,6 +3255,7 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
             "import-flat": {"usage": "netrune db import-flat", "about": "Alias for inventory import-flat.", "examples": ["netrune db import-flat"]},
             "export-flat": {"usage": "netrune db export-flat", "about": "Alias for inventory export-flat.", "examples": ["netrune db export-flat"]},
     "path": {"usage": "netrune db path", "about": "Print the SQLite database path.", "examples": ["netrune db path"]},
+            "coherence": {"usage": "netrune db coherence [--realign] [--json]", "about": "Fast database health and coherence pass: SQLite quick_check, dangling references, schema version, platform labels the model number contradicts, records carrying several hardware identities, merges whose surviving record left inventory, flat-cache drift, stuck jobs, and WAL size. Exits 3 when something needs attention.", "args": [{"name":"--realign", "text":"First refresh memory (re-import caches, re-apply manual merges, re-derive relationships), then relabel devices whose platform label contradicts their model. Local state only; the morning check runs this form."}], "examples": ["netrune db coherence", "netrune db coherence --realign"]},
             "integrity": {"usage": "netrune db integrity [--json]", "about": "Run SQLite integrity and quick checks without changing data.", "examples": ["netrune db integrity", "netrune db integrity --json"]},
             "repair": {"usage": "netrune db repair", "about": "Run schema migration, derived-state sync, WAL checkpoint, ANALYZE, optimize, and integrity checks.", "examples": ["netrune db repair"]},
             "history": {"usage": "netrune db history [--limit N]", "about": "Show recorded command executions newest first, with exit code and whether the command was read-only.", "examples": ["netrune db history"]},
@@ -3074,6 +3276,10 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Built from the check catalogue so the names, help, and registry cannot drift.
+from netops_platform.checks_cli import help_topic as _check_help_topic  # noqa: E402
+HELP_TOPICS["check"] = _check_help_topic()
+
 HELP_TOPICS.update({
     "init": {
         "summary": "Initialize an isolated profile and check host capabilities.",
@@ -3091,6 +3297,9 @@ HELP_TOPICS.update({
             "create": {"usage": "netrune profile create <name>", "about": "Create a neutral, private profile without changing the active profile.", "examples": ["netrune profile create lab"]},
             "use": {"usage": "netrune profile use <name>", "about": "Select the profile used by future commands.", "examples": ["netrune profile use lab"]},
             "paths": {"usage": "netrune profile paths", "about": "Show the active profile's XDG-owned directories.", "examples": ["netrune profile paths --json"]},
+            "export": {"usage": "netrune profile export <bundle.tgz> [--with-state] [--with-secrets]", "about": "Write the active profile to one file for another machine: its configuration (controllers, filters, subnets, aliases, channels, drivers, SSH known_hosts) and flat caches; --with-state adds the SQLite memory and configuration backups; --with-secrets adds the SNMP communities and encrypts the whole file with a passphrase (from NETRUNE_BUNDLE_PASSPHRASE, or asked). The SSH vault and named secrets are bound to this machine and never exported.", "examples": ["netrune profile export ~/netrune-profile.tgz", "netrune profile export ~/netrune-full.tgz.gpg --with-state --with-secrets"]},
+            "pack": {"usage": "netrune profile pack [~/site.tgz.gpg] --dry-run|--confirm", "about": "Everything a new machine needs, in one encrypted file: the same as profile export FILE --with-state --with-secrets (configuration, caches, memory, SNMP communities). Guarded because it carries credentials: without --confirm it lists what would go in; --confirm asks for a passphrase (or NETRUNE_BUNDLE_PASSPHRASE), writes the file, and records an audit event. Restore with ./install.sh --import FILE or netrune profile import FILE.", "examples": ["netrune profile pack --dry-run", "netrune profile pack --confirm", "netrune profile pack ~/site-a.tgz.gpg --confirm"]},
+            "import": {"usage": "netrune profile import <bundle> [--as NAME] [--force]", "about": "Restore a bundle written by profile export into its profile (or --as NAME) and make it active. Refuses a profile that already holds configuration or memory unless --force, which keeps each replaced file beside the new one. An encrypted bundle asks for its passphrase (or NETRUNE_BUNDLE_PASSPHRASE). Prints what is left to do: netrune vault set for the SSH password.", "examples": ["netrune profile import ~/netrune-profile.tgz", "netrune profile import ~/netrune-full.tgz.gpg --as site-a"]},
             "migrate-legacy": {"usage": "netrune profile migrate-legacy [legacy-local]", "about": "Copy legacy netsnmp state into a private profile, recording a manifest and leaving originals untouched.", "examples": ["netrune profile migrate-legacy legacy-local"]},
         },
     },
@@ -3192,11 +3401,12 @@ HELP_TOPICS.update({
     },
     "excel": {
         "summary": "Correlate your own Excel workbooks with Netrune's inventory, and build tracker workbooks.",
-        "usage": "netrune excel <inspect|sync|export>",
+        "usage": "netrune excel <inspect|sync|export|report>",
         "actions": {
-            "inspect": {"usage": "netrune excel inspect <workbook.xlsx> [--sheet NAME] [--map 'Header=field,...'] [--fields LIST]", "about": "Report which rows match which Netrune switch and what is out of date, without writing. Finds each sheet's header row and columns, matches rows by serial, base MAC, IP, or hostname, and lists conflicts and unmatched rows.", "examples": ["netrune excel inspect ~/switches.xlsx", "netrune excel inspect ~/Assets.xlsx --sheet Switches --map 'Mgmt Addr=ip'"]},
-            "sync": {"usage": "netrune excel sync <workbook.xlsx> [--sheet NAME] [--map 'Header=field,...'] [--fields LIST] [--fill-only] [--add-missing] [--prefer serial|mac|ip|hostname] [--output PATH] [--highlight] [--no-comments] [--ignore-lock] [--allow-feature-loss] (--dry-run | --confirm)", "about": "Write Netrune's current hostname, IP, model, serial, base MAC, and platform into the matched rows' empty or out-of-date cells (status and last_seen with --fields). Formula cells, other columns, and other sheets are left alone. --confirm backs the original up, saves atomically, reads the file back to verify, and records an audit event; without it nothing is written.", "examples": ["netrune excel sync ~/switches.xlsx --dry-run", "netrune excel sync ~/switches.xlsx --fields mac,serial,model --confirm", "netrune excel sync ~/switches.xlsx --sheet Switches --add-missing --output ~/switches-updated.xlsx --confirm"]},
+            "inspect": {"usage": "netrune excel inspect <workbook.xlsx> [--sheet NAME|N[,...]] [--map 'Header=field,...'] [--fields LIST] [--refresh LIST|all] [--remarks] [--free-ips]", "about": "Report which rows match which Netrune switch and what is out of date, without writing. --free-ips also checks the unallocated addresses (pinging them), so the report shows which are free. Finds each sheet's header row and columns, matches rows by serial, base MAC, IP, or hostname, and lists conflicts and unmatched rows. --sheet picks the sheets to read by name (any case) or by number, comma-separated for several; the heading numbers every sheet.", "examples": ["netrune excel inspect ~/switches.xlsx", "netrune excel inspect ~/Assets.xlsx --sheet Switches --map 'Mgmt Addr=ip'", "netrune excel inspect ~/Assets.xlsx --sheet 2"]},
+            "sync": {"usage": "netrune excel sync <workbook.xlsx> [--sheet NAME|N[,...]] [--map 'Header=field,...'] [--fields LIST] [--refresh LIST|all] [--remarks] [--free-ips [--accept-free IPS|all] [--reject-free IPS|all]] [--fill-only] [--add-missing] [--prefer serial|mac|ip|hostname] [--output PATH] [--no-shade] [--comments] [--ignore-lock] [--allow-feature-loss] (--dry-run | --confirm)", "about": "Write Netrune's current hostname, IP, manufacturer, model, serial, base MAC, and platform into the matched rows' empty or out-of-date cells (status and last_seen with --fields). --refresh FIELDS rewrites those whole columns on every matched row, even cells that already agree in another notation and even under --fill-only, and stops them voting on which switch a row is. Each written cell is shaded by confidence in five steps: green certain (serial/MAC matched), blue strong (two keys agreed, or a new row), yellow fair (one IP or name filled a blank, or a sheet serial/MAC replaced), tan weak (one IP or name overwrote a value), red doubtful (--prefer broke a conflict); a switch not seen for 30 days drops one step; --no-shade turns it off and --comments adds a note with the old value. --remarks writes one brief note per row into the Remarks/Comments/Notes column (added when missing), worded as the tech's own: what changed, Offline, Check: keys disagree, Duplicate of row N; the operator's own text is kept. --free-ips (implies --remarks) marks addresses Free to use: never while a device Netrune knows (online or offline) or one seen in the last 30 days holds it; an empty row (no hostname, serial, or MAC) is free without pinging; a row naming something Netrune never saw is pinged and, if silent, asked about under --confirm in a terminal (y: Free to use (old entry), n: Allocated, offline) or settled with --accept-free/--reject-free IPS|all. The report suggests addresses for allocation, empty rows first. A remark saying reserved/DHCP/gateway is respected, and a Free to use is replaced once the address is in use. Formula cells, other columns, and other sheets are left alone. --confirm backs the original up, saves atomically, reads the file back to verify, and records an audit event; without it nothing is written.", "examples": ["netrune excel sync ~/switches.xlsx --dry-run", "netrune excel sync ~/switches.xlsx --fields mac,serial,model --confirm", "netrune excel sync ~/Assets.xlsx --sheet Switches --refresh mac,serial --dry-run", "netrune excel sync ~/IP-Plan.xlsx --sheet 'VLAN 20' --free-ips --dry-run", "netrune excel sync ~/switches.xlsx --sheet Switches --add-missing --output ~/switches-updated.xlsx --confirm"]},
             "export": {"usage": "netrune excel export <tracker.xlsx> [--migration-rows N] [--confirm]", "about": "Write a new workbook: an Inventory table, a live Summary of formulas and a chart, and a Migration Tracker with dropdowns, lookups, and overdue highlighting. --confirm is needed only to replace an existing file, which is backed up first.", "examples": ["netrune excel export ~/network-tracker.xlsx"]},
+            "report": {"usage": "netrune excel report <reports.xlsx> [--report LIST] [--since 30d|12w|6m|YYYY-MM-DD|all] [--confirm]", "about": "Write a workbook of fixed-definition reports, one sheet each: active-aps, active-switches, transitions (renames, IP changes, IPs now on another device, serial/model changes, AP moves), switch-history and ap-history (every device online or offline, plus each replaced piece of hardware). Changes cover the last 30 days unless --since widens or narrows them. Each report's exact definition is written on the Report Info sheet. --confirm is needed only to replace an existing file, which is backed up first.", "examples": ["netrune excel report ~/netrune-reports.xlsx", "netrune excel report ~/aps.xlsx --report active-aps,ap-history --since all"]},
         },
     },
     "support": {
@@ -3684,7 +3894,9 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         self._progress_update(" | ".join(parts), opts)
 
     def _select_row(self, rows: List[Dict[str, Any]], opts: GlobalOptions, *, label: Callable[[Dict[str, Any]], str], prompt: str) -> Optional[Dict[str, Any]]:
-        """Arrow-key picker over an ambiguous match set.
+        """Numbered arrow-key picker over an ambiguous match set: move with
+        the arrows, or type a row's number (the highlight jumps to it), then
+        Enter.
 
         Returns the picked row, or None when this isn't a real interactive
         terminal (piped, --json, --plain, non-tty) or the user cancelled --
@@ -3694,8 +3906,9 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         if opts.json or opts.plain or not sys.stdin.isatty() or not sys.stdout.isatty():
             return None
         rows = rows[:20]
-        texts = [label(row) for row in rows]
+        texts = [f"{number:>2}) {label(row)}" for number, row in enumerate(rows, 1)]
         index = 0
+        typed = ""
         color = self._color_enabled()
         def render(first: bool) -> None:
             if not first:
@@ -3710,7 +3923,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         picked: Optional[Dict[str, Any]] = None
         try:
             tty.setcbreak(fd)
-            print(f"{prompt} (↑/↓ and Enter to choose, q to cancel)")
+            print(f"{prompt} (↑/↓ or type a number, Enter to choose, q to cancel)")
             render(first=True)
             while True:
                 ch = os.read(fd, 1)
@@ -3722,7 +3935,18 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
                         index = (index + 1) % len(texts)
                     else:
                         break
+                    typed = ""
                     render(first=False)
+                elif ch.isdigit():
+                    # Two digits make one number while it still fits (1 then
+                    # 2 is 12 of 15); otherwise the digit starts over.
+                    candidate = typed + ch.decode()
+                    typed = candidate if 1 <= int(candidate) <= len(rows) else ch.decode()
+                    if 1 <= int(typed) <= len(rows):
+                        index = int(typed) - 1
+                        render(first=False)
+                    else:
+                        typed = ""
                 elif ch in (b"\r", b"\n"):
                     picked = rows[index]
                     break
@@ -4109,6 +4333,10 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         print(f"Action help: netrune help {noun} <action>")
 
     def dispatch(self, argv: List[str]) -> int:
+        # `netrune check <name> [args]` is shorthand for a real command line;
+        # expanding it before parsing keeps every global flag meaning the same.
+        from netops_platform.checks_cli import expand_argv
+        argv = expand_argv(argv) or list(argv)
         opts,args=parse_global(argv)
         if not args:
             self.cmd_help(opts=opts); return SUCCESS
@@ -4127,7 +4355,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             if noun == "ghoster":
                 noun = "path"
                 args.insert(0, "inspect")
-            table={"init":self.cmd_init,"setup":self.cmd_setup,"profile":self.cmd_profile,"config":self.cmd_config,"secrets":self.cmd_secrets,"ingest":self.cmd_ingest,"plugin":self.cmd_plugin,"path":self.cmd_path,"excel":self.cmd_excel,"traffic":self.cmd_traffic,"support":self.cmd_support,"inventory":self.cmd_inventory,"ap":self.cmd_ap,"topology":self.cmd_topology,"memory":self.cmd_memory,"health":self.cmd_health,"backup":self.cmd_backup,"device":self.cmd_device,"vault":self.cmd_vault,"vlan":self.cmd_vlan,"lookup":self.cmd_lookup,"diagnose":self.cmd_diagnose,"workflow":self.cmd_workflow,"commands":self.cmd_commands,"ask":self.cmd_ask,"db":self.cmd_db}
+            table={"init":self.cmd_init,"setup":self.cmd_setup,"profile":self.cmd_profile,"config":self.cmd_config,"secrets":self.cmd_secrets,"ingest":self.cmd_ingest,"plugin":self.cmd_plugin,"path":self.cmd_path,"excel":self.cmd_excel,"check":self.cmd_check,"traffic":self.cmd_traffic,"support":self.cmd_support,"inventory":self.cmd_inventory,"ap":self.cmd_ap,"topology":self.cmd_topology,"memory":self.cmd_memory,"health":self.cmd_health,"backup":self.cmd_backup,"device":self.cmd_device,"vault":self.cmd_vault,"vlan":self.cmd_vlan,"lookup":self.cmd_lookup,"diagnose":self.cmd_diagnose,"workflow":self.cmd_workflow,"commands":self.cmd_commands,"ask":self.cmd_ask,"db":self.cmd_db}
             if noun not in table:
                 legacy = self._legacy_suggestion(noun, args)
                 if legacy:
@@ -4221,11 +4449,98 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             database_action = payload["database_migration"]["action"]
             self.emit({"ok": True, **payload}, opts, f"Legacy migration prepared private profile {destination}. Original files were not changed.\nDatabase: {database_action} | Copied: {len(payload['copied'])} | Skipped: {len(payload['skipped'])} | Pending named secrets: {len(payload['pending_secret_names'])}")
             return SUCCESS
+        if verb in {"export", "import"}:
+            return self.profile_bundle_command(verb, rest, opts)
+        if verb == "pack":
+            return self.profile_pack(rest, opts)
         if verb == "paths":
             payload = self.paths.profile_layout.to_dict()
             self.emit({"ok": True, "profile": self.paths.profile, "paths": payload}, opts, "\n".join(f"{key}: {value}" for key, value in payload.items()))
             return SUCCESS
         return self.unknown_action("profile", verb, opts)
+
+    PACK_DEFAULT = "~/site.tgz.gpg"
+
+    def profile_pack(self, rest: List[str], opts: GlobalOptions) -> int:
+        """`profile pack [FILE] --confirm`: everything a new machine needs in
+        one encrypted file, the same as `profile export FILE --with-state
+        --with-secrets`. It carries the SNMP communities, so it is guarded
+        like any other sensitive change: without --confirm it only says what
+        would go in."""
+        from netops_platform.profile_bundle import BundleError, CACHE_FILES, export_bundle
+        usage = f"netrune profile pack [{self.PACK_DEFAULT}] --dry-run|--confirm"
+        positional = [item for item in rest if not item.startswith("--")]
+        unknown = [item for item in rest if item.startswith("--")]
+        if unknown or len(positional) > 1:
+            return self.usage_error("profile", "pack", opts, f"Unknown option: {unknown[0]}" if unknown else "Name one bundle file.", usage, VALIDATION)
+        target = Path(positional[0] if positional else self.PACK_DEFAULT).expanduser()
+        database = self.paths.sqlite_db
+        parts = {
+            "profile": self.paths.profile,
+            "configuration files": sum(1 for path in self.paths.config_dir.rglob("*") if path.is_file()) if self.paths.config_dir.is_dir() else 0,
+            "caches": sum(1 for name in CACHE_FILES if (self.paths.cache_dir / name).is_file()),
+            "memory (SQLite)": f"{database.stat().st_size // (1024 * 1024)} MiB" if database.is_file() else "none",
+            "SNMP communities": "yes" if self.paths.env_file.is_file() else "none stored",
+            "SSH vault": "never (bound to this machine; run netrune vault set on the new one)",
+        }
+        if not opts.confirm:
+            text = (f"Would write {target}, encrypted with a passphrase you choose:\n"
+                    + "\n".join(f"  {key:<20} {value}" for key, value in parts.items())
+                    + f"\nRe-run with --confirm to write it. Anyone with the file and its passphrase gets these communities.")
+            self.emit({"ok": True, "dry_run": True, "path": str(target), "contents": parts}, opts, text)
+            return SUCCESS if opts.dry_run else CONFIRM_REQUIRED
+        try:
+            manifest = export_bundle(self.paths, target, with_state=True, with_secrets=True)
+        except (BundleError, OSError, ValueError) as exc:
+            return self.usage_error("profile", "pack", opts, str(exc), usage, VALIDATION)
+        self.state.record_audit_event("profile", "profile-pack", target=str(target), result="success",
+                                      detail={"files": len(manifest["files"]), "bytes": manifest["bytes"]})
+        text = (f"Packed profile '{manifest['profile']}' into {target} ({manifest['bytes'] // 1024} KiB, encrypted).\n"
+                f"On the new machine: ./install.sh --import {target}\n"
+                "Keep the file and its passphrase apart; delete the file once the new machine is set up.")
+        self.emit({"ok": True, **manifest}, opts, text)
+        return SUCCESS
+
+    def profile_bundle_command(self, verb: str, rest: List[str], opts: GlobalOptions) -> int:
+        """`profile export <file> [--with-state] [--with-secrets]` and
+        `profile import <file> [--as NAME] [--force]`: one file that carries
+        a profile to another machine (see profile_bundle)."""
+        from netops_platform.profile_bundle import BundleError, export_bundle, import_bundle
+        flags = {item for item in rest if item.startswith("--")}
+        rest, as_name = _take_flag(rest, "--as")
+        positional = [item for item in rest if not item.startswith("--")]
+        allowed = {"export": {"--with-state", "--with-secrets"}, "import": {"--force"}}[verb]
+        usage = ("netrune profile export <bundle.tgz> [--with-state] [--with-secrets]" if verb == "export"
+                 else "netrune profile import <bundle> [--as NAME] [--force]")
+        unknown = sorted(flags - allowed - {"--as"})
+        if unknown or len(positional) != 1:
+            return self.usage_error("profile", verb, opts, f"Unknown option: {unknown[0]}" if unknown else "Name the bundle file.", usage, VALIDATION)
+        target = Path(positional[0]).expanduser()
+        try:
+            if verb == "export":
+                manifest = export_bundle(self.paths, target, with_state="--with-state" in flags, with_secrets="--with-secrets" in flags)
+                parts = [f"Exported profile '{manifest['profile']}' to {manifest['path']} ({len(manifest['files'])} files, {manifest['bytes'] // 1024} KiB)"
+                         + (", encrypted" if manifest["with_secrets"] else "") + "."]
+                if not manifest["with_state"]:
+                    parts.append("Memory (history, merges, decisions) not included: add --with-state to carry it.")
+                if not manifest["with_secrets"]:
+                    parts.append("SNMP communities not included: add --with-secrets (the bundle is then passphrase-encrypted).")
+                parts.append("On the new machine: ./install.sh --import " + target.name + "   (or: netrune profile import " + target.name + ")")
+                self.emit({"ok": True, **manifest}, opts, "\n".join(parts))
+                return SUCCESS
+            result = import_bundle(self.profile_store, target, as_name=as_name or "", force="--force" in flags)
+        except (BundleError, OSError, ValueError) as exc:
+            return self.usage_error("profile", verb, opts, str(exc), usage, VALIDATION)
+        manifest = result["manifest"]
+        steps = ["netrune vault set              # the SSH password: the vault is bound to each machine's sudo",
+                 "netrune config validate        # settings and the tools this machine still lacks"]
+        if not manifest.get("with_secrets"):
+            steps.insert(1, "netrune setup local --community <community>   # or set the SNMP community another way")
+        steps.append("netrune workflow morning-check # first full refresh from this machine")
+        text = (f"Imported profile '{result['profile']}' from {manifest.get('source_host') or 'another machine'} "
+                f"({len(result['restored'])} files) and made it the active profile.\nNext:\n  " + "\n  ".join(steps))
+        self.emit({"ok": True, **result, "next_steps": steps}, opts, text)
+        return SUCCESS
 
     def _write_profile_config_value(self, key: str, value: Optional[str]) -> None:
         if not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", key):
@@ -4509,6 +4824,12 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         from netops_platform.path_cli import dispatch
         return dispatch(self, args, opts)
 
+    def cmd_check(self, args: List[str], opts: GlobalOptions) -> int:
+        from netops_platform.checks_cli import dispatch
+        if self.handle_help("check", args, opts):
+            return SUCCESS
+        return dispatch(self, args, opts)
+
     def cmd_excel(self, args: List[str], opts: GlobalOptions) -> int:
         from netops_platform.excel_cli import dispatch
         return dispatch(self, args, opts)
@@ -4523,9 +4844,166 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         self.emit(payload, opts, f"Redacted support bundle: {payload['path']}\nSHA-256: {payload['sha256']}\nBytes: {payload['bytes']} | Recorded: {fmt_time(payload['recorded_at'])}\nExcluded: {', '.join(payload['excluded'])}")
         return SUCCESS
 
+    def db_coherence_payload(self, *, realign: bool = False) -> Dict[str, Any]:
+        """Storage health, then whether the tables still agree with each other
+        and with the evidence they hold -- the database half of the morning
+        check. Kept cheap enough to run every morning on a store this size:
+        quick_check instead of integrity_check (under a second against six on
+        a 500 MB store), and no full read of traffic history.
+
+        `realign` first does what `memory refresh` does -- re-import the flat
+        caches, re-apply every manual merge, re-derive relationships and
+        identity-continuity candidates -- so the morning check runs it in
+        place of that step instead of paying for both. Then it applies the
+        fixes that are local bookkeeping with one right answer. Today that is
+        a platform label the model number contradicts: the label picks the
+        CLI dialect the shell helpers speak, so a Cisco labelled Ruckus gets
+        Ruckus commands until it is fixed. Everything else is reported for an
+        operator to decide.
+        """
+        from netops_platform.devices import family_manufacturer
+        from netops_platform.inventory_ingest import PLATFORM_LABELS
+        checks: List[Dict[str, Any]] = []
+        def add(check: str, status: str, detail: str, items: Sequence[str] = (), hint: str = "") -> None:
+            # `detail` fits the table's 32-character column; anything longer
+            # (what to run next) goes in `hint`, printed under the table.
+            checks.append({"check": check, "status": status, "count": len(items), "detail": detail,
+                           "hint": hint if status in {"WARN", "FAIL"} else "", "items": list(items)[:20]})
+
+        if realign and self.state.get_marker("flat_import") == self.state.flat_cache_signature():
+            # The morning check's topology scan has just imported these exact
+            # caches, merges and all; doing it again would recompute the same
+            # memory from the same input.
+            add("realign", "PASS", "current; caches unchanged")
+        elif realign:
+            imported = self.state.import_flat_files()
+            applied = sum(int(imported["reconciliation"].get(key, {}).get("active") or 0) for key in ("manual_merges", "manual_ap_merges"))
+            add("realign", "PASS", f"refreshed; {applied} merge(s) re-applied")
+        with self.state.connect() as con:
+            quick = [str(row[0]) for row in con.execute("PRAGMA quick_check").fetchall()]
+            orphans = con.execute("PRAGMA foreign_key_check").fetchall()
+            devices = [dict(row) for row in con.execute("SELECT ip,hostname,hostname AS name,platform,model,serial,mac,source,status,last_seen FROM devices")]
+            aps = [dict(row) for row in con.execute("SELECT * FROM aps")]
+            merges = [dict(row) for row in con.execute("SELECT merge_id,entity_type,target_name,target_ip,target_snapshot_json FROM inventory_merges WHERE revoked_at IS NULL")]
+            stuck = [dict(row) for row in con.execute(
+                "SELECT id,action,status,created_at FROM jobs WHERE status IN ('queued','running') AND created_at < ?", (now() - 6 * 3600,))]
+        add("storage", "PASS" if quick == ["ok"] else "FAIL", "quick_check ok" if quick == ["ok"] else "quick_check failed",
+            [] if quick == ["ok"] else quick, "run netrune db repair")
+        add("references", "PASS" if not orphans else "WARN", "no dangling references" if not orphans else "dangling references",
+            [f"{row[0]} row {row[1]} -> {row[2]}" for row in orphans], "run netrune db repair")
+        version = self.state.schema_version()
+        add("schema", "PASS" if version == SCHEMA_VERSION else "WARN", f"schema {version}" + ("" if version == SCHEMA_VERSION else f", expected {SCHEMA_VERSION}"),
+            hint="run netrune db migrate")
+
+        mislabelled: List[Tuple[str, str, str]] = []
+        for row in devices:
+            stored = str(row.get("platform") or "")
+            detection = self.detect_device_family(platform=stored, model=row.get("model"), hostname=row.get("hostname"))
+            label = PLATFORM_LABELS.get(detection.family)
+            labelled = family_manufacturer(self.detect_device_family(platform=stored).family)
+            if label and label != stored and labelled and labelled != family_manufacturer(detection.family):
+                mislabelled.append((str(row["ip"]), stored, label))
+        names = {str(row["ip"]): str(row.get("hostname") or row["ip"]) for row in devices}
+        models = {str(row["ip"]): str(row.get("model") or "") for row in devices}
+        label_items = [f"{names[ip]} ({ip}): {old!r} -> {new!r}, model {models[ip]}" for ip, old, new in mislabelled]
+        if mislabelled and realign:
+            self.state.execute_many("UPDATE devices SET platform=? WHERE ip=?", [(new, ip) for ip, _, new in mislabelled])
+            # Records the corrected label in inventory history and re-derives
+            # everything keyed on it; the flat export follows at dispatch end.
+            self.state.sync_derived_state()
+        add("platform_labels", "PASS" if not mislabelled else "FIXED" if realign else "WARN",
+            "labels agree with models" if not mislabelled else "relabelled from model" if realign else "label contradicts model",
+            label_items, "run netrune db coherence --realign")
+
+        # Switches seen as LLDP/CDP neighbours that an AP scan once filed as
+        # APs: they double-count in AP views and blur AP attachment. The scan
+        # no longer adds them; realign removes the ones already there.
+        from netops_platform.devices import is_switch_row
+        switch_aps = [row for row in aps if is_switch_row(row)]
+        if switch_aps and realign:
+            self.state.execute_many("DELETE FROM aps WHERE ip=? AND COALESCE(name,'')=?",
+                                    [(row["ip"], row.get("name") or "") for row in switch_aps])
+            aps = [row for row in aps if not is_switch_row(row)]
+            self.state.sync_derived_state()
+        add("ap_inventory", "PASS" if not switch_aps else "FIXED" if realign else "WARN",
+            "APs only" if not switch_aps else f"removed {len(switch_aps)} switch rows" if realign else "switch rows among APs",
+            [f"{row.get('name') or row['ip']} ({row['ip']}): {str(row.get('platform') or '')[:60]}" for row in switch_aps],
+            "run netrune db coherence --realign")
+
+        # One hostname answering on several live addresses is a naming or
+        # collection error; reconciliation keeps them apart (see
+        # identity.concurrently_distinct), and someone should fix the source.
+        from netops_platform.identity import concurrently_distinct, normalize_asset_name
+        by_name: Dict[str, List[Dict[str, Any]]] = {}
+        for row in devices:
+            key = normalize_asset_name(row.get("hostname"))
+            if key and str(row.get("hostname") or "").upper() not in {"N/A", "UNKNOWN"}:
+                by_name.setdefault(key, []).append(row)
+        shared = [f"{group[0].get('hostname')}: " + ", ".join(sorted(str(row["ip"]) for row in group))
+                  for group in by_name.values()
+                  if len(group) > 1 and any(concurrently_distinct(a, b) for i, a in enumerate(group) for b in group[i + 1:])]
+        add("shared_names", "PASS" if not shared else "WARN", "one live switch per name" if not shared else "a name on several live IPs",
+            shared, "the scan read the same hostname from different switches; check their hostnames and DNS")
+
+        synced = self.state.last_inventory_rows
+        if synced is not None and not (switch_aps and realign):
+            canonical_devices = [row for row in synced if row.get("entity_type") == "device"]
+            canonical_aps = [row for row in synced if row.get("entity_type") == "ap"]
+        else:
+            canonical_devices = reconcile_device_rows(devices)
+            canonical_aps = reconcile_ap_rows(aps)
+        conflicts = [f"{row.get('name') or row.get('ip')}: {len(row.get('macs') or [])} MACs, {len(row.get('serials') or [])} serials"
+                     for row in canonical_devices if row.get("identity_conflict")]
+        conflicts += [f"AP {row.get('name') or row.get('ip')}: {len(row.get('macs') or [])} MACs"
+                      for row in canonical_aps if row.get("identity_conflict")]
+        add("identity", "PASS" if not conflicts else "WARN", "one identity per record" if not conflicts else "records with several identities",
+            conflicts, "one record carries several MACs or serials; compare the records with netrune device identity <a> <b>")
+
+        stale: List[str] = []
+        current = {"device": canonical_devices, "ap": canonical_aps}
+        for merge in merges:
+            entity = str(merge.get("entity_type") or "device")
+            target = self.state._merge_snapshot(merge, "target_snapshot_json")
+            if target and not any(self.state._matches_snapshot(row, target, entity) for row in current.get(entity, [])):
+                stale.append(f"{merge['merge_id']}: {entity} {merge.get('target_name') or merge.get('target_ip')} is gone")
+        add("merges", "PASS" if not stale else "WARN", f"{len(merges)} active, targets present" if not stale else "merge target left inventory",
+            stale, "review with netrune inventory merges / netrune ap merges")
+
+        flat_rows = len(self.state._read_pipe(self.paths.devices_file, 9)) if self.paths.devices_file.exists() else 0
+        add("flat_cache", "PASS" if flat_rows == len(devices) else "WARN",
+            f"{flat_rows} rows, matches SQLite" if flat_rows == len(devices) else f"cache {flat_rows} vs SQLite {len(devices)}",
+            hint="run netrune inventory import-flat")
+
+        add("jobs", "PASS" if not stuck else "WARN", "none stuck" if not stuck else "queued/running over 6h",
+            [f"{row['id']} {row['action']} ({row['status']} since {fmt_time(row['created_at'])})" for row in stuck],
+            "the process that owned these jobs is likely gone")
+
+        wal = Path(str(self.paths.sqlite_db) + "-wal")
+        wal_mb = (wal.stat().st_size if wal.exists() else 0) // (1024 * 1024)
+        add("wal", "PASS" if wal_mb < 256 else "WARN", f"write-ahead log {wal_mb} MB",
+            hint="checkpoints are falling behind; run netrune db vacuum in a quiet window")
+
+        failed = [c for c in checks if c["status"] == "FAIL"]
+        warned = [c for c in checks if c["status"] == "WARN"]
+        fixed = [c for c in checks if c["status"] == "FIXED"]
+        status = "FAILED" if failed else "ATTENTION" if warned else "SUCCESS"
+        summary = f"Database coherence: {status} | {len(checks)} checks | {len(warned) + len(failed)} need attention | {sum(c['count'] for c in fixed)} realigned"
+        return {"ok": not failed, "status": status, "summary": summary, "realign": realign, "checks": checks}
+
     def cmd_db(self,args:List[str],opts:GlobalOptions)->int:
         if self.handle_help("db", args, opts): return SUCCESS
         verb=args[0] if args else "status"
+        if verb=="coherence":
+            extra=[x for x in args[1:] if x!="--realign"]
+            if extra: return self.usage_error("db","coherence",opts,f"Unknown db coherence option: {extra[0]}","netrune db coherence [--realign]")
+            payload=self.db_coherence_payload(realign=("--realign" in args[1:]) and not opts.dry_run)
+            text=payload["summary"]+"\n"+self.render_table(payload["checks"],["check","status","count","detail"])
+            for check in payload["checks"]:
+                if check["status"]!="PASS" and (check["items"] or check["hint"]):
+                    text+=f"\n\n{check['check']}"+(f" -- {check['hint']}" if check["hint"] else "")+":"*bool(check["items"])
+                    text+="".join("\n  "+item for item in check["items"])
+            self.emit(payload,opts,text)
+            return INTERNAL if payload["status"]=="FAILED" else PARTIAL if payload["status"]=="ATTENTION" else SUCCESS
         if verb in {"init","migrate"}:
             payload=self.state.migrate(); payload["reconciliation"]=self.state.sync_derived_state(origin="migration"); payload["counts"]=self.state.counts()
             self.emit(payload,opts,f"SQLite ready: {self.paths.sqlite_db} (schema {payload.get('schema_version')})"); return SUCCESS
@@ -4561,6 +5039,39 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
 
     def ap_rows(self,pattern:str,opts:GlobalOptions)->List[Dict[str,Any]]:
         return self.reconciled_ap_rows(pattern_or_all(pattern), opts)
+
+    def ap_controller_view(self, pattern: str, opts: GlobalOptions) -> int:
+        """What the wireless controllers last reported for each AP: model,
+        serial, firmware, their own connection status, uptime, and when the
+        AP scan polled them. Uptime is the controller's figure at poll time,
+        so `booted_at` (poll time minus uptime) stays right between polls."""
+        needle = pattern.lower()
+        compact = re.sub(r"[^0-9a-f]", "", needle)
+        rows = []
+        for row in self.state.rows("SELECT * FROM ap_controller_state ORDER BY controller,name,mac"):
+            item = dict(row)
+            mac = str(item.get("mac") or "")
+            item["mac"] = ":".join(mac[i:i + 2] for i in range(0, len(mac), 2)) if len(mac) == 12 else mac
+            haystack = " ".join(str(item.get(key) or "") for key in ("name", "ip", "mac", "model", "serial", "firmware", "status", "controller", "detail")).lower()
+            if needle and needle not in haystack and not (len(compact) >= 4 and compact in mac):
+                continue
+            uptime = item.get("uptime_s")
+            item["uptime"] = duration_text(uptime) if isinstance(uptime, int) else ""
+            item["booted_at"] = int(item["polled_at"]) - uptime if isinstance(uptime, int) and item.get("polled_at") else None
+            rows.append(item)
+        rows = timestamp_rows(rows)
+        shown = rows[:opts.limit] if opts.limit else rows
+        if not rows:
+            hint = "No controller has reported APs yet; run netrune ap scan." if not pattern else f"No controller-reported AP matches '{pattern}'."
+            self.emit({"ok": True, "rows": [], "count": 0}, opts, hint)
+            return SUCCESS
+        online = sum(1 for row in rows if row.get("status") == "ONLINE")
+        polled = max(int(row.get("polled_at") or 0) for row in rows)
+        text = (self.render_table(shown, ["name", "ip", "mac", "model", "serial", "firmware", "status", "uptime", "controller", "detail"])
+                + f"\n{len(rows)} AP(s), {online} connected" + (f" (first {len(shown)} shown; --limit N for more)" if len(shown) < len(rows) else "")
+                + f"; last polled {fmt_time(polled)}.")
+        self.emit({"ok": True, "rows": shown, "count": len(rows), "connected": online}, opts, text)
+        return SUCCESS
 
     @staticmethod
     def _manual_merge_arguments(args: Sequence[str], *, expected: int) -> Tuple[List[str], str, str]:
@@ -4598,16 +5109,29 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
                 try: self.import_flat_state(("ap",), "wireless-controller-scan")
                 except Exception as exc: eprint(f"Observation recording failed: {exc}"); return PARTIAL
             return rc
-        if verb in {"list","show"}: rows=self.ap_rows(pattern_or_all(" ".join(rest).strip()),opts); self.emit({"ok":True,"rows":rows,"count":len(rows)},opts,self.render_table(rows,["ip","name","platform","switch_name","switch_port","status","last_seen"])); return SUCCESS
+        if verb in {"list","show"}: rows=self.ap_rows(pattern_or_all(" ".join(rest).strip()),opts); self.emit({"ok":True,"rows":rows,"count":len(rows)},opts,self.render_table(rows,["ip","name","manufacturer","platform","switch_name","switch_port","status","last_seen"])); return SUCCESS
         if verb in {"unjoined","not-joined","nonjoined"}:
             pattern=" ".join(rest).strip()
             rows=reconcile_ap_rows(self.state.rows("SELECT * FROM aps WHERE lower(COALESCE(switch_port,'')) IN ('not-joined','not joined','unjoined','nonjoined') ORDER BY last_seen DESC,name"))
             if pattern: rows=[row for row in rows if ap_rows_match(row,pattern)]
             rows=rows[:opts.limit]
-            self.emit({"ok":True,"rows":rows,"count":len(rows)},opts,self.render_table(rows,["ip","name","mac","switch_name","switch_port","status","last_seen"])); return SUCCESS
+            # The row's address is a wlc:<mac> key: where the AP last was,
+            # and why the controller has not joined it, come from its sidecar.
+            said={str(r["mac"]):dict(r) for r in self.state.rows("SELECT mac,ip,detail FROM ap_controller_state")}
+            for row in rows:
+                state=said.get(norm_mac(row.get("mac")),{})
+                row["detail"]=state.get("detail") or ""
+                match=re.search(r"last IP (\S+)",row["detail"])
+                row["last_ip"]=match.group(1) if match else ("" if str(row.get("ip") or "").startswith("wlc:") else row.get("ip") or "")
+            self.emit({"ok":True,"rows":rows,"count":len(rows)},opts,self.render_table(rows,["name","mac","last_ip","switch_name","status","last_seen","detail"])); return SUCCESS
+        if verb=="controller":
+            return self.ap_controller_view(" ".join(rest).strip(),opts)
         if verb in {"on-switch","switch"}:
             if not rest: return self.usage_error("ap","on-switch",opts,"Missing switch target.","netrune ap on-switch ZONE10")
             return self.memory_switch(" ".join(rest),opts,aps_only=True)
+        if verb=="neighbors":
+            from netops_platform.ap_neighbors import run
+            return run(self, rest, opts)
         if verb=="moves": rows=self.state.rows("SELECT * FROM ap_move_events ORDER BY created_at DESC,id DESC LIMIT ?",(opts.limit,)); self.emit({"ok":True,"rows":rows},opts,self.render_table(rows,["created_at","ap_ip","ap_name","previous_switch_ip","previous_switch_port","current_switch_ip","current_switch_port"])); return SUCCESS
         if verb=="timeline": return self.relationship_timeline(rest[0] if rest else "ap_attachment",opts,rel_type="ap_attachment")
         if verb=="merge": return self.cmd_ap_merge(rest,opts)
@@ -4943,6 +5467,9 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             target=" ".join(rest).strip()
             rows=self.health_state_rows(target,opts,status="OFFLINE")
             self.emit({"ok":True,"target":target,"rows":rows,"count":len(rows)},opts,self.render_table(rows,["entity_type","entity_id","name","platform","status","last_failed","flap_count"])); return SUCCESS if not rows else PARTIAL
+        if verb=="review":
+            from netops_platform.review_cli import dispatch as review
+            return review(self, rest, opts)
         if verb=="attention":
             payload=self.attention_payload(opts.limit)
             rows=payload.get("items",[])
@@ -5288,7 +5815,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         ]
 
     @contextlib.contextmanager
-    def vault_session_scope(self, opts: GlobalOptions, minutes: int = 30):
+    def vault_session_scope(self, opts: GlobalOptions, minutes: int = 30, desktop_prompt: bool = False):
         """Hold the vault open for one multi-device run, then close it again.
 
         Each device read otherwise costs a separate vault unlock, which on a
@@ -5302,6 +5829,11 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         # no terminal, or with prompting disabled, the unlock would just fail
         # slowly and the run should proceed and authenticate per device.
         interactive = sys.stdin.isatty() and sys.stderr.isatty()
+        # A scheduled run has no terminal, but on a laptop the operator is at
+        # the desktop, where the Windows Hello PAM prompt appears. The weekly
+        # unit opts in with NETRUNE_VAULT_DESKTOP_PROMPT; nothing else does.
+        if desktop_prompt and environment_value("NETRUNE_VAULT_DESKTOP_PROMPT", "NETOPS_VAULT_DESKTOP_PROMPT", "").lower() in {"1", "true", "yes"}:
+            interactive = True
         if environment_value("NETRUNE_VAULT_NONINTERACTIVE", "NETOPS_VAULT_NONINTERACTIVE", "").lower() in {"1", "true", "yes"}:
             interactive = False
         opened = False
@@ -5642,6 +6174,12 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             if row.get("status") not in {"saved", "unchanged"}:
                 items.append({"kind": "backup", "level": "warning", "title": row.get("hostname") or row.get("device_ip"), "text": row.get("message") or row.get("status"), "row": row})
         items.extend(identity_items[:20])
+        # Weekly SSH steps that could not run because nobody unlocked the vault.
+        deferred = json.loads(self.state.get_marker("workflow_deferred:weekly") or "{}")
+        if deferred.get("steps"):
+            items.insert(0, {"kind": "workflow", "level": "warning", "title": "weekly workflow",
+                             "text": f"{', '.join(deferred['steps'])} waiting since {fmt_time(deferred.get('since'))}; run: netrune workflow weekly --resume",
+                             "row": deferred})
         return {"ok": True, "items": items[:limit], "health": health, "topology_changes": topology, "ap_moves": moves, "backups": backups, "identity_candidates": identity_candidates}
 
 
@@ -5653,6 +6191,9 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             CommandSpec("profile-show", "Show profile", [tool("netrune"), "profile", "show", "<name>"], "Show profile paths and non-secret settings.", args=["name"], domain="profile", output_type="table"),
             CommandSpec("profile-create", "Create profile", [tool("netrune"), "profile", "create", "<name>"], "Create a neutral isolated profile.", writes_local=True, args=["name"], domain="profile", safety_class="local-write"),
             CommandSpec("profile-use", "Select profile", [tool("netrune"), "profile", "use", "<name>"], "Select the profile used by future commands.", writes_local=True, args=["name"], domain="profile", safety_class="local-write"),
+            CommandSpec("profile-export", "Export profile", [tool("netrune"), "profile", "export", "<bundle>"], "Write the active profile (configuration, caches; optionally memory and encrypted SNMP communities) to one file for another machine.", read_only=False, writes_local=True, args=["bundle"], domain="profile", output_type="terminal", run_supported=False, safety_class="local-write"),
+            CommandSpec("profile-pack", "Pack profile for a new machine", [tool("netrune"), "profile", "pack", "--confirm"], "Write configuration, caches, memory, and SNMP communities to one passphrase-encrypted file; preview without --confirm.", read_only=False, writes_local=True, domain="profile", output_type="terminal", run_supported=False, safety_class="local-write", risk_level="warning"),
+            CommandSpec("profile-import", "Import profile", [tool("netrune"), "profile", "import", "<bundle>"], "Restore a profile bundle from another machine and make it the active profile.", read_only=False, writes_local=True, args=["bundle"], domain="profile", output_type="terminal", run_supported=False, safety_class="local-write"),
             CommandSpec("profile-paths", "Profile paths", [tool("netrune"), "profile", "paths"], "Show active profile XDG paths.", domain="profile", output_type="table"),
             CommandSpec("profile-migrate-legacy", "Migrate legacy profile", [tool("netrune"), "profile", "migrate-legacy", "<name>"], "Copy legacy netsnmp state without deleting the source.", writes_local=True, args=["name"], domain="profile", safety_class="local-write"),
             CommandSpec("config-show", "Show configuration", [tool("netrune"), "config", "show"], "Show effective redacted profile settings.", domain="config", output_type="table"),
@@ -5709,6 +6250,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             CommandSpec("path-history", "Path history", [tool("netrune"), "path", "history", "<endpoint>", "--vlan", "<vlan>"], "Show chronological path inspections with reusable run references.", args=["endpoint", "vlan"], domain="path", output_type="table"),
             CommandSpec("excel-inspect", "Inspect Excel workbook", [tool("netrune"), "excel", "inspect", "<workbook>"], "Match a workbook's rows to Netrune switches and report what is out of date, without writing.", args=["workbook"], domain="excel", output_type="table", run_supported=False),
             CommandSpec("excel-sync", "Sync Excel workbook", [tool("netrune"), "excel", "sync", "<workbook>", "--dry-run"], "Fill and update a workbook's switch rows from Netrune's inventory. Apply explicitly in the CLI with --confirm.", writes_local=True, args=["workbook"], domain="excel", risk_level="warning", output_type="table", run_supported=False, safety_class="local-write", state_effects=["workbook file", "audit_events"]),
+            CommandSpec("excel-report", "Write Excel reports", [tool("netrune"), "excel", "report", "<workbook>"], "Write active AP/switch, transition, and switch/AP history reports from Netrune's memory into one workbook.", writes_local=True, args=["workbook"], domain="excel", output_type="text", run_supported=False, safety_class="local-write", state_effects=["workbook file", "audit_events"]),
             CommandSpec("excel-export", "Export Excel tracker", [tool("netrune"), "excel", "export", "<workbook>"], "Write a new inventory, summary, and migration tracker workbook from Netrune's inventory.", writes_local=True, args=["workbook"], domain="excel", output_type="text", run_supported=False, safety_class="local-write", state_effects=["workbook file", "audit_events"]),
             CommandSpec("path-show", "Show path run", [tool("netrune"), "path", "show", "<reference>", "--vlan", "<vlan>"], "Open a path by full ID, unique prefix, endpoint/VLAN, or latest reference.", args=["reference", "vlan"], domain="path", output_type="table"),
             CommandSpec("support-bundle", "Create support bundle", [tool("netrune"), "support", "bundle"], "Create a redacted support archive without inventory, secrets, raw evidence, or backups.", writes_local=True, domain="support", output_type="table", safety_class="local-write"),
@@ -5720,6 +6262,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             CommandSpec("db-migrate", "Migrate database", [tool("netrune"), "db", "migrate"], "Apply SQLite schema migrations and reconcile derived state.", writes_local=True, domain="db", safety_class="local-write"),
             CommandSpec("db-status", "Database status", [tool("netrune"), "db", "status"], "Show database paths, schema version, file sizes, and record counts.", domain="db", output_type="table"),
             CommandSpec("db-path", "Database path", [tool("netrune"), "db", "path"], "Print the active SQLite database path.", domain="db", output_type="text"),
+            CommandSpec("db-coherence", "Database coherence", [tool("netrune"), "db", "coherence"], "Fast storage health and cross-table coherence checks; --realign also refreshes memory and fixes model-contradicted platform labels.", domain="db", output_type="table"),
             CommandSpec("db-integrity", "Database integrity", [tool("netrune"), "db", "integrity"], "Run SQLite integrity checks without modifying state.", domain="db", output_type="table"),
             CommandSpec("db-repair", "Repair database", [tool("netrune"), "db", "repair"], "Reindex and repair recoverable SQLite structures, then verify integrity.", writes_local=True, domain="db", safety_class="local-write"),
             CommandSpec("db-history", "Command history", [tool("netrune"), "db", "history"], "Show recorded command executions with exit codes.", domain="db", output_type="table"),
@@ -5741,7 +6284,9 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             CommandSpec("health-attention", "Health attention", [tool("netrune"), "health", "attention"], "Show health, topology, AP movement, and backup items needing review.", domain="health", output_type="table"),
             CommandSpec("health-timeline", "Health timeline", [tool("netrune"), "health", "timeline", "<target>"], "Read health state changes newest first.", args=["target"], domain="health", output_type="table"),
             CommandSpec("ap-scan", "AP scan", [tool("netrune"), "ap", "scan"], "Refresh AP inventory.", writes_local=True, domain="ap"),
+            CommandSpec("ap-neighbors", "AP attachment from CDP/LLDP", [tool("netrune"), "ap", "neighbors", "--all"], "Read switches' CDP/LLDP neighbour tables over SSH and record which port each AP is on.", writes_local=True, domain="ap", run_supported=False),
             CommandSpec("ap-list", "AP list", [tool("netrune"), "ap", "list", "<target>"], "Search current reconciled AP inventory.", args=["target"], domain="ap", output_type="table"),
+            CommandSpec("ap-controller", "Controller AP details", [tool("netrune"), "ap", "controller", "<target>"], "Show what the wireless controllers last reported per AP: model, serial, firmware, connection status, uptime, and poll time.", args=["target"], domain="ap", output_type="table"),
             CommandSpec("ap-unjoined", "Unjoined APs", [tool("netrune"), "ap", "unjoined", "<target>"], "List AP observations that are not joined to a controller.", args=["target"], domain="ap", output_type="table"),
             CommandSpec("ap-on-switch", "APs on switch", [tool("netrune"), "ap", "on-switch", "<target>"], "Show canonical APs attached to a switch or site.", args=["target"], domain="ap", output_type="table"),
             CommandSpec("ap-moves", "AP moves", [tool("netrune"), "ap", "moves"], "Show recorded AP attachment changes newest first.", domain="ap", output_type="table"),
@@ -5805,17 +6350,24 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             CommandSpec("device-trust-scan", "Scan SSH host keys", [tool("netrune"), "device", "trust", "scan", "<target>"], "Retrieve SSH host keys and SHA-256 fingerprints without enrolling them.", args=["target"], domain="device", output_type="table", safety_class="network-read"),
             CommandSpec("device-trust-enroll", "Enroll SSH host key", [tool("netrune"), "device", "trust", "enroll", "<target>", "--fingerprint", "<fingerprint>", "--confirm"], "Enroll only an out-of-band verified SSH host-key fingerprint.", writes_local=True, args=["target", "fingerprint"], domain="device", output_type="table", safety_class="local-write"),
             CommandSpec("device-trust-forget", "Forget SSH host key", [tool("netrune"), "device", "trust", "forget", "<target>", "--confirm"], "Remove a target from the managed SSH trust store.", writes_local=True, args=["target"], domain="device", output_type="table", safety_class="local-write"),
-            CommandSpec("workflow-morning-check", "Morning check", [tool("netrune"), "workflow", "morning-check"], "Health, topology refresh, memory, filtering, and attention summary.", writes_local=True, domain="workflow"),
+            CommandSpec("health-review", "Review decisions", [tool("netrune"), "health", "review"], "Go through every decision waiting for you (replaced switches/APs, rename clusters, workbook questions), one yes/no or pick at a time.", read_only=False, writes_local=True, domain="health", output_type="terminal", run_supported=False, safety_class="local-write"),
+            CommandSpec("workflow-morning-check", "Morning check", [tool("netrune"), "workflow", "morning-check"], "Health, topology refresh, memory realignment, database coherence, filtering, and attention summary.", writes_local=True, domain="workflow"),
             CommandSpec("workflow-refresh-inventory", "Refresh inventory", [tool("netrune"), "workflow", "refresh-inventory"], "Health, AP, topology, and memory refresh.", writes_local=True, domain="workflow"),
             CommandSpec("workflow-backup-online", "Backup online workflow", [tool("netrune"), "workflow", "backup-online", "<target>"], "Changed-only backups for online devices.", writes_local=True, args=["target"], domain="workflow"),
             CommandSpec("workflow-site-health", "Site health", [tool("netrune"), "workflow", "site-health", "<target>"], "Latency and filtering checks for a target/site.", writes_local=True, args=["target"], domain="workflow"),
             CommandSpec("workflow-ap-audit", "AP audit", [tool("netrune"), "workflow", "ap-audit"], "Refresh AP records and show AP moves.", writes_local=True, domain="workflow"),
+            *[CommandSpec(f"check-{check.name}", f'Shortcut "{check.name}"', [tool("netrune"), "check", check.name, *re.findall(r"<[^>]+>", check.args)],
+                          check.tells, writes_local=check.writes, args=[re.sub(r"[<>]", "", arg) for arg in re.findall(r"<[^>]+>", check.args)],
+                          domain="check", output_type="text", run_supported=False)
+              for check in __import__("netops_platform.checks_cli", fromlist=["CHECKS"]).CHECKS],
+            CommandSpec("workflow-schedule", "Schedule weekly workflow", [tool("netrune"), "workflow", "schedule", "weekly"], "Install a persistent systemd user timer for the weekly workflow.", writes_local=True, domain="workflow", run_supported=False, safety_class="local-write"),
+            CommandSpec("workflow-weekly", "Weekly", [tool("netrune"), "workflow", "weekly"], "Every scan, SSH hardware/neighbour/STP reads of every switch, backups, realignment, and attention.", writes_local=True, domain="workflow", run_supported=False),
             CommandSpec("vlan-locate", "Locate VLAN", [tool("netrune"), "vlan", "locate", "<target>", "<vlan>"], "Locate one or many VLANs from one or many roots; optional depth traverses LLDP/CDP-confirmed switch links.", args=["target", "vlan", "depth", "max_nodes", "refresh_neighbors"], domain="vlan", safety_class="network-read"),
             CommandSpec("vlan-propagation", "VLAN propagation", [tool("netrune"), "vlan", "propagation", "<target>", "<vlan>"], "Trace a root-by-VLAN matrix with bounded breadth-first switch traversal.", args=["target", "vlan", "depth", "max_nodes", "refresh_neighbors"], domain="vlan", safety_class="network-read"),
             CommandSpec("commands-list", "Commands list", [tool("netrune"), "commands", "list"], "List the structured command registry and safety metadata.", domain="commands", output_type="table"),
             CommandSpec("commands-show", "Command details", [tool("netrune"), "commands", "show", "<action>"], "Show metadata for one registry action.", args=["action"], domain="commands", output_type="table"),
             CommandSpec("commands-run", "Registry command runner", [tool("netrune"), "commands", "run", "<action>", "--preview"], "Meta-action for previewing a registry command. Ask plans the selected action directly.", args=["action"], domain="commands", run_supported=False),
-            CommandSpec("device-config", "Device config preview", [tool("netrune"), "device", "config", "<target>", "<commands>"], "Preview/confirmed config command wrapper, one device or a batch (comma list, --target, or --file; --commands-file, --skip-offline, --cisco/--aruba/--ruckus). Confirmed execution stays in the CLI.", read_only=False, writes_local=True, args=["target", "commands"], domain="device", risk_level="config", run_supported=False),
+            CommandSpec("device-config", "Device config preview", [tool("netrune"), "device", "config", "<target>", "<commands>"], "Preview/confirmed config command wrapper, one device or a batch (comma list, --target, --file, or --all for every inventory device; --commands-file, --skip-offline, --cisco/--aruba/--ruckus). Confirmed execution stays in the CLI.", read_only=False, writes_local=True, args=["target", "commands"], domain="device", risk_level="config", run_supported=False),
             CommandSpec(
                 "vlan-set", "Guarded VLAN change", [tool("netrune"), "vlan", "set", "<target>", "<interface>", "<vlan_mode>", "<vlan>"],
                 "Back up, apply, and verify one typed access or trunk VLAN change through the audited core -- one device or (--file) a batch of independent target/interface/vlan lines.",
@@ -5882,7 +6434,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         optional = {
             "inventory-scan": {"target"}, "inventory-list": {"target"},
             "health-check": {"target"}, "health-status": {"target"}, "health-offline": {"target"}, "health-timeline": {"target"},
-            "ap-list": {"target"}, "ap-unjoined": {"target"}, "ap-timeline": {"target"},
+            "ap-list": {"target"}, "ap-unjoined": {"target"}, "ap-timeline": {"target"}, "ap-controller": {"target"},
             "topology-show": {"target"}, "topology-timeline": {"target"},
             "memory-timeline": {"target"}, "memory-explain": {"target"},
             "diagnose-latency": {"count"}, "diagnose-speed": {"runs", "profile"}, "diagnose-filtering": {"target"},
@@ -5974,7 +6526,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         target = normalize_target_literal(str(args.get("target") or args.get("query") or "").strip())
         simple: Dict[str, List[str]] = {
             "db-migrate": ["db", "migrate"], "db-status": ["db", "status"], "db-path": ["db", "path"],
-            "db-integrity": ["db", "integrity"], "db-repair": ["db", "repair"], "db-vacuum": ["db", "vacuum"], "db-prune": ["db", "prune"], "db-history": ["db", "history"],
+            "db-coherence": ["db", "coherence"], "db-integrity": ["db", "integrity"], "db-repair": ["db", "repair"], "db-vacuum": ["db", "vacuum"], "db-prune": ["db", "prune"], "db-history": ["db", "history"],
             "health-attention": ["health", "attention"], "ap-moves": ["ap", "moves"],
             "topology-changes": ["topology", "changes"], "memory-export": ["memory", "export", "--json"],
             "ask-patterns": ["ask", "patterns"], "ask-aliases": ["ask", "aliases"],
@@ -6139,10 +6691,11 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             if not target: raise ValueError(f"{action} requires target")
             return [tool("netrune"), "inventory", action.removeprefix("inventory-"), target], True, False
         if action == "health-check": return [tool("netrune"), "health", "check"] + ([target] if target else []), True, True
+        if action == "health-review": return [tool("netrune"), "health", "review", "--list"], True, False
         if action in {"health-status", "health-offline", "health-timeline"}:
             return [tool("netrune"), "health", action.removeprefix("health-")] + ([target] if target else []), True, False
         if action == "ap-scan": return [tool("netrune"), "ap", "scan"], True, True
-        if action in {"ap-list", "ap-unjoined", "ap-timeline"}:
+        if action in {"ap-list", "ap-unjoined", "ap-timeline", "ap-controller"}:
             return [tool("netrune"), "ap", action.removeprefix("ap-")] + ([target] if target else []), True, False
         if action == "ap-on-switch":
             if not target: raise ValueError("ap-on-switch requires target")
@@ -6320,7 +6873,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
                 cmd += ["--max-nodes", str(max_nodes)]
             if str(args.get("refresh_neighbors") or "").lower() in {"1", "true", "yes", "on"}: cmd.append("--refresh-neighbors")
             return cmd, True, False
-        if action in {"excel-inspect", "excel-sync", "excel-export"}:
+        if action in {"excel-inspect", "excel-sync", "excel-export", "excel-report"}:
             workbook = str(args.get("workbook") or "").strip()
             if not workbook: raise ValueError(f"{action} requires workbook")
             verb = action.removeprefix("excel-")
@@ -6370,8 +6923,8 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
 
     def workflow_manifest(self, name: str, target: str = "") -> Dict[str, Any]:
         tool = self.paths.tool
-        def step(step_id: str, label: str, command: List[str], on_failure: str = "continue") -> Dict[str, Any]:
-            return {"id": step_id, "label": label, "command": command, "on_failure": on_failure}
+        def step(step_id: str, label: str, command: List[str], on_failure: str = "continue", needs_vault: bool = False) -> Dict[str, Any]:
+            return {"id": step_id, "label": label, "command": command, "on_failure": on_failure, "needs_vault": needs_vault}
         manifests: Dict[str, Dict[str, Any]] = {
             # Reachability runs before the topology scan so the scan has a fresh
             # status to skip offline devices by, and the review of changes runs
@@ -6381,16 +6934,38 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
                 step("import", "Import legacy caches", [tool("netrune"), "inventory", "import-flat"]),
                 step("health", "Check reachability", [tool("netrune"), "health", "check"]),
                 step("topology-scan", "Refresh LLDP/CDP topology", [tool("netrune"), "topology", "scan"]),
-                step("memory", "Refresh relationships", [tool("netrune"), "memory", "refresh"]),
+                # `db coherence --realign` is `memory refresh` (re-import,
+                # re-apply merges, re-derive) plus the database checks, so it
+                # replaces that step rather than adding a second refresh.
+                step("coherence", "Realign memory and check database coherence", [tool("netrune"), "db", "coherence", "--realign"]),
                 step("topology", "Review topology changes", [tool("netrune"), "topology", "changes"]),
                 step("filtering", "Check Internet filtering", [tool("netrune"), "diagnose", "filtering", "google.com"]),
                 step("attention", "Build attention queue", [tool("netrune"), "health", "attention"]),
+                step("review", "List decisions waiting for you", [tool("netrune"), "health", "review", "--list"]),
             ]},
             "refresh-inventory": {"description": "Refresh health, wireless, topology, and relationship state.", "steps": [
                 step("health", "Check reachability", [tool("netrune"), "health", "check"]),
                 step("aps", "Scan access points", [tool("netrune"), "ap", "scan"]),
                 step("topology", "Scan LLDP/CDP topology", [tool("netrune"), "topology", "scan"]),
                 step("memory", "Refresh relationships", [tool("netrune"), "memory", "refresh"]),
+                step("attention", "Build attention queue", [tool("netrune"), "health", "attention"]),
+            ]},
+            # Everything too slow for the morning: every scan, the SSH reads
+            # of every switch, and the backups. SNMP/ICMP steps run first and
+            # need no credentials; the SSH steps share one vault session the
+            # runner opens before the first of them (see cmd_workflow).
+            "weekly": {"description": "Every long-running scan, the SSH reads of every switch, and backups.", "steps": [
+                step("import", "Import legacy caches", [tool("netrune"), "inventory", "import-flat"]),
+                step("health", "Check reachability", [tool("netrune"), "health", "check"]),
+                step("inventory-scan", "Scan the network for switches", [tool("netrune"), "inventory", "scan"]),
+                step("ap-scan", "Scan access points (controllers and switches)", [tool("netrune"), "ap", "scan"]),
+                step("topology-scan", "Refresh LLDP/CDP topology", [tool("netrune"), "topology", "scan"]),
+                # SSH is the only source of Cisco's Motherboard serial.
+                step("hardware", "Refresh switch hardware over SSH", [tool("netrune"), "device", "inventory", "--all"], needs_vault=True),
+                step("ap-neighbors", "Read AP ports from CDP/LLDP and MAC tables", [tool("netrune"), "ap", "neighbors", "--all"], needs_vault=True),
+                step("stp", "Sweep spanning tree and uplinks", [tool("netrune"), "topology", "stp"], needs_vault=True),
+                step("backup", "Back up changed configurations", [tool("netrune"), "backup", "run", "--all", "--skip-recent"], needs_vault=True),
+                step("coherence", "Realign memory and check database coherence", [tool("netrune"), "db", "coherence", "--realign"]),
                 step("attention", "Build attention queue", [tool("netrune"), "health", "attention"]),
             ]},
             "ap-audit": {"description": "Refresh AP evidence and surface movement or health findings.", "steps": [
@@ -6421,17 +6996,49 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         if self.handle_help("workflow", args, opts): return SUCCESS
         if not args or args[0] in {"list","show"}:
             rows=self.workflows_payload(); self.emit({"ok":True,"workflows":rows},opts,self.render_table(rows,["id","label","description"])); return SUCCESS
-        name=args[0]; target=" ".join(args[1:]).strip()
+        if args[0]=="schedule": return self.workflow_schedule(args[1:],opts)
+        resume = "--resume" in args[1:]
+        name=args[0]; target=" ".join(x for x in args[1:] if x!="--resume").strip()
         try: manifest=self.workflow_manifest(name,target)
         except ValueError as exc: return self.usage_error("workflow",name,opts,str(exc),"netrune workflow morning-check",VALIDATION)
         steps = manifest["steps"]
+        deferred_key = f"workflow_deferred:{name}"
+        if resume:
+            pending = json.loads(self.state.get_marker(deferred_key) or "{}").get("steps") or []
+            if not pending:
+                self.emit({"ok":True,"workflow":name,"resumed":[]},opts,f"Nothing of the {name} workflow is waiting to run.")
+                return SUCCESS
+            steps = [item for item in steps if item["id"] in pending]
         if opts.dry_run:
             rows=[{"step":i+1,"id":item["id"],"label":item["label"],"on_failure":item["on_failure"],"command":shlex.join(item["command"])} for i,item in enumerate(steps)]
             self.emit({"ok":True,"workflow":name,"description":manifest["description"],"dry_run":True,"steps":rows},opts,self.render_table(rows,["step","id","label","on_failure","command"])); return SUCCESS
         started = now()
         results: List[Dict[str, Any]] = []
         stopped = False
+        vault_state = "not needed"
+        vault_scope = None
         for index,item in enumerate(steps,1):
+            if item.get("needs_vault") and vault_state == "not needed":
+                # Off the site network (a laptop at home) every switch is
+                # unreachable; the SSH steps wait for --resume rather than
+                # running against nothing. The reachability step has just run.
+                reachable = [row for row in self.inventory_rows("", GlobalOptions(limit=1_000_000))
+                             if row.get("kind") == "device" and str(row.get("status") or "").upper() == "ONLINE"]
+                if not reachable:
+                    vault_state = "offsite"
+                else:
+                    # One unlock for every SSH step, opened only when one is reached.
+                    vault_scope = self.vault_session_scope(opts, minutes=240, desktop_prompt=True)
+                    opened = vault_scope.__enter__()
+                    vault_state = "open" if opened or self.vault_session_payload().get("active") else "locked"
+            if item.get("needs_vault") and vault_state in {"locked", "offsite"}:
+                reason = ("no switch answered the reachability check (off the site network?)" if vault_state == "offsite"
+                          else "vault locked and nobody answered the unlock")
+                results.append({"step":index,"id":item["id"],"label":item["label"],"status":"DEFERRED","exit_code":None,"duration_ms":0,
+                                "on_failure":item["on_failure"],"summary":f"{reason}; run netrune workflow {name} --resume","result":None})
+                if not opts.json:
+                    print(f"\n[{index}/{len(steps)}] {item['label']} (DEFERRED: {'no switch reachable' if vault_state == 'offsite' else 'vault locked'})")
+                continue
             command = list(item["command"])
             child_command = command + (["--json"] if "--json" not in command else [])
             self.live_log("workflow", f"{index}/{len(steps)} {item['label']}")
@@ -6460,8 +7067,18 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
                 stopped = True
                 self.live_log("workflow", f"stopped after {item['id']} exited {rc}")
                 break
+        if vault_scope is not None:
+            with contextlib.suppress(Exception):
+                vault_scope.__exit__(None, None, None)
+        deferred = [item["id"] for item in results if item["status"] == "DEFERRED"]
+        if any(item.get("needs_vault") for item in manifest["steps"]):
+            if deferred:
+                previous = json.loads(self.state.get_marker(deferred_key) or "{}")
+                self.state.set_marker(deferred_key, json.dumps({"since": previous.get("since") or now(), "steps": deferred}))
+            elif resume or all(item.get("status") != "DEFERRED" for item in results):
+                self.state.set_marker(deferred_key, "")
         failed = [item for item in results if item["status"] == "FAILED"]
-        attention = [item for item in results if item["status"] == "ATTENTION"]
+        attention = [item for item in results if item["status"] in {"ATTENTION", "DEFERRED"}]
         finished = now()
         status = "FAILED" if stopped else "PARTIAL" if failed else "ATTENTION" if attention else "SUCCESS"
         payload = {"ok":not failed,"workflow":name,"description":manifest["description"],"status":status,"steps":results,"completed_steps":len(results),"total_steps":len(steps),"failed_steps":len(failed),"attention_steps":len(attention),"stopped":stopped,"started_at":started,"started_at_iso":fmt_time(started),"finished_at":finished,"finished_at_iso":fmt_time(finished)}
@@ -6470,7 +7087,106 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             headline += f" | needing attention={len(attention)}"
         summary_text = headline + f" | recorded={payload['finished_at_iso']}\n" + self.render_table(results,["step","label","status","exit_code","duration_ms","on_failure","summary"])
         self.emit(payload,opts,summary_text)
+        if name == "morning-check" and not stopped:
+            # The steps ran without a terminal; the decisions they surfaced
+            # are settled here, in the operator's own, while the picture is fresh.
+            from netops_platform.review_cli import interactive, pending_items, session
+            waiting = pending_items(self) if interactive(opts) else []
+            if waiting:
+                try:
+                    go = input(f"\n{len(waiting)} decision(s) are waiting for you. Go through them now? [Y/n] ").strip().lower()
+                except EOFError:
+                    go = "n"
+                if go in {"", "y", "yes"}:
+                    session(self, opts, waiting)
         return SUCCESS if not failed and not attention else PARTIAL
+
+    WEEKLY_DEFAULT_WHEN = "Sun *-*-* 02:00:00"
+
+    def workflow_schedule(self, args: List[str], opts: GlobalOptions) -> int:
+        """`workflow schedule weekly [--when CALENDAR] [--remove]`: a systemd
+        user timer for the weekly workflow.
+
+        A timer rather than cron: Persistent=true runs a missed week as soon
+        as the laptop is back, which cron cannot do. The service may raise the
+        Windows Hello prompt once for the SSH steps; unanswered, those steps
+        are deferred (see cmd_workflow) and the attention queue says so.
+        """
+        usage = "netrune workflow schedule weekly [--when 'Sun *-*-* 02:00:00'] [--remove]"
+        name = args[0] if args else ""
+        if name != "weekly":
+            return self.usage_error("workflow", "schedule", opts, "Only the weekly workflow can be scheduled.", usage, VALIDATION)
+        rest = args[1:]
+        remove = "--remove" in rest
+        when = self.WEEKLY_DEFAULT_WHEN
+        if "--when" in rest:
+            index = rest.index("--when")
+            if index + 1 >= len(rest):
+                return self.usage_error("workflow", "schedule", opts, "--when needs a systemd calendar expression.", usage, VALIDATION)
+            when = rest[index + 1]
+        unit_dir = Path(os.path.expanduser("~/.config/systemd/user"))
+        service, timer = unit_dir / "netrune-weekly.service", unit_dir / "netrune-weekly.timer"
+        netrune = self.paths.tool("netrune")
+        units = {
+            service: f"""[Unit]
+Description=Netrune weekly workflow: scans, SSH reads of every switch, backups
+Documentation=man:netrune(1)
+
+[Service]
+Type=oneshot
+ExecStart={netrune} workflow weekly
+Environment=NETRUNE_PROGRESS=0
+# The SSH steps may raise the Windows Hello prompt once; unanswered, they are
+# deferred to `netrune workflow weekly --resume` instead of failing per switch.
+Environment=NETRUNE_VAULT_DESKTOP_PROMPT=1
+TimeoutStartSec=8h
+Nice=10
+""",
+            timer: f"""[Unit]
+Description=Netrune weekly workflow
+
+[Timer]
+OnCalendar={when}
+# A laptop that was off or asleep at that time runs the missed week as soon as
+# it is back, instead of waiting for the next one.
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target
+""",
+        }
+        if opts.dry_run:
+            text = "\n".join(f"# {path}\n{body}" for path, body in units.items()) if not remove else f"Would disable and remove {timer.name} and {service.name}."
+            self.emit({"ok": True, "dry_run": True, "units": {str(path): body for path, body in units.items()}, "remove": remove}, opts, text)
+            return SUCCESS
+        def systemctl(*command: str) -> Tuple[int, str]:
+            try:
+                done = subprocess.run(["systemctl", "--user", *command], capture_output=True, text=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return 1, str(exc)
+            return done.returncode, (done.stdout + done.stderr).strip()
+        if remove:
+            systemctl("disable", "--now", timer.name)
+            for path in units:
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+            systemctl("daemon-reload")
+            self.emit({"ok": True, "removed": [str(path) for path in units]}, opts, f"Removed {timer.name} and {service.name}.")
+            return SUCCESS
+        rc, checked = systemctl("--no-pager", "list-timers", "--all")
+        if rc != 0:
+            return self.usage_error("workflow", "schedule", opts, f"systemctl --user is not available here: {checked[:200]}", usage, VALIDATION)
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        for path, body in units.items():
+            path.write_text(body, encoding="utf-8")
+        steps = [systemctl("daemon-reload"), systemctl("enable", "--now", timer.name)]
+        if any(rc for rc, _ in steps):
+            return self.usage_error("workflow", "schedule", opts, "systemctl failed: " + "; ".join(out for rc, out in steps if rc), usage, INTERNAL)
+        _, next_run = systemctl("--no-pager", "list-timers", timer.name)
+        self.emit({"ok": True, "service": str(service), "timer": str(timer), "when": when, "next": next_run}, opts,
+                  f"Scheduled the weekly workflow ({when}); a missed run happens when the machine is back.\n{next_run}")
+        return SUCCESS
 
     def cmd_backup(self,args:List[str],opts:GlobalOptions)->int:
         if self.handle_help("backup", args, opts): return SUCCESS
@@ -7028,7 +7744,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
 
 
 
-    def workflows_payload(self)->List[Dict[str,Any]]: return [{"id":"morning-check","action":"workflow-morning-check","label":"Morning check","description":"Health, memory, topology, filtering, and attention summary."},{"id":"refresh-inventory","action":"workflow-refresh-inventory","label":"Refresh inventory","description":"Fast health, AP discovery, topology, and memory refresh."},{"id":"backup-online","action":"workflow-backup-online","label":"Backup online","description":"Changed-only backups for online devices."},{"id":"ap-audit","action":"workflow-ap-audit","label":"AP audit","description":"Refresh AP records and surface AP moves."}]
+    def workflows_payload(self)->List[Dict[str,Any]]: return [{"id":"morning-check","action":"workflow-morning-check","label":"Morning check","description":"Health, topology, memory realignment, database coherence, filtering, and attention summary."},{"id":"refresh-inventory","action":"workflow-refresh-inventory","label":"Refresh inventory","description":"Fast health, AP discovery, topology, and memory refresh."},{"id":"backup-online","action":"workflow-backup-online","label":"Backup online","description":"Changed-only backups for online devices."},{"id":"ap-audit","action":"workflow-ap-audit","label":"AP audit","description":"Refresh AP records and surface AP moves."},{"id":"weekly","action":"workflow-weekly","label":"Weekly","description":"Every scan, SSH hardware/neighbour/STP reads of every switch, and backups."}]
     def diagnostics_payload(self,limit:int=80)->Dict[str,Any]:
         probes=timestamp_rows(self.state.rows("SELECT id,target,mode,created_at,packet_loss_pct,min_ms,avg_ms,max_ms,jitter_ms FROM probe_results ORDER BY created_at DESC,id DESC LIMIT ?",(limit,)))
         speeds=timestamp_rows(self.state.rows("SELECT id,created_at,interface,download_mbps,upload_mbps,idle_latency_ms,loaded_down_ms,loaded_up_ms,packet_loss_pct,reliability FROM speed_tests ORDER BY created_at DESC,id DESC LIMIT ?",(limit,)))

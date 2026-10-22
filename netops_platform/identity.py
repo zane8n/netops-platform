@@ -8,7 +8,9 @@ import functools
 import ipaddress
 import os
 import re
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from netops_platform.devices import device_manufacturer
 
 
 def _environment(primary: str, legacy: str, default: Any = "") -> Any:
@@ -148,6 +150,14 @@ def _asset_location_prefix(value: Any) -> str:
     return normalize_location_label(text[:match.start()])
 
 
+def name_key(value: Any) -> str:
+    """The one key every module matches device names by (ADR 0008): the host
+    label without its DNS domain, upper-cased, letters and digits only, so
+    `sw-01.site.example.com`, `SW_01`, and `SW01` meet. Fuzzy identity scoring
+    uses `normalize_asset_name` instead, which also strips configured prefixes."""
+    return re.sub(r"[^A-Z0-9]", "", _host_label(value).upper())
+
+
 def _host_label(value: Any) -> str:
     """Drop a DNS domain suffix so names are compared on the host label alone.
 
@@ -215,6 +225,8 @@ def identity_match_evidence(
         conflicts.append("serial")
     if role_number_conflict:
         conflicts.append("asset-number")
+    if kind == "switch" and not (left_mac and left_mac == right_mac) and concurrently_distinct(left, right):
+        conflicts.append("concurrent-addresses")
 
     signals: Dict[str, Any] = {
         "name_similarity": similarity,
@@ -262,8 +274,13 @@ def continuity_match_evidence(
     entity_type: str,
     *,
     window_days: int = 14,
+    port_swap: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Score whether `new` plausibly continues `old`'s identity after a swap.
+
+    `port_swap` is the neighbour-port evidence for this exact pair (see
+    neighbor_port_transitions): structural on its own, and with the rest of
+    the neighbouring switch unchanged the strongest signal there is.
 
     This is deliberately not `identity_match_evidence`: there, a MAC/serial
     difference blocks a match outright, because that function answers "is
@@ -298,10 +315,16 @@ def continuity_match_evidence(
         "same_location_and_role_number": same_location_and_role,
         "same_role_number_only": same_role_number_only,
         "same_model": same_model,
+        "same_neighbor_port_transition": bool(port_swap),
     }
-    structural = same_attachment_transition or same_location_and_role or same_role_number_only
+    if port_swap:
+        signals["neighbor_port"] = f"{port_swap.get('local_ip')} {port_swap.get('local_port')}"
+        signals["neighbor_port_confidence"] = int(port_swap.get("confidence") or 0)
+        signals["neighbor_other_link_changes"] = int(port_swap.get("other_link_changes") or 0)
+    structural = same_attachment_transition or same_location_and_role or same_role_number_only or bool(port_swap)
     score = 0
     if structural:
+        score += round(int(port_swap.get("confidence") or 0) * 0.7) if port_swap else 0
         score += 45 if same_attachment_transition else 0
         score += 35 if same_location_and_role else 0
         score += 15 if same_role_number_only else 0
@@ -323,18 +346,115 @@ def continuity_match_evidence(
     }
 
 
+PORT_TRANSITION_SCAN_SECONDS = 600
+PORT_TRANSITION_GAP_DAYS = 3
+
+
+def neighbor_port_transitions(events: Sequence[Mapping[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """What the neighbour tables say happened to devices, from topology link events.
+
+    swaps: on one local switch port, the link to A went and a link to B came
+    (one scan, or B within PORT_TRANSITION_GAP_DAYS with nothing in between):
+    B now stands where A stood -- a replacement, or A renamed B. Confidence
+    rests on how still the rest of that switch was: no other link changing
+    on it in that scan is the strongest case there is.
+
+    moves: one neighbour name left one port and appeared on another.
+
+    `events` are topology_events rows (created_at, event_type link_added /
+    link_removed, local_ip, local_port, remote_name, remote_ip), any order.
+    """
+    def key(name: Any) -> str:
+        text = str(name or "").strip()
+        # Not a device that can stand in a switch or AP position: a host with
+        # no LLDP name (reported by its address), or an IP phone.
+        if _valid_ip(text) or re.fullmatch(r"SEP[0-9A-F]{12}", text, re.I):
+            return ""
+        return normalize_asset_name(_host_label(name))
+
+    ordered = sorted((dict(event) for event in events), key=lambda event: (int(event.get("created_at") or 0), event.get("event_type") != "link_removed"))
+    churn: Dict[Tuple[str, int], int] = {}
+    port_adds: Dict[Tuple[str, str, int], int] = {}
+    for event in ordered:
+        bucket = (str(event.get("local_ip") or ""), int(event.get("created_at") or 0) // PORT_TRANSITION_SCAN_SECONDS)
+        churn[bucket] = churn.get(bucket, 0) + 1
+        if event.get("event_type") == "link_added":
+            port = (bucket[0], str(event.get("local_port") or ""), bucket[1])
+            port_adds[port] = port_adds.get(port, 0) + 1
+    # A port that sees several neighbours at once (a shared uplink, a hub, a
+    # media converter) is not one position; a change there says nothing about
+    # who replaced whom.
+    present: Dict[Tuple[str, str], set] = {}
+    removed: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    gone: Dict[str, Dict[str, Any]] = {}
+    swaps: List[Dict[str, Any]] = []
+    moves: List[Dict[str, Any]] = []
+    for event in ordered:
+        local = (str(event.get("local_ip") or ""), str(event.get("local_port") or ""))
+        name = key(event.get("remote_name"))
+        if not local[0] or not local[1] or not name:
+            continue
+        when = int(event.get("created_at") or 0)
+        if event.get("event_type") == "link_removed":
+            present.setdefault(local, set()).discard(name)
+            removed[local] = event
+            gone[name] = event
+            continue
+        if event.get("event_type") != "link_added":
+            continue
+        before = removed.pop(local, None)
+        alone = not present.get(local) and port_adds.get((local[0], local[1], when // PORT_TRANSITION_SCAN_SECONDS), 0) == 1
+        present.setdefault(local, set()).add(name)
+        if before and alone and key(before.get("remote_name")) != name:
+            gap = when - int(before.get("created_at") or 0)
+            if gap <= PORT_TRANSITION_GAP_DAYS * 86400:
+                bucket = (local[0], when // PORT_TRANSITION_SCAN_SECONDS)
+                others = churn.get(bucket, 0) - (2 if gap < PORT_TRANSITION_SCAN_SECONDS else 1)
+                confidence = (90 if others <= 0 else 75 if others <= 2 else 55) - (15 if gap >= PORT_TRANSITION_SCAN_SECONDS else 0)
+                swaps.append({
+                    "old_name": _host_label(before.get("remote_name")), "new_name": _host_label(event.get("remote_name")),
+                    "old_key": key(before.get("remote_name")), "new_key": name,
+                    "old_ip": str(before.get("remote_ip") or ""), "new_ip": str(event.get("remote_ip") or ""),
+                    "local_ip": local[0], "local_port": local[1], "when": when, "gap_seconds": gap,
+                    "other_link_changes": max(0, others), "confidence": confidence,
+                })
+        earlier = gone.pop(name, None)
+        if earlier and (str(earlier.get("local_ip") or ""), str(earlier.get("local_port") or "")) != local \
+                and when - int(earlier.get("created_at") or 0) <= PORT_TRANSITION_GAP_DAYS * 86400:
+            moves.append({
+                "name": _host_label(event.get("remote_name")), "key": name, "when": when,
+                "from": f"{earlier.get('local_ip')} {earlier.get('local_port')}", "to": f"{local[0]} {local[1]}",
+            })
+    # A port that goes A -> B and later B -> A sees two devices in turn (a
+    # flapping link, a redundant path), not a replacement: drop both.
+    flapping = {
+        index for index, swap in enumerate(swaps) for later in swaps[index + 1:]
+        if (later["local_ip"], later["local_port"], later["old_key"], later["new_key"])
+        == (swap["local_ip"], swap["local_port"], swap["new_key"], swap["old_key"])
+    }
+    flapping |= {
+        index for index, swap in enumerate(swaps) for earlier in swaps[:index]
+        if (earlier["local_ip"], earlier["local_port"], earlier["old_key"], earlier["new_key"])
+        == (swap["local_ip"], swap["local_port"], swap["new_key"], swap["old_key"])
+    }
+    return {"swaps": [swap for index, swap in enumerate(swaps) if index not in flapping], "moves": moves}
+
+
 def identity_continuity_candidates(
     old_pool: Sequence[Dict[str, Any]],
     new_pool: Sequence[Dict[str, Any]],
     entity_type: str,
     *,
     window_days: int = 14,
+    port_swaps: Sequence[Mapping[str, Any]] = (),
 ) -> List[Dict[str, Any]]:
     """Pair disappeared identities against newly-appeared ones.
 
     Bucketed by shared attachment / location+role / role-only keys first
     (mirroring `reconcile_ap_rows`'s own strategy) so this stays proportional
     to what actually shares a signal rather than comparing every pair.
+    `port_swaps` (neighbor_port_transitions' swaps) pair an old and a new
+    name directly: a neighbour port that saw the old device now sees the new.
     """
     if not old_pool or not new_pool:
         return []
@@ -365,10 +485,28 @@ def identity_continuity_candidates(
             for new_index in new_buckets.get(key, []):
                 for old_index in old_indexes:
                     pairs.add((old_index, new_index))
+    by_pair: Dict[Tuple[str, str], Mapping[str, Any]] = {}
+    for swap in port_swaps:
+        pair_key = (swap["old_key"], swap["new_key"])
+        if pair_key not in by_pair or swap["confidence"] > by_pair[pair_key]["confidence"]:
+            by_pair[pair_key] = swap
+    if by_pair:
+        def names(rows: Sequence[Dict[str, Any]]) -> Dict[str, List[int]]:
+            found: Dict[str, List[int]] = {}
+            for index, row in enumerate(rows):
+                found.setdefault(normalize_asset_name(_host_label(row.get("name"))), []).append(index)
+            return found
+        old_names, new_names = names(old_pool), names(new_pool)
+        for old_key, new_key in by_pair:
+            for old_index in old_names.get(old_key, []):
+                for new_index in new_names.get(new_key, []):
+                    pairs.add((old_index, new_index))
 
     results: List[Dict[str, Any]] = []
     for old_index, new_index in sorted(pairs):
-        assessment = continuity_match_evidence(old_pool[old_index], new_pool[new_index], kind, window_days=window_days)
+        old_row, new_row = old_pool[old_index], new_pool[new_index]
+        swap = by_pair.get((normalize_asset_name(_host_label(old_row.get("name"))), normalize_asset_name(_host_label(new_row.get("name")))))
+        assessment = continuity_match_evidence(old_row, new_row, kind, window_days=window_days, port_swap=swap)
         if not assessment["candidate"]:
             continue
         results.append({
@@ -433,6 +571,29 @@ def _valid_ip_text(value: str) -> bool:
 
 def _valid_ip(value: Any) -> bool:
     return _valid_ip_text(str(value or ""))
+
+
+CONCURRENT_SECONDS = 900
+
+
+def concurrently_distinct(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    """Two switch records that cannot be one box: different management IPs,
+    both online, both seen in the same scan. Whatever their names share is
+    coincidence, not identity. Fuzzy name matching once fused four C2960S
+    switches named `...-SW01`, none with a MAC or serial yet, into one record
+    for a week (similar names, same role/number, same model), and a real
+    replacement's serial then spread to all four."""
+    left_ip = str(left.get("ip") or "").strip() if _valid_ip(left.get("ip")) else ""
+    right_ip = str(right.get("ip") or "").strip() if _valid_ip(right.get("ip")) else ""
+    if not (left_ip and right_ip and left_ip != right_ip):
+        return False
+    if any(str(row.get("status") or "").upper() != "ONLINE" for row in (left, right)):
+        return False
+    try:
+        seen = int(left.get("last_seen") or 0), int(right.get("last_seen") or 0)
+    except (TypeError, ValueError):
+        return False
+    return all(seen) and abs(seen[0] - seen[1]) <= CONCURRENT_SECONDS
 
 
 def _anchor_pairs(indexes: Sequence[int]) -> set[Tuple[int, int]]:
@@ -649,6 +810,7 @@ def reconcile_ap_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "addresses": addresses,
                 "macs": macs,
                 "identity_signature": signatures[0] if signatures else "",
+                "manufacturer": device_manufacturer(platform=row.get("platform"), model=row.get("model")),
             }
         )
         reconciled.append(row)
@@ -713,10 +875,12 @@ def reconcile_device_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]
             if value:
                 buckets.setdefault((kind, value), []).append(index)
     candidate_pairs: set[Tuple[int, int]] = set()
-    for indexes in buckets.values():
+    for (kind, _), indexes in buckets.items():
         candidate_pairs.update(_anchor_pairs(indexes))
         first = indexes[0]
         for right in indexes[1:]:
+            if kind == "name" and concurrently_distinct(source[first], source[right]):
+                continue
             union(first, right)
 
     fuzzy_buckets: Dict[Tuple[str, str, str], List[int]] = {}
@@ -796,6 +960,7 @@ def reconcile_device_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]
             "addresses": addresses,
             "macs": macs,
             "serials": serials,
+            "manufacturer": device_manufacturer(platform=row.get("platform"), model=row.get("model")),
         })
         reconciled.append(row)
     reconciled.sort(key=lambda row: (0 if str(row.get("status") or "").upper() == "OFFLINE" else 1, str(row.get("hostname") or row.get("ip") or "").lower()))

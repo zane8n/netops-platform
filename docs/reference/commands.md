@@ -10,10 +10,12 @@ Every entry below comes from the registry used by the CLI, previews, and workflo
 
 | Command ID | Invocation | Safety | Output | Purpose |
 |---|---|---|---|---|
+| `ap-controller` | `netrune ap controller '<target>'` | `read-only` | `table` | Show what the wireless controllers last reported per AP: model, serial, firmware, connection status, uptime, and poll time. |
 | `ap-list` | `netrune ap list '<target>'` | `read-only` | `table` | Search current reconciled AP inventory. |
 | `ap-merge` | `netrune ap merge '<source>' '<target>' --reason '<reason>' --dry-run` | `read-only` | `log` | Preview retiring an old AP into a current AP while preserving chronological evidence. Apply explicitly in the CLI with --confirm. |
 | `ap-merges` | `netrune ap merges` | `read-only` | `table` | List active manual AP merges and their chronology. |
 | `ap-moves` | `netrune ap moves` | `read-only` | `table` | Show recorded AP attachment changes newest first. |
+| `ap-neighbors` | `netrune ap neighbors --all` | `network-read/local-write` | `log` | Read switches' CDP/LLDP neighbour tables over SSH and record which port each AP is on. |
 | `ap-on-switch` | `netrune ap on-switch '<target>'` | `read-only` | `table` | Show canonical APs attached to a switch or site. |
 | `ap-scan` | `netrune ap scan` | `network-read/local-write` | `log` | Refresh AP inventory. |
 | `ap-timeline` | `netrune ap timeline '<target>'` | `read-only` | `table` | Show AP attachment history newest first. |
@@ -40,6 +42,59 @@ Every entry below comes from the registry used by the CLI, previews, and workflo
 | `backup-run` | `netrune backup run '<target>'` | `network-read/local-write` | `log` | Online-only changed-only config backup. |
 | `backup-verify` | `netrune backup verify` | `read-only` | `table` | Review recorded backup checksums, paths, and statuses. |
 
+## check
+
+| Command ID | Invocation | Safety | Output | Purpose |
+|---|---|---|---|---|
+| `check-alive` | `netrune check alive '<device[,...]>'` | `read-only` | `text` | Ping just these devices now and say which answer. |
+| `check-ap-history` | `netrune check ap-history '<ap>'` | `read-only` | `text` | Where one AP has been attached over time. |
+| `check-ap-moves` | `netrune check ap-moves` | `read-only` | `text` | APs that changed switch or port, newest first. |
+| `check-ap-ports` | `netrune check ap-ports '<switch[,...]>'` | `network-read/local-write` | `text` | Live: read CDP/LLDP and the MAC table to confirm which port each AP is on. |
+| `check-ap-refresh` | `netrune check ap-refresh` | `network-read/local-write` | `text` | Re-read APs from the controllers and switches. |
+| `check-ap-unjoined` | `netrune check ap-unjoined` | `read-only` | `text` | APs the controller lists as not joined. |
+| `check-aps-on` | `netrune check aps-on '<switch>'` | `read-only` | `text` | Which APs hang off a switch, and on which ports. |
+| `check-attention` | `netrune check attention` | `read-only` | `text` | Everything that wants a look: outages, flapping, link changes, AP moves, failed backups, merge candidates. |
+| `check-backup-all` | `netrune check backup-all` | `network-read/local-write` | `text` | Back up every online device whose config changed. |
+| `check-backups` | `netrune check backups '<device>'` | `read-only` | `text` | Backup history for a device. |
+| `check-cable` | `netrune check cable '<switch>' '<port>'` | `read-only` | `text` | The last recorded cable (TDR) result for a port; starts no test. |
+| `check-config-diff` | `netrune check config-diff '<device>'` | `read-only` | `text` | What changed between a device's last two different configs. |
+| `check-db` | `netrune check db` | `read-only` | `text` | Quick database health: storage, references, labels, identities, merges, caches, stuck jobs. |
+| `check-db-deep` | `netrune check db-deep` | `read-only` | `text` | Full SQLite integrity check (slower). |
+| `check-db-fix` | `netrune check db-fix` | `network-read/local-write` | `text` | The same, and fix what has one right answer (re-apply merges, relabel, drop switches filed as APs). |
+| `check-db-size` | `netrune check db-size` | `read-only` | `text` | Where the database is, its size, schema, and record counts. |
+| `check-device` | `netrune check device '<name\|ip>'` | `read-only` | `text` | Everything Netrune knows about one device: identity, history, relationships. |
+| `check-doctor` | `netrune check doctor` | `read-only` | `text` | Is this machine set up right: tools, routes, trust, core settings. |
+| `check-down` | `netrune check down` | `read-only` | `text` | What is down right now, from the last pulse. |
+| `check-find` | `netrune check find` | `read-only` | `text` | Find a switch or AP by any part of its name, IP, MAC, serial, or model. |
+| `check-find-ip` | `netrune check find-ip '<ip\|mac>'` | `read-only` | `text` | Ask the core switch's ARP/MAC tables who an IP or MAC is. |
+| `check-find-mac` | `netrune check find-mac '<mac>'` | `read-only` | `text` | Live: which switch port a MAC is on now (access port, not the uplinks it crosses). |
+| `check-hardware` | `netrune check hardware '<device>'` | `network-read/local-write` | `text` | Live: re-read model, Motherboard serial, and base MAC over SSH. |
+| `check-internet` | `netrune check internet` | `read-only` | `text` | Is the Internet reachable and unfiltered: DNS, TLS, and filtering checks. |
+| `check-ip-history` | `netrune check ip-history '<ip>'` | `read-only` | `text` | Who has held an IP over time. |
+| `check-latency` | `netrune check latency '<target>'` | `read-only` | `text` | Round-trip time, jitter, and loss to a target. |
+| `check-link-changes` | `netrune check link-changes` | `read-only` | `text` | Links that appeared or disappeared, newest first. |
+| `check-links` | `netrune check links` | `read-only` | `text` | Quick: switch-to-switch links Netrune knows, with how sure it is of each. |
+| `check-mac-history` | `netrune check mac-history '<mac>'` | `read-only` | `text` | Every port and identity a MAC has had, newest first. |
+| `check-merges` | `netrune check merges` | `read-only` | `text` | Manual device merges in force. |
+| `check-morning` | `netrune check morning` | `network-read/local-write` | `text` | The daily routine: reachability, topology, realign memory, database health, filtering, the attention queue. |
+| `check-neighbours` | `netrune check neighbours` | `read-only` | `text` | What one switch sees on each port (LLDP/CDP). |
+| `check-path` | `netrune check path '<endpoint>' '<vlan>'` | `read-only` | `text` | The L2/L3 path to an endpoint on a VLAN, hop by hop, with findings. |
+| `check-port-health` | `netrune check port-health '<switch>' '<port>'` | `read-only` | `text` | Live: speed/duplex negotiation and error-counter growth on one port. |
+| `check-port-history` | `netrune check port-history '<switch>' '<port>'` | `read-only` | `text` | What has been plugged into one switch port over time. |
+| `check-pulse` | `netrune check pulse` | `network-read/local-write` | `text` | Ping every known switch and AP (or one target) and record who is up or down now. |
+| `check-same` | `netrune check same '<device>' '<device>'` | `read-only` | `text` | Are these two records the same switch? Evidence and conflicts. |
+| `check-speed` | `netrune check speed` | `read-only` | `text` | This machine's Internet speed. |
+| `check-status` | `netrune check status` | `read-only` | `text` | Up/down state, flaps, and outage start for everything. |
+| `check-support` | `netrune check support '<device>'` | `read-only` | `text` | Manufacturer, model, driver, and what Netrune can safely do on it. |
+| `check-topology-refresh` | `netrune check topology-refresh` | `network-read/local-write` | `text` | Re-read LLDP/CDP neighbours from every switch. |
+| `check-uplinks` | `netrune check uplinks '<switch>'` | `read-only` | `text` | Live spanning tree on a switch: root, blocked ports, which ports are uplinks. |
+| `check-uptime` | `netrune check uptime` | `read-only` | `text` | Up/down changes, newest first: when things went down and came back. |
+| `check-vault` | `netrune check vault` | `read-only` | `text` | Is the SSH vault locked or open, and until when. |
+| `check-vlan-trace` | `netrune check vlan-trace '<switch>' '<vlan>'` | `read-only` | `text` | Live: follow a VLAN switch by switch from a root and show where it stops. |
+| `check-vlan-where` | `netrune check vlan-where '<switch>' '<vlan>'` | `read-only` | `text` | Live: where a VLAN exists, starting from a switch. |
+| `check-weekly` | `netrune check weekly` | `network-read/local-write` | `text` | Every long scan, SSH reads of every switch (hardware, AP ports, spanning tree), backups. |
+| `check-weekly-resume` | `netrune check weekly-resume` | `network-read/local-write` | `text` | Run only the weekly SSH steps that waited for the vault. |
+
 ## commands
 
 | Command ID | Invocation | Safety | Output | Purpose |
@@ -63,6 +118,7 @@ Every entry below comes from the registry used by the CLI, previews, and workflo
 
 | Command ID | Invocation | Safety | Output | Purpose |
 |---|---|---|---|---|
+| `db-coherence` | `netrune db coherence` | `read-only` | `table` | Fast storage health and cross-table coherence checks; --realign also refreshes memory and fixes model-contradicted platform labels. |
 | `db-history` | `netrune db history` | `read-only` | `table` | Show recorded command executions with exit codes. |
 | `db-integrity` | `netrune db integrity` | `read-only` | `table` | Run SQLite integrity checks without modifying state. |
 | `db-migrate` | `netrune db migrate` | `local-write` | `log` | Apply SQLite schema migrations and reconcile derived state. |
@@ -76,7 +132,7 @@ Every entry below comes from the registry used by the CLI, previews, and workflo
 
 | Command ID | Invocation | Safety | Output | Purpose |
 |---|---|---|---|---|
-| `device-config` | `netrune device config '<target>' '<commands>'` | `config-write` | `log` | Preview/confirmed config command wrapper, one device or a batch (comma list, --target, or --file; --commands-file, --skip-offline, --cisco/--aruba/--ruckus). Confirmed execution stays in the CLI. |
+| `device-config` | `netrune device config '<target>' '<commands>'` | `config-write` | `log` | Preview/confirmed config command wrapper, one device or a batch (comma list, --target, --file, or --all for every inventory device; --commands-file, --skip-offline, --cisco/--aruba/--ruckus). Confirmed execution stays in the CLI. |
 | `device-identity` | `netrune device identity '<target>' '<target2>'` | `read-only` | `table` | Explain confidence and conflicts between two switch identity records. |
 | `device-inventory` | `netrune device inventory '<target>'` | `network-read` | `log` | Run the device inventory helper for one target. |
 | `device-show` | `netrune device show '<target>' '<command>'` | `network-read` | `log` | Run a policy-checked read-only show command. |
@@ -108,6 +164,7 @@ Every entry below comes from the registry used by the CLI, previews, and workflo
 |---|---|---|---|---|
 | `excel-export` | `netrune excel export '<workbook>'` | `local-write` | `text` | Write a new inventory, summary, and migration tracker workbook from Netrune's inventory. |
 | `excel-inspect` | `netrune excel inspect '<workbook>'` | `read-only` | `table` | Match a workbook's rows to Netrune switches and report what is out of date, without writing. |
+| `excel-report` | `netrune excel report '<workbook>'` | `local-write` | `text` | Write active AP/switch, transition, and switch/AP history reports from Netrune's memory into one workbook. |
 | `excel-sync` | `netrune excel sync '<workbook>' --dry-run` | `local-write` | `table` | Fill and update a workbook's switch rows from Netrune's inventory. Apply explicitly in the CLI with --confirm. |
 
 ## health
@@ -117,6 +174,7 @@ Every entry below comes from the registry used by the CLI, previews, and workflo
 | `health-attention` | `netrune health attention` | `read-only` | `table` | Show health, topology, AP movement, and backup items needing review. |
 | `health-check` | `netrune health check '<target>'` | `network-read/local-write` | `log` | Ping known/supplied devices and APs, then refresh health state. |
 | `health-offline` | `netrune health offline '<target>'` | `read-only` | `table` | List current offline entities, optionally filtered by target. |
+| `health-review` | `netrune health review` | `config-write` | `terminal` | Go through every decision waiting for you (replaced switches/APs, rename clusters, workbook questions), one yes/no or pick at a time. |
 | `health-status` | `netrune health status '<target>'` | `read-only` | `table` | Read current canonical health, optionally filtered by target. |
 | `health-timeline` | `netrune health timeline '<target>'` | `read-only` | `table` | Read health state changes newest first. |
 
@@ -207,8 +265,11 @@ Every entry below comes from the registry used by the CLI, previews, and workflo
 | Command ID | Invocation | Safety | Output | Purpose |
 |---|---|---|---|---|
 | `profile-create` | `netrune profile create '<name>'` | `local-write` | `log` | Create a neutral isolated profile. |
+| `profile-export` | `netrune profile export '<bundle>'` | `config-write` | `terminal` | Write the active profile (configuration, caches; optionally memory and encrypted SNMP communities) to one file for another machine. |
+| `profile-import` | `netrune profile import '<bundle>'` | `config-write` | `terminal` | Restore a profile bundle from another machine and make it the active profile. |
 | `profile-list` | `netrune profile list` | `read-only` | `table` | List isolated Netrune profiles. |
 | `profile-migrate-legacy` | `netrune profile migrate-legacy '<name>'` | `local-write` | `log` | Copy legacy netsnmp state without deleting the source. |
+| `profile-pack` | `netrune profile pack --confirm` | `config-write` | `terminal` | Write configuration, caches, memory, and SNMP communities to one passphrase-encrypted file; preview without --confirm. |
 | `profile-paths` | `netrune profile paths` | `read-only` | `table` | Show active profile XDG paths. |
 | `profile-show` | `netrune profile show '<name>'` | `read-only` | `table` | Show profile paths and non-secret settings. |
 | `profile-use` | `netrune profile use '<name>'` | `local-write` | `log` | Select the profile used by future commands. |
@@ -301,6 +362,8 @@ Every entry below comes from the registry used by the CLI, previews, and workflo
 |---|---|---|---|---|
 | `workflow-ap-audit` | `netrune workflow ap-audit` | `network-read/local-write` | `log` | Refresh AP records and show AP moves. |
 | `workflow-backup-online` | `netrune workflow backup-online '<target>'` | `network-read/local-write` | `log` | Changed-only backups for online devices. |
-| `workflow-morning-check` | `netrune workflow morning-check` | `network-read/local-write` | `log` | Health, topology refresh, memory, filtering, and attention summary. |
+| `workflow-morning-check` | `netrune workflow morning-check` | `network-read/local-write` | `log` | Health, topology refresh, memory realignment, database coherence, filtering, and attention summary. |
 | `workflow-refresh-inventory` | `netrune workflow refresh-inventory` | `network-read/local-write` | `log` | Health, AP, topology, and memory refresh. |
+| `workflow-schedule` | `netrune workflow schedule weekly` | `local-write` | `log` | Install a persistent systemd user timer for the weekly workflow. |
 | `workflow-site-health` | `netrune workflow site-health '<target>'` | `network-read/local-write` | `log` | Latency and filtering checks for a target/site. |
+| `workflow-weekly` | `netrune workflow weekly` | `network-read/local-write` | `log` | Every scan, SSH hardware/neighbour/STP reads of every switch, backups, realignment, and attention. |

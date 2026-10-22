@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
+from netops_platform.devices import family_manufacturer
 from netops_platform.identity import identity_match_evidence
 from netops_platform.network import clean_network_output
 from netops_platform.profiles import environment_value
@@ -190,7 +191,7 @@ class DeviceCommandsMixin:
 
     def cmd_device(self,args:List[str],opts:GlobalOptions)->int:
         from netops_platform.core import (
-            CONFIRM_REQUIRED, PARTIAL, SUCCESS, UNSUPPORTED, VALIDATION,
+            CONFIRM_REQUIRED, PARTIAL, SUCCESS, UNSUPPORTED, VALIDATION, GlobalOptions,
             clean_display_name, eprint, expand_abbreviated_target, is_ipv4_literal, now,
         )
         if self.handle_help("device", args, opts): return SUCCESS
@@ -209,7 +210,9 @@ class DeviceCommandsMixin:
             detection = self.detect_device_family(platform=device.get("platform"), model=device.get("model"), hostname=device.get("hostname"))
             driver = self.driver_for(family=detection.family)
             capability_rows = [{"capability": key, "support": value} for key, value in sorted(driver.capabilities.items())]
-            text = f"Device support: {device.get('hostname') or device.get('ip')}\nFamily: {driver.family} | OS: {driver.os_name} | Level: {driver.support_level}\n" + self.render_table(capability_rows, ["capability", "support"])
+            maker = device.get("manufacturer") or "Unknown"
+            text = (f"Device support: {device.get('hostname') or device.get('ip')}\nManufacturer: {maker} | Model: {device.get('model') or 'N/A'}\n"
+                    f"Family: {driver.family} | OS: {driver.os_name} | Level: {driver.support_level}\n") + self.render_table(capability_rows, ["capability", "support"])
             payload = {"ok": detection.family != "unknown", "device": device, "detection": detection.as_dict(), "driver": driver.report(), "observed_at": now()}
             if "firmware-gated" in driver.capabilities.values():
                 certified, certified_via = self.firmware_write_certified(
@@ -296,7 +299,7 @@ class DeviceCommandsMixin:
             resolved_target = str(device.get("ip") or target) if device and len(choices) == 1 else target
             return self.run_subprocess(self.legacy_cmd("netrune-control","show",resolved_target,command),opts)
         if verb=="config":
-            usage = "netrune device config <target[,target...]> <command> [<command> ...] [--cisco] [--aruba] [--ruckus] (--dry-run | --confirm)"
+            usage = "netrune device config <target[,target...]>|--file F|--target T|--all <command> [<command> ...] [--cisco] [--aruba] [--ruckus] (--dry-run | --confirm)"
             file_path=""; commands_file=""; positional=[]; target_specs=[]; danger_skip_verification=False; skip_unverified=False; skip_offline=False; vendors=set()
             i=0
             while i<len(rest):
@@ -314,6 +317,15 @@ class DeviceCommandsMixin:
                     return self.usage_error("device","config",opts,f"Unknown device config option (or missing value): {rest[i]}",usage)
                 else: positional.append(rest[i]); i+=1
 
+            # --all is a global flag (opts.all), so it never reaches `rest`.
+            # Without it, a run that names no device has nothing to go on:
+            # its first command would be read as a target. With it, every
+            # inventory device is in scope and --cisco/--aruba/--ruckus (or
+            # --site/--status) narrow that down.
+            run_all = bool(opts.all)
+            if run_all and (file_path or target_specs):
+                return self.usage_error("device","config",opts,"--all already means every inventory device; drop --file/--target, or drop --all.",usage,VALIDATION)
+            all_hint = "To run on every inventory device instead, add --all (narrow it with --cisco/--aruba/--ruckus)."
             target_list: List[str] = []
             if file_path:
                 p = Path(file_path).expanduser()
@@ -323,14 +335,23 @@ class DeviceCommandsMixin:
                 if not file_targets:
                     return self.usage_error("device","config",opts,f"Device list file is empty: {p}",usage,VALIDATION)
                 target_list.extend(file_targets)
-            if file_path or target_specs:
-                # Targets came from --file/--target, so every positional is a command.
+            if file_path or target_specs or run_all:
+                # Targets came from --file/--target/--all, so every positional is a command.
                 command_tokens = positional
             else:
-                if not positional:
-                    return self.usage_error("device","config",opts,"Missing target or config command(s).",usage)
+                if not positional or (len(positional) < 2 and not commands_file):
+                    return self.usage_error("device","config",opts,"Missing target or config command(s). " + all_hint,usage)
                 target_specs = [positional[0]]
                 command_tokens = positional[1:]
+                first = positional[0].split(",")[0].strip()
+                device, choices = self.resolve_device_record(first)
+                if not device and not choices:
+                    return self.usage_error("device","config",opts,f"No inventory device matches {first!r}. " + all_hint,usage,VALIDATION)
+            if run_all:
+                target_list = [str(row["ip"]) for row in self.inventory_rows("", GlobalOptions(limit=1000000, status=opts.status, site=opts.site))
+                               if row.get("kind") == "device" and row.get("ip")]
+                if not target_list:
+                    return self.usage_error("device","config",opts,"No inventory device is in scope for --all.","netrune inventory list",VALIDATION)
             # Inline targets take the same comma-list form as vlan locate
             # (SW1,SW2), and --target repeats; --file lines are one target each.
             target_list.extend(token.strip() for spec in target_specs for token in spec.split(",") if token.strip())
@@ -355,7 +376,7 @@ class DeviceCommandsMixin:
             if not (opts.dry_run or opts.confirm):
                 return self.usage_error("device","config",opts,"Config changes require --dry-run or --confirm.","netrune device config ZONE34 'show intent' --dry-run",CONFIRM_REQUIRED)
 
-            if file_path or len(target_list) > 1 or skip_unverified or skip_offline or vendors:
+            if file_path or run_all or len(target_list) > 1 or skip_unverified or skip_offline or vendors:
                 # --file or several inline targets supply many devices; validate
                 # every one of them before touching any device, rather than
                 # discovering a bad target/driver halfway through a batch that's
@@ -401,6 +422,8 @@ class DeviceCommandsMixin:
             # shell path reads the flat file, and `inventory list` says there is
             # no such device. `inventory scan` has always done this; this path
             # was simply never given it.
+            if opts.all:
+                return self.device_inventory_all(rest, opts)
             rc = self.run_subprocess(self.legacy_cmd("netrune-control","inventory",*rest),opts)
             if rc == SUCCESS and not opts.dry_run:
                 try:
@@ -410,6 +433,55 @@ class DeviceCommandsMixin:
                     return PARTIAL
             return rc
         return self.unknown_action("device", verb, opts)
+
+    def device_inventory_all(self, rest: List[str], opts: GlobalOptions) -> int:
+        """`device inventory --all [--cisco|--aruba|--ruckus]`: SSH hardware
+        refresh of every online inventory switch, in parallel, then one import.
+
+        SSH is the only source of Cisco's Motherboard Serial Number (SNMP's
+        chassis serial is the System serial), so the weekly run uses this.
+        """
+        import concurrent.futures
+        from netops_platform.core import GlobalOptions, PARTIAL, SUCCESS, VALIDATION, clean_display_name, eprint
+        makers = {flag.lstrip("-").lower() for flag in rest if flag in {"--cisco", "--aruba", "--ruckus"}}
+        extra = [flag for flag in rest if flag not in {"--cisco", "--aruba", "--ruckus"}]
+        if extra:
+            return self.usage_error("device", "inventory", opts, "--all takes no target; narrow it with --cisco/--aruba/--ruckus.",
+                                    "netrune device inventory --all [--cisco|--aruba|--ruckus]", VALIDATION)
+        rows = [row for row in self.inventory_rows("", GlobalOptions(limit=1_000_000))
+                if row.get("kind") == "device" and str(row.get("status") or "").upper() == "ONLINE"
+                and (not makers or str(row.get("manufacturer") or "").lower() in makers)]
+        if opts.dry_run:
+            self.emit({"ok": True, "targets": [row.get("ip") for row in rows]}, opts,
+                      f"Would refresh hardware details over SSH on {len(rows)} switch(es).")
+            return SUCCESS
+        timeout = min(int(getattr(opts, "timeout", 0) or 120), 300)
+        workers = max(1, min(int(self._default_stp_jobs()), 32, len(rows) or 1))
+        results: List[Dict[str, Any]] = []
+
+        def refresh(row: Dict[str, Any]) -> Dict[str, Any]:
+            rc, _, err = self.capture(self.legacy_cmd("netrune-control", "inventory", str(row.get("ip"))), timeout)
+            return {"switch": clean_display_name(row.get("hostname") or row.get("name") or ""), "ip": row.get("ip"),
+                    "result": "ok" if rc == 0 else f"exit {rc}", "error": (err or "").strip().splitlines()[-1:] or [""]}
+
+        with self.vault_session_scope(opts, minutes=60):
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="hw-refresh") as pool:
+                    for done, result in enumerate(pool.map(refresh, rows), start=1):
+                        results.append(result)
+                        self._progress_step("device inventory", f"{result['switch']} | {workers} parallel", done, len(rows), opts)
+            finally:
+                self._progress_clear(opts)
+        try:
+            self.import_flat_state(("device",), "device-inventory")
+        except Exception as exc:
+            eprint(f"Refreshed the switches, but recording it failed: {exc}")
+            return PARTIAL
+        failed = [{**row, "error": row["error"][0]} for row in results if row["result"] != "ok"]
+        self.emit({"ok": not failed, "refreshed": len(results) - len(failed), "failed": failed}, opts,
+                  f"Refreshed hardware details on {len(results) - len(failed)} of {len(results)} switch(es) over SSH."
+                  + (("\n" + self.render_table(failed, ["switch", "ip", "result", "error"])) if failed else ""))
+        return PARTIAL if failed else SUCCESS
 
     def _device_config_gate(self, target: str, opts: GlobalOptions, *, danger_skip_verification: bool = False) -> Dict[str, Any]:
         """Resolve one device-config target and evaluate its write-capability
@@ -647,8 +719,9 @@ class DeviceCommandsMixin:
         can be hours stale.
 
         `vendors` ({"cisco", "aruba", "ruckus"}, from --cisco/--aruba/--ruckus)
-        lets only devices whose detected driver family belongs to one of
-        those vendors through. It's applied right after resolution, before
+        lets only devices whose manufacturer (identity.py's reconciled
+        `manufacturer`, model number first, driver family as the fallback)
+        is one of those vendors through. It's applied right after resolution, before
         the approval gate, so a mixed device list run with --cisco isn't
         refused over an Aruba or RUCKUS switch it was never going to touch.
         Filtered devices are listed but, unlike skipped ones, don't make the
@@ -681,11 +754,13 @@ class DeviceCommandsMixin:
         if vendors:
             wanted = "/".join(sorted(vendors))
             def vendor_of(gate: Dict[str, Any]) -> str:
-                return str(gate.get("driver_family") or "unknown").split("-", 1)[0]
-            filtered = [{**g, "reason": f"vendor filter: {g['driver_family']} is not {wanted}"} for g in gates if g["resolved"] and vendor_of(g) not in vendors]
-            gates = [g for g in gates if not g["resolved"] or vendor_of(g) in vendors]
+                return str((gate.get("device") or {}).get("manufacturer") or family_manufacturer(gate.get("driver_family")) or "unknown")
+            filtered = [{**g, "reason": f"vendor filter: {vendor_of(g)} is not {wanted}"} for g in gates if g["resolved"] and vendor_of(g).lower() not in vendors]
+            gates = [g for g in gates if not g["resolved"] or vendor_of(g).lower() in vendors]
             if not gates:
-                reason = f"No target matched the vendor filter ({wanted}):\n" + "\n".join(f"  {g['target']}: {g['driver_family']}" for g in filtered)
+                reason = f"No target matched the vendor filter ({wanted}):\n" + "\n".join(f"  {g['target']}: {vendor_of(g)}" for g in filtered[:10])
+                if len(filtered) > 10:
+                    reason += f"\n  ... and {len(filtered) - 10} more"
                 return self.usage_error("device", "config", opts, reason, "netrune device support <target>", VALIDATION)
 
         skipped: List[Dict[str, Any]] = []
@@ -721,16 +796,21 @@ class DeviceCommandsMixin:
             self.emit(payload, opts, reason)
             return UNREACHABLE if all_offline else UNSUPPORTED
 
+        # --all hands every device in by IP, so the name is what tells the
+        # operator which switch a row is.
+        def name_of(gate: Dict[str, Any]) -> str:
+            return str((gate.get("device") or {}).get("hostname") or "")
+
         if opts.dry_run:
-            preview_rows = [{"target": g["target"], "ip": str(g["device"].get("ip") or g["target"]), "commands": "; ".join(commands)} for g in runnable]
-            skipped_rows = [{"target": g["target"], "reason": g["reason"]} for g in skipped]
-            filtered_rows = [{"target": g["target"], "reason": g["reason"]} for g in filtered]
+            preview_rows = [{"target": g["target"], "name": name_of(g), "ip": str(g["device"].get("ip") or g["target"]), "manufacturer": g["device"].get("manufacturer") or "", "commands": "; ".join(commands)} for g in runnable]
+            skipped_rows = [{"target": g["target"], "name": name_of(g), "reason": g["reason"]} for g in skipped]
+            filtered_rows = [{"target": g["target"], "name": name_of(g), "reason": g["reason"]} for g in filtered]
             payload = {"ok": True, "dry_run": True, "targets": targets, "commands": commands, "devices": preview_rows, "skipped": skipped_rows, "filtered": filtered_rows}
-            text = f"Would apply {len(commands)} command(s) to {len(runnable)} device(s):\n" + self.render_table(preview_rows, ["target", "ip", "commands"])
+            text = f"Would apply {len(commands)} command(s) to {len(runnable)} device(s):\n" + self.render_table(preview_rows, ["target", "name", "ip", "manufacturer", "commands"])
             if skipped_rows:
-                text += f"\n\nSkipped {len(skipped_rows)} device(s):\n" + self.render_table(skipped_rows, ["target", "reason"])
+                text += f"\n\nSkipped {len(skipped_rows)} device(s):\n" + self.render_table(skipped_rows, ["target", "name", "reason"])
             if filtered_rows:
-                text += f"\n\nFiltered out {len(filtered_rows)} device(s) by vendor:\n" + self.render_table(filtered_rows, ["target", "reason"])
+                text += f"\n\nFiltered out {len(filtered_rows)} device(s) by vendor:\n" + self.render_table(filtered_rows, ["target", "name", "reason"])
             self.emit(payload, opts, text)
             return SUCCESS
 
@@ -749,13 +829,13 @@ class DeviceCommandsMixin:
         for result in results:
             counts[status_key[result["status"]]] += 1
         summary_rows = [
-            {"target": result["target"], "status": result["status"], "changed": result.get("changed", False), "detail": result.get("error") or (result["phases"][-1]["detail"] if result.get("phases") else "")}
-            for result in results
+            {"target": result["target"], "name": name_of(gate), "status": result["status"], "changed": result.get("changed", False), "detail": result.get("error") or (result["phases"][-1]["detail"] if result.get("phases") else "")}
+            for gate, result in zip(runnable, results)
         ] + [
-            {"target": g["target"], "status": "SKIPPED", "changed": False, "detail": g["reason"]}
+            {"target": g["target"], "name": name_of(g), "status": "SKIPPED", "changed": False, "detail": g["reason"]}
             for g in skipped
         ] + [
-            {"target": g["target"], "status": "FILTERED", "changed": False, "detail": g["reason"]}
+            {"target": g["target"], "name": name_of(g), "status": "FILTERED", "changed": False, "detail": g["reason"]}
             for g in filtered
         ]
         all_succeeded = counts["success"] == counts["total"] and not skipped
@@ -770,6 +850,6 @@ class DeviceCommandsMixin:
             headline += f" ({counts['attention']} attention, {counts['unverified']} unverified, {counts['blocked']} blocked, {counts['failed']} failed, {counts['skipped']} skipped)"
         if filtered:
             headline += f"; {len(filtered)} filtered out by vendor"
-        text = headline + "\n" + self.render_table(summary_rows, ["target", "status", "changed", "detail"])
+        text = headline + "\n" + self.render_table(summary_rows, ["target", "name", "status", "changed", "detail"])
         self.emit(payload, opts, text)
         return SUCCESS if all_succeeded else PARTIAL

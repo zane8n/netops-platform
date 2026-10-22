@@ -231,16 +231,16 @@ def merge_device_observations(
     changed: List[str] = []
     # A current non-placeholder hostname is authoritative regardless of whether
     # a previous detailed observation came from SSH.
-    # Cisco's SNMP chassis serial is the System serial; the device serial is
-    # the Motherboard serial from `show version`, and on 2960/3560CX the two
-    # differ. Once SSH has recorded one, an SNMP-only scan of the same model
-    # must not flip it; a different model is different hardware, so it may.
+    # Cisco's SNMP chassis serial is the System serial; the serial Netrune
+    # keeps is the Motherboard serial from `show version` (the one the
+    # operator's records use), and on Catalyst 2960/3560CX/9200/9300 the two
+    # differ. An SNMP-only reading therefore never replaces a stored serial
+    # for the same model -- only fills a blank one; a different model is
+    # different hardware, so it may.
     keep_cli_serial = (
         new["driver_family"] == "cisco-ios"
         and _text(incoming.get("source")).upper() == "SNMP"
-        and "SSH" in _text(old.get("source")).upper()
-        and _meaningful(old.get("model"))
-        and old.get("model") == new.get("model")
+        and (not _meaningful(old.get("model")) or not _meaningful(new.get("model")) or old.get("model") == new.get("model"))
     )
     for field in ("hostname", "platform", "model", "serial", "mac"):
         if field == "serial" and keep_cli_serial and _meaningful(old.get(field)):
@@ -381,6 +381,79 @@ def merge_device_record(
     }
 
 
+def add_scope_arguments(parser: argparse.ArgumentParser) -> None:
+    """A shared controller's site filter: an AP is kept when its address
+    starts with an IP prefix OR its name starts with a name prefix or holds
+    a name substring (space-separated lists; none at all keeps every AP)."""
+    parser.add_argument("--ip-prefixes", default="")
+    parser.add_argument("--name-prefixes", default="")
+    parser.add_argument("--name-contains", default="")
+
+
+def _scope(args: argparse.Namespace) -> Dict[str, List[str]]:
+    return {"ip_prefixes": args.ip_prefixes.split(), "name_prefixes": args.name_prefixes.split(),
+            "name_contains": args.name_contains.split()}
+
+
+def wlc_row_in_scope(row: Mapping[str, str], args: argparse.Namespace) -> bool:
+    from netops_platform import wlc
+    ap = wlc.ControllerAP(mac="", name=row.get("name", ""), ip=row.get("ip", "") if not row.get("ip", "").startswith("wlc:") else "")
+    return wlc.in_scope(ap, **_scope(args))
+
+
+def controller_aps(args: argparse.Namespace) -> int:
+    """Print a controller's AP pipe rows and record its sidecar rows.
+
+    An empty walk (controller unreachable, or answering nothing) prints nothing
+    and leaves the sidecar as it was, so the last good reading survives. A
+    walk shorter than the controller's own count is still used: `ap_merge`
+    keeps every AP it did not see, so a cut-off walk loses nothing. Exit 3
+    tells the caller the walk was incomplete.
+
+    Cisco: the AP table is the joined APs; join statistics (when given) add
+    the ones that are not joined and serve as the count the walk is checked
+    against. A shared controller's other sites are left out by the scope
+    filter before anything is written.
+    """
+    from netops_platform import wlc
+    text = args.walk.read_text(encoding="utf-8", errors="replace") if args.walk.is_file() else ""
+    vendor = "Cisco" if args.vendor == "cisco" else "Ruckus"
+    expected = int(args.expected) if str(args.expected).strip().isdigit() else None
+    if args.vendor == "cisco":
+        joined = wlc.cisco_aps(text)
+        join_text = args.join_stats.read_text(encoding="utf-8", errors="replace") if args.join_stats and args.join_stats.is_file() else ""
+        join_rows = wlc.parse_join_summary(join_text)
+        expected = wlc.joined_count(join_rows) if expected is None else expected
+        unjoined = wlc.unjoined_aps(join_rows, joined)
+        scope = _scope(args)
+        found = len(joined)
+        aps = [ap for ap in joined if wlc.in_scope(ap, **scope)] + [
+            ap for ap in unjoined if wlc.in_scope(ap, last_ip=wlc.last_ip(ap), **scope)]
+        other_sites = len(joined) + len(unjoined) - len(aps)
+    else:
+        aps = wlc.ruckus_aps(text)
+        found = len(aps)
+        other_sites = 0
+    if not found:
+        print(f"{args.controller} {args.controller_ip}: no APs in the walk; keeping the last reading.", file=sys.stderr)
+        return 2
+    now = int(time.time())
+    sys.stdout.write(wlc.pipe_rows(aps, controller_ip=args.controller_ip, controller=args.controller, vendor=vendor, now=now))
+    existing = wlc.parse_sidecar(args.sidecar.read_text(encoding="utf-8", errors="replace")) if args.sidecar.is_file() else []
+    rows = wlc.replace_controller(existing, args.controller_ip,
+                                  wlc.sidecar_rows(aps, controller_ip=args.controller_ip, controller=args.controller, now=now))
+    tmp = args.sidecar.with_name(args.sidecar.name + ".tmp")
+    tmp.write_text(wlc.render_sidecar(rows), encoding="utf-8")
+    tmp.replace(args.sidecar)
+    online = sum(1 for ap in aps if ap.status == "ONLINE")
+    short = wlc.completeness(found, expected)
+    print(f"{args.controller} {args.controller_ip}: {len(aps)} AP(s), {online} {'joined' if vendor == 'Cisco' else 'connected'}"
+          + (f", {len(aps) - online} not joined" if vendor == "Cisco" else "")
+          + (f"; {other_sites} other-site AP(s) left out by the filter" if other_sites else "")
+          + (f"; {short}" if short else ""), file=sys.stderr)
+    return 3 if short else 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Netrune normalized inventory ingest")
     subparsers = parser.add_subparsers(dest="operation", required=True)
@@ -397,6 +470,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     record.add_argument("--output", type=Path, required=True)
     record.add_argument("--observed-at", type=int, default=0)
     record.add_argument("--summary", type=Path)
+    ap_scan = subparsers.add_parser("merge-ap-scan", help="Merge controller and switch AP readings into the AP cache.")
+    ap_scan.add_argument("--controller", type=Path, required=True)
+    ap_scan.add_argument("--switch", type=Path, required=True)
+    ap_scan.add_argument("--existing", type=Path, required=True)
+    ap_scan.add_argument("--attachments", type=Path)
+    ap_scan.add_argument("--scope-controller", default="", help="Drop this controller's stored rows that fall outside the scope below.")
+    add_scope_arguments(ap_scan)
+    ap_scan.add_argument("--output", type=Path, required=True)
+    controller = subparsers.add_parser("controller-aps", help="Turn a controller's AP-table walk into AP pipe rows and its sidecar.")
+    controller.add_argument("--vendor", choices=("ruckus", "cisco"), required=True)
+    controller.add_argument("--controller-ip", required=True)
+    controller.add_argument("--controller", required=True, help="Label written as the AP's switch_name, e.g. Ruckus-vSZ.")
+    controller.add_argument("--walk", type=Path, required=True, help="snmpbulkwalk -On output of the AP table.")
+    controller.add_argument("--expected", default="", help="The controller's own AP count, to detect a cut-off walk.")
+    controller.add_argument("--sidecar", type=Path, required=True, help="ap_controller.db; this controller's rows are replaced.")
+    controller.add_argument("--join-stats", type=Path, help="Cisco: the join-statistics command's output, for APs that are not joined.")
+    add_scope_arguments(controller)
     cli_hardware = subparsers.add_parser("parse-cli-hardware", help="Read CLI output on stdin; print model|serial|mac.")
     cli_hardware.add_argument("--family", required=True)
     snmp_hardware = subparsers.add_parser("parse-snmp-hardware", help="Read ENTITY-MIB OID<TAB>value lines on stdin; print model|serial|mac.")
@@ -411,6 +501,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             hardware = parse_snmp_hardware(args.family, text.splitlines(), sysdescr=args.sysdescr, bridge_mac=args.bridge_mac)
         print("|".join(hardware[field] or "N/A" for field in ("model", "serial", "mac")))
+        return 0
+    if args.operation == "controller-aps":
+        return controller_aps(args)
+    if args.operation == "merge-ap-scan":
+        from netops_platform.ap_merge import merge_files, render
+        scope = None
+        if args.scope_controller:
+            scope = (args.scope_controller, lambda row: wlc_row_in_scope(row, args))
+        args.output.write_text(render(merge_files(args.controller, args.switch, args.existing, args.attachments, scope=scope)), encoding="utf-8")
         return 0
     if args.operation == "merge-device-scan":
         rows, detail = merge_scan_files(

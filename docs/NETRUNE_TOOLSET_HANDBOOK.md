@@ -406,12 +406,71 @@ $HOME/.local/share/netrune/runtime/
 $HOME/.local/bin/netrune -> $HOME/.local/share/netrune/runtime/current/bin/netrune
 ```
 
-Prefer `install.sh` with a built wheel over manually assembling this layout.
+Prefer `install.sh` (section 5.5) over manually assembling this layout.
 The Aruba helper is resolved relative to the loaded shell library, so keeping
 `netrune_aruba_ssh.exp` beside `netrune-lib.sh` is sufficient. Set
 `NETRUNE_ARUBA_SSH_WRAPPER` to an explicit executable path only when a deployment
 intentionally stores the wrapper elsewhere. If no executable wrapper is
 available, Aruba falls back to the generic SSH path.
+
+### 5.5 A new machine in one run
+
+From a checkout, `install.sh` does the whole job:
+
+```bash
+git clone <your netrune repository> netrune && cd netrune
+./install.sh                          # or: ./install.sh --import ~/site-a.tgz
+```
+
+In order, it:
+
+1. checks the system tools Netrune drives (SNMP, `sshpass`, `gpg`,
+   `expect`, `jq`, `sqlite3`, `traceroute`, `iperf3`, and the rest) and
+   offers to install the missing ones with apt-get, dnf, pacman, or zypper
+   (`--deps` without asking, `--no-deps` to only report them);
+2. installs Netrune into a fresh release with the `excel` extra (skipped
+   without network), and links `netrune`, `netops`, and `netop` into
+   `~/.local/bin`;
+3. installs bash, zsh, and fish completions and the man pages, and offers to
+   add a marked block to `~/.zshrc` or `~/.bashrc` with the PATH and
+   completion lines (placed just before `zoxide init` when the file has one,
+   so zoxide stays last; `--no-shell` skips all of this);
+4. with `--import FILE`, restores a profile from another machine and offers
+   to store the SSH password (`netrune vault set`);
+5. validates the configuration and lists any tools still missing.
+
+`--yes` answers every question; without a terminal and without `--yes` the
+steps that change the system are skipped, so scripted installs edit nothing
+they were not asked to.
+
+#### Moving a profile to another machine
+
+On the old machine:
+
+```bash
+netrune profile export ~/site-a.tgz                                 # configuration and caches
+netrune profile export ~/site-a-full.tgz.gpg --with-state --with-secrets
+```
+
+The plain bundle carries the profile's configuration (controllers, site
+filters, subnets, aliases, channels, drivers, the SSH `known_hosts`) and the
+inventory caches, so the first command on the new machine already knows the
+network. `--with-state` adds the memory (identity history, merges, your
+review answers) and the configuration backups. `--with-secrets` adds the SNMP
+communities and encrypts the whole file with a passphrase (asked, or from
+`NETRUNE_BUNDLE_PASSPHRASE`). The SSH password vault and named secrets are
+tied to each machine's sudo and are never exported: run `netrune vault set`
+on the new one.
+
+`netrune profile pack --confirm` is the one-command form of the second
+line: it writes `~/site.tgz.gpg` (or the file you name) with everything,
+encrypted, and records an audit event. Without `--confirm` it only lists what
+would go in, since the file carries the SNMP communities.
+
+On the new machine, `./install.sh --import ~/site-a-full.tgz.gpg`, or with
+Netrune already installed, `netrune profile import ~/site-a-full.tgz.gpg`
+(`--as NAME` to restore under another name; an existing profile is kept
+unless `--force`, which keeps each replaced file beside the new one).
 
 ### 5.6 Root versus non-root operation
 
@@ -473,15 +532,14 @@ legacy plaintext secret names as pending instead of copying their values.
 | `ssh_user` | empty | Non-secret SSH login name required by `device ssh` and SSH-backed helpers |
 | `core_switch_ip` | empty | Core used by topology orientation and core ARP/MAC lookup |
 | `cisco_wlc_ip` | empty | Cisco wireless controller address |
-| `cisco_wlc_ap_ip_filter` | empty | Optional accepted AP management IP prefix from WLC discovery |
-| `cisco_wlc_ap_name_contains` | empty | Optional AP-name substring filter |
-| `cisco_wlc_ap_name_prefix` | empty | Optional AP-name prefix used by a deployment profile |
+| `cisco_wlc_ap_ip_filter` | empty | AP address prefixes this site owns on a shared WLC (space-separated); kept if this **or** a name setting matches |
+| `cisco_wlc_ap_name_contains` | empty | AP-name substrings this site owns (space-separated) |
+| `cisco_wlc_ap_name_prefix` | empty | AP-name prefixes this site owns (space-separated) |
 | `cisco_wlc_join_stats` | `true` | Enables optional SSH join-stat collection |
-| `cisco_wlc_join_stats_cmd` | `show ap join stats summary all` | WLC command used for unjoined AP observations |
+| `cisco_wlc_join_stats_cmd` | empty (automatic) | WLC command for unjoined APs; empty tries `show wireless stats ap join summary` (9800), then `show ap join stats summary all` (AireOS) |
 | `cisco_wlc_join_stats_timeout` | `45` | Join-stat command timeout |
 | `ruckus_vsz_ip` | empty | Ruckus vSZ controller address |
-| `ruckus_vsz_model_oids` | empty | Custom model OID mapping/input |
-| `ruckus_ap_model_snmp` | `false` | Enables direct AP SNMP model enrichment |
+| `controller_walk_timeout` | `180` | Seconds allowed for one controller AP-table walk |
 | `default_backup_dir` | `~/network_backups` | Shell helper backup root |
 | `ssh_host_key_mode` | `accept-new` | Managed SSH trust policy: compatibility `accept-new` or pre-enrolled production `strict` |
 | `vault_password_ttl_hours` | `72` | Expected switch-password lifetime measured from the latest successful vault write |
@@ -1435,16 +1493,82 @@ netrune ap scan
 
 The AP scan combines available sources:
 
-- Cisco WLC SNMP inventory;
-- optional Cisco WLC SSH join statistics;
-- Ruckus vSZ SNMP inventory;
-- optional direct AP model SNMP;
+- Cisco WLC SNMP inventory: each AP's address, MAC, model, serial, and how
+  long it has been up and joined;
+- optional Cisco WLC SSH join statistics, for the APs that are not joined
+  (the Catalyst 9800 command is used first, the AireOS one if the controller
+  refuses it);
+- Ruckus vSZ SNMP inventory, read whole in one pass: every AP with its MAC,
+  model, serial, firmware, uptime, and whether the controller has it
+  connected (a *Disconnect* AP is recorded offline). If the controller
+  returns fewer APs than it counts, the scan says so, and the APs it missed
+  keep their last reading;
 - LLDP/CDP AP observations from switches;
 - prior AP observations used to preserve continuity and mark unmatched rows offline.
 
-Controller filters are controlled by the WLC prefix/name settings. An AP excluded by those filters is absent, not necessarily offline.
+A Cisco WLC shared with other sites is cut to this one by the filter settings: an AP is kept when its address starts with one of `cisco_wlc_ap_ip_filter`'s prefixes **or** its name starts with one of `cisco_wlc_ap_name_prefix`'s (or contains one of `cisco_wlc_ap_name_contains`'s). Several values are separated by spaces. For example `cisco_wlc_ap_ip_filter=192.0.2.` and `cisco_wlc_ap_name_prefix=SITEA` keep an AP named `SITEA…` wherever it is, and a default-named AP on 192.0.2. APs recorded for other sites before the filter was set are removed at the next scan. An AP excluded by the filter is absent, not offline. The Ruckus vSZ has no filter.
 
 The merge process updates `ap_devices.db`; v8 then imports and reconciles canonical APs. Source records can have controller attachment context without a physical port. Switch LLDP/CDP evidence is stronger for a physical port.
+
+Neither a maker's name ("Aruba", "Ruckus") nor a neighbour that calls itself
+a switch or a phone counts as an AP, so Aruba and ICX switches seen as LLDP
+neighbours no longer land in the AP list.
+
+### 11.1a `ap neighbors`
+
+```text
+netrune ap neighbors --all
+netrune ap neighbors SITE-A-CORE-SW01,SITE-A-BLDG2-SW01
+netrune ap neighbors --all --dry-run       # which switches, which commands; connects to nothing
+```
+
+Reads each switch's own neighbour tables over SSH:
+
+- Cisco: `show cdp neighbors detail` and `show lldp neighbors detail`;
+- Aruba AOS-S: `show lldp info remote-device`, then the detail for each port
+  it lists, and `show cdp neighbors detail`.
+
+Each switch takes one login (two for Aruba). The tables name the port as
+you would type it, so this is the most direct answer to "which port is this
+AP on".
+
+A neighbour counts as an AP when it advertises the WLAN capability, reports
+an AP model (C9136I, CW9164I, AIR-AP2802I, R610, ...), or runs AP software.
+Known switches, anything describing itself as a switch, and phones are left
+out. APs are matched to the inventory by MAC, then name, then IP:
+
+- an AP on a different port than recorded is corrected, and the change shows
+  up in `ap moves`;
+- an AP Netrune did not have is added;
+- the rest are confirmed where they are.
+
+It only runs `show` commands on the switches. Run it after `ap scan`, which
+still rewrites the AP list from its own SNMP and controller data.
+
+### Which source wins for an AP
+
+Both scans now follow one rule:
+
+- **Name and model:** from the controller. The model comes from whichever
+  source actually names one (`C9136I`, `CW9164I`, `R610`), the controller
+  first, so a software banner no longer replaces the model.
+- **Where it is plugged in:** from the switch.
+- **Matching:** controller and switch readings join by MAC, then hostname,
+  then IP. Cisco controllers report the radio MAC and LLDP the Ethernet MAC,
+  so the hostname is what usually joins them.
+
+`ap neighbors` then checks every reading against the port's MAC table:
+
+- the AP's MAC on the port **confirms** it;
+- a CDP-only AP (CDP carries no MAC) whose port holds exactly one MAC
+  **learns** that MAC;
+- only randomized client MACs on the port means its **wireless clients**,
+  which also supports the attachment;
+- a port where the AP's own MAC has aged out is **pushed**: Netrune pings the
+  AP from your machine (its reply crosses that port, so the switch learns it
+  again) and re-reads just that port, up to twice. The whole MAC table is read
+  in the same login as the neighbour tables, so a switch usually costs one
+  login.
 
 ### 11.2 `ap list`
 
@@ -1470,17 +1594,30 @@ netrune ap show [pattern]
 
 This is a quick alias for `ap list`.
 
+### 11.3a `ap controller`
+
+```text
+netrune ap controller [pattern] [--limit N]
+```
+
+What the controllers said about each AP at the last scan: name, IP, MAC,
+model, serial, firmware, whether the controller has it connected, how long it
+has been up, and when it was polled. The pattern matches any of those
+(`netrune ap controller T300`, `netrune ap controller OFFLINE`, or part of a
+MAC in any notation). `--json` adds `booted_at`, the poll time minus the
+uptime, which stays right between scans.
+
 ### 11.4 `ap unjoined`
 
 ```text
 netrune ap unjoined [pattern] [--limit N]
 ```
 
-Shows Cisco WLC observations from join statistics that are not currently joined. It depends on:
+Shows Cisco WLC observations from join statistics that are not currently joined: name, MAC, the address the AP last had (often reused by another AP since), and the controller's last failure and disconnect reason. An AP that has since joined under the same name with new hardware is not listed. It depends on:
 
 - `cisco_wlc_join_stats=true`;
 - a configured WLC;
-- SSH credentials and `sshpass`;
+- SSH credentials and `sshpass`, and an unlocked vault (the scan logs `did not return join statistics` when SSH fails);
 - a WLC output format matched by the parser.
 
 An empty result can mean no unjoined APs, disabled collection, failed SSH, filtered names, or parser drift. Check scan logs before declaring success.
@@ -1740,6 +1877,31 @@ netrune health attention [--limit N]
 
 Aggregates health, topology, AP movement, backup, and diagnostic signals into a review list. Investigate source recency before treating every item as a live incident.
 
+### 14.4a `health review`
+
+```text
+netrune health review [--list] [--kind identity|excel]
+netrune health review answer <id> <choice>
+```
+
+Everything waiting for a person to decide, one question at a time:
+
+| Question | Answers | What happens |
+| --- | --- | --- |
+| A switch or AP disappeared and another appeared with matching signals: the same one, or a replacement? | `y` same / `n` different | `y` merges the old record into the new one (as `ap merge`/`inventory merge --confirm` would); `n` keeps them apart and never asks again |
+| Several renamed together under a new site prefix? | `y` / `n` | the same, for each of them |
+| A workbook row names something Netrune never saw and nothing answers: is the address free? | `y` free / `n` allocated | kept, and written by the next `excel sync … --free-ips --confirm` of that workbook |
+| A workbook row's keys point at two switches: which is it? | `1`, `2`, … | kept, and the next `excel sync … --confirm` updates that row from the chosen key |
+
+`s` skips a question (it is asked again next time), `q` stops. Workbook
+questions come from the last `excel inspect`/`sync` of each workbook, and an
+answer only applies while the row still reads the same. With `--list`, or
+without a terminal, the questions are listed with their ids instead;
+`answer <id> <choice>` answers one.
+
+The morning check lists these as its last step and, in a terminal, offers
+to go through them straight away.
+
 ### 14.5 `health timeline`
 
 ```text
@@ -1861,7 +2023,7 @@ netrune device ssh --legacy ZONE34
 
 Flow:
 
-1. `netrune-connect` resolves exactly one target unless resolution mode says otherwise.
+1. A name matching several switches opens a numbered picker: move with the arrows or type the row's number, then Enter (`q` cancels). `netrune-connect` then resolves exactly one target unless resolution mode says otherwise.
 2. It validates that the active profile has a non-empty, whitespace-free `ssh_user`; missing configuration fails before vault authentication or transport access.
 3. It decrypts the local SSH password vault into `SSHPASS`.
 4. It opens `sshpass -e ssh -tt -l <user> <host>`, keeping username and host as separate OpenSSH arguments.
@@ -1961,6 +2123,8 @@ netrune device config <target[,target...]> <commands...> --dry-run|--confirm
 netrune device config --file devices.txt [--target T] <commands...> \
   [--commands-file F] [--skip-offline] [--skip-unverified] \
   [--cisco] [--aruba] [--ruckus] --dry-run|--confirm
+netrune device config --all [--cisco] [--aruba] [--ruckus] <commands...> \
+  [--skip-offline] [--skip-unverified] --dry-run|--confirm
 ```
 
 Example:
@@ -2028,16 +2192,17 @@ How a batch runs:
    pre-change backup can't connect, so nothing is applied), but only after a
    full SSH timeout. The ping also runs on `--dry-run`, so the preview shows
    exactly which switches a real run would touch.
-4. `--cisco`, `--aruba` and `--ruckus` let only that vendor's switches
+4. `--cisco`, `--aruba` and `--ruckus` let only that manufacturer's switches
    through; combine them for more than one. Use this when a device list mixes
    vendors and the commands only suit one of them, for example
    `--file ./site-a.txt --cisco 'ip ssh version 2'`. Other switches are
    listed as filtered and aren't touched. They don't count against the run,
    and an off-vendor switch that isn't approved for writes doesn't block the
-   batch. The vendor comes from the detected driver (`netrune device
-   support <target>` shows it), so a switch detected as `unknown` is filtered
-   out by every vendor flag. RUCKUS configuration isn't supported yet, so
-   `--ruckus` currently previews but won't apply.
+   batch. The manufacturer comes from the model number first (see
+   "Manufacturer" below; `netrune device support <target>` and `netrune
+   inventory list` show it), so a switch with no recognizable maker is
+   filtered out by every vendor flag. RUCKUS configuration isn't supported
+   yet, so `--ruckus` currently previews but won't apply.
 5. Under `--confirm`, switches are configured one at a time, each through its
    own backup/apply/verify, and a failure on one doesn't stop the rest.
 
@@ -2045,6 +2210,35 @@ The run ends with one table of every device and its outcome. Exit code 0
 means every listed device succeeded. 3 means at least one didn't, or was
 skipped (vendor-filtered switches don't count). 4 means `--skip-offline`
 found every device offline. 6 means nothing matched the vendor filter.
+
+#### Every device in inventory: `--all`
+
+A run that names no device needs `--all`. Without it the first command would
+be read as a device name, so netrune refuses and suggests `--all` instead of
+guessing. With `--all`, every positional is a command and every inventory
+device is in scope; the vendor flags (and `--site`, `--status`) narrow it:
+
+```bash
+netrune device config --all --cisco "ip ssh version 2" --skip-offline --dry-run
+netrune device config --all --aruba --commands-file ./aruba-ntp.txt \
+  --skip-offline --skip-unverified --dry-run
+```
+
+Everything under "How a batch runs" applies, including the up-front check:
+one switch that isn't approved for writes refuses the whole fleet unless
+`--skip-unverified` is given. `--all` can't be combined with `--file` or
+`--target`. Preview tables carry each device's name and manufacturer, since
+`--all` passes devices by IP.
+
+#### Manufacturer
+
+Every switch and AP carries a `manufacturer` (Cisco, Aruba, Ruckus,
+Ubiquiti) alongside its model. It is read from the model number first
+(`C9200L-24P-4G` is Cisco whatever else a record says), then from maker words
+in the platform or sysDescr. When a stored platform label names a different
+maker than the model number, the model wins for driver selection too, and
+`netrune db coherence --realign` (part of the morning check) corrects the
+stored label.
 
 ### 16.7 `vlan locate`
 
@@ -2284,6 +2478,10 @@ netrune diagnose latency 1.1.1.1
 netrune diagnose latency ZONE34 --count 10
 netrune diagnose latency 198.51.100.92 --count 5 --json
 ```
+
+A name matching several switches or APs opens the same numbered picker as
+`device ssh`: move with the arrows or type the row's number, then Enter.
+Addresses and abbreviations are probed as typed.
 
 Default terminal mode is continuous until interrupted. Finite mode reports sent/received/loss, min/average/max latency, and average absolute consecutive latency difference as jitter. JSON mode is always finite and defaults to five samples when no count is provided.
 
@@ -2588,6 +2786,52 @@ known at different times instead of overwriting the prior diagnosis.
 
 ---
 
+## 17A. Everyday Checks by Name (`netrune check`)
+
+Short names for the checks you reach for, grouped by the question they
+answer. `netrune check` lists them all, and `netrune check <name> --show`
+prints the command a name runs. A name is only shorthand: global flags such
+as `--json`, `--dry-run`, `--all`, and `--limit` work exactly as on the real
+command.
+
+| Question | Check | What it does |
+| --- | --- | --- |
+| Start of day | `morning` | Reachability, topology, realign memory, database health, filtering, attention queue |
+| Long jobs | `weekly`, `weekly-resume` | Every scan, SSH reads of every switch, backups; resume what waited for the vault |
+| Anything to look at? | `attention` | Outages, flaps, link changes, AP moves, failed backups, merge candidates |
+| Who is up? | `pulse [target]` | Ping every switch and AP (or one) and record up/down |
+| What is down? | `down` | Down right now, from the last pulse |
+| Are these alive? | `alive SW1 SW2` | Ping just these now |
+| Up/down history | `status`, `uptime` | Current state with flaps; changes newest first |
+| Links | `links` | Quick: known switch-to-switch links with confidence |
+| What changed in topology? | `link-changes` | Links that appeared/disappeared |
+| What does a switch see? | `neighbours [switch]` | LLDP/CDP neighbours per port |
+| Uplinks / loops | `uplinks <switch>` | Live spanning tree: root, blocked and uplink ports |
+| APs on a switch | `aps-on <switch>` | APs and their ports |
+| Confirm AP ports | `ap-ports <switch>` / `--all` | Live CDP/LLDP plus MAC-table check |
+| AP movement | `ap-moves`, `ap-history <ap>` | Moves newest first; one AP over time |
+| Find a device | `find [text]` | By any part of name, IP, MAC, serial, model |
+| Where is this MAC? | `find-mac <mac>` | Live: the access port it is on now |
+| Who is this IP? | `find-ip <ip>` | Core ARP/MAC tables |
+| Who had it? | `mac-history`, `ip-history`, `port-history <switch> <port>` | Over time |
+| Where is a VLAN? | `vlan-where <switch> <vlan>` | Live VLAN presence |
+| Does a VLAN propagate? | `vlan-trace <switch> <vlan>` | Follow it switch by switch, see where it stops |
+| The path to something | `path <endpoint> <vlan>` | L2/L3 hops with findings |
+| Is this port healthy? | `port-health <switch> <port>` | Negotiation and error growth |
+| Last cable test | `cable <switch> <port>` | Recorded TDR result, no new test |
+| Latency / Internet | `latency <target>`, `internet`, `speed` | RTT and loss; DNS/TLS/filtering; speed |
+| One device in full | `device <name>` | Identity, history, relationships |
+| Same switch? | `same <a> <b>` | Evidence and conflicts between two records |
+| What can Netrune do on it? | `support <device>` | Maker, model, driver, safe capabilities |
+| Re-read hardware | `hardware <device>` / `--all` | Model, Motherboard serial, base MAC over SSH |
+| Database health | `db`, `db-fix`, `db-deep`, `db-size` | Quick coherence; and fix; full integrity; size and counts |
+| Backups | `backups <device>`, `config-diff <device>`, `backup-all` | History; last change; back up everything changed |
+| This machine | `doctor`, `vault` | Setup sanity; vault lock state |
+
+Each line of `netrune check` also says how far it reaches: `none` (Netrune's
+memory only, instant), `ping`, `SNMP`, `SSH`, or `Internet`. `writes` means it
+updates Netrune's own records; no check changes a switch.
+
 ## 18. Workflows, Jobs, and Command Registry
 
 ### 18.1 Workflows
@@ -2603,7 +2847,74 @@ netrune workflow morning-check --dry-run
 netrune workflow morning-check
 ```
 
-Intended sequence: import/cache review, fast health, topology-change review, filtering diagnostic, and attention summary.
+Sequence: import the caches, check reachability, refresh LLDP/CDP topology,
+realign memory and check the database (`db coherence --realign`), review
+topology changes, run the filtering diagnostic, build the attention
+summary, and list the decisions waiting for you. In a terminal it then asks
+whether to go through them now (`health review`, section 14.4a): answer each
+with y/n or a number, and the morning ends on a clean slate.
+
+The realign step is the database half of the morning. It re-applies every
+manual merge and re-derives relationships and identity-continuity
+candidates (what `memory refresh` does, skipped when the caches haven't
+changed since the topology scan imported them), relabels any switch whose
+stored platform contradicts its model number, and checks SQLite health
+(`quick_check`), dangling references, schema version, records carrying
+several MACs or serials, merges whose surviving record has left inventory,
+flat-cache drift, stuck jobs, and WAL growth. It also removes switches that
+an old AP scan filed as APs, and reports one hostname answering on several
+live switches (a naming or DNS mistake, kept apart rather than merged). It replaces the old separate
+`memory refresh` step, so it adds about a second, not a second refresh.
+Anything it can't fix with one right answer is reported (the step shows
+`ATTENTION`) for you to act on; merge candidates still need an explicit
+`inventory merge`/`ap merge --confirm`.
+
+Run the same check on its own any time:
+
+```bash
+netrune db coherence            # report only
+netrune db coherence --realign  # also refresh memory and fix labels
+```
+
+#### `workflow weekly`
+
+```bash
+netrune workflow weekly --dry-run
+netrune workflow weekly
+netrune workflow weekly --resume     # only the steps that had to wait
+```
+
+Everything too slow for the morning, in one run:
+
+1. import, reachability, the network scan, the AP scan, and the topology scan
+   (no credentials needed);
+2. over SSH, under one vault unlock:
+   - a hardware refresh of every switch (`device inventory --all`), which is
+     how Cisco Motherboard serials are read;
+   - `ap neighbors --all`;
+   - a spanning-tree sweep;
+   - changed-only backups of everything;
+3. realignment, and the attention queue.
+
+If the vault cannot be unlocked (nobody at the desk to answer Windows
+Hello), or no switch answered the reachability step (the laptop is off the
+site network), the SSH steps are marked `DEFERRED` instead of failing one
+switch at a time. The attention queue (and so your morning check) then says
+`weekly workflow: ... waiting since ...; run: netrune workflow weekly --resume`.
+
+#### Scheduling the weekly run
+
+```bash
+netrune workflow schedule weekly                                   # Sundays 02:00
+netrune workflow schedule weekly --when 'Sat *-*-* 22:00:00'
+netrune workflow schedule weekly --dry-run                         # show the units
+netrune workflow schedule weekly --remove
+```
+
+This installs a systemd user timer rather than a cron entry. The timer is
+`Persistent=true`: if the laptop was off or asleep at the scheduled time, the
+missed run starts as soon as it is back. When it runs, Windows Hello may ask
+once for the SSH steps.
 
 #### `workflow refresh-inventory`
 
@@ -3843,7 +4154,9 @@ netrune excel inspect ~/Switches.xlsx
 Netrune finds the header row on every sheet (title rows above it are fine),
 works out which column is which from the header text -- `Device Name`,
 `Switch`, `Hostname`; `Mgmt IP`, `IP Address`; `S/N`, `Serial Number`;
-`MAC Address`, `Base MAC`; `Model`, `Hardware`; `Vendor`, `Platform` -- and
+`MAC Address`, `Base MAC`; `Model`, `Hardware`; `Vendor`, `Manufacturer`,
+`Make` (filled with the maker, e.g. `Cisco`); `Platform`, `OS` (netrune's
+driver label, e.g. `Cisco IOS`) -- and
 matches every row to one switch by serial, base MAC, IP, or hostname. The
 report shows the columns it recognized, how many rows matched, every cell it
 would change (old -> new and which keys matched), rows whose keys point at
@@ -3851,6 +4164,11 @@ different switches, and rows Netrune does not know.
 
 If a column is not recognized, name it: `--map 'Asset Tag=serial,Mgmt Addr=ip'`
 or by letter, `--map 'F=mac'`.
+
+To work on one sheet only, name it with `--sheet`. Case and spacing do not
+matter (`--sheet "spare stock"`), a number picks by position (`--sheet 2`; the
+`inspect` heading numbers every sheet), and a comma list picks several
+(`--sheet Switches,Spares`).
 
 ### Apply
 
@@ -3863,9 +4181,10 @@ What happens on `--confirm`:
 
 - The original is copied to the profile's `excel-backups/` folder.
 - Empty cells are filled and out-of-date cells updated with Netrune's
-  hostname, IP, model, serial, base MAC, and platform. Each written cell
-  gets a note saying what it was (`--no-comments` to skip;
-  `--highlight` also shades them).
+  hostname, IP, manufacturer, model, serial, base MAC, and platform.
+- Each written cell is shaded by how sure Netrune is of it (below).
+  `--no-shade` leaves the fills alone; `--comments` also adds a note with the
+  old value.
 - Formula cells, every other column, and every other sheet are left as
   they are. MACs are written in the notation the column already uses, and
   names stay short if the column uses short names.
@@ -3877,6 +4196,10 @@ Useful variations:
 | Goal | Command |
 | --- | --- |
 | Only fill blanks, never overwrite | `--fill-only` |
+| Rewrite whole columns from Netrune | `--refresh mac,serial` (or `all`) |
+| Only one sheet | `--sheet Switches` (or `--sheet 2`) |
+| Note what changed in the Remarks column | `--remarks` |
+| Mark unused addresses "Free to use" | `--free-ips` |
 | Only some columns | `--fields mac,serial,model` |
 | Also write reachability | `--fields hostname,ip,model,serial,mac,platform,status,last_seen` |
 | Add switches the sheet is missing | `--sheet Switches --add-missing` |
@@ -3885,6 +4208,106 @@ Useful variations:
 
 Status is not written unless you ask for it: in most asset sheets "Status"
 means *In service* / *In stock*, not online/offline.
+
+### Confidence shading
+
+The preview lists the least certain changes first, with a `confidence` and a
+`why` column, and on `--confirm` each written cell is shaded to match:
+
+| Shade | Confidence | When |
+| --- | --- | --- |
+| Green | certain | Row matched by serial or base MAC; or the same value only reformatted |
+| Blue | strong | Matched by two keys that agree (name and IP); or a new row from `--add-missing` |
+| Yellow | fair | Matched by one IP or name and filling a blank; or replacing a sheet serial/MAC that disagreed with the other keys |
+| Tan | weak | Matched by one IP or name and overwriting a value |
+| Red | doubtful | `--prefer` broke a conflict |
+
+A switch Netrune has not heard from in 30 days (or never polled) drops every
+cell one step (green to blue, blue to yellow, and so on; red stays red).
+Green and blue cells need no second look; glance at yellow; read tan and red,
+which a remark or note also marks `(verify)`. Earlier syncs' shading stays on
+cells this run does not write.
+
+The five fills were chosen to stay apart for colour-blind readers too (every
+pair is at least 15 CIEDE2000 apart under deutan, protan, and tritan
+simulation), and yellow, tan, and red get darker in that order, so a
+greyscale printout still ranks them.
+
+### Remarks
+
+`--remarks` writes a short note on each row it touches into the sheet's
+Remarks, Comments, or Notes column (a `Remarks` column is added at the end
+when there is none). The notes read as yours, not as a tool's:
+
+- `Renamed from OLD-NAME`, `Updated MAC and model`, `Added serial`, with
+  `(verify)` when the change was low confidence;
+- `Offline`, or `Last seen 2026-09-01` for a switch not heard from in 30
+  days (these are refreshed every run, so they clear when it is back);
+- `Check: IP is SW01, serial is SW02` when the row's keys disagree;
+- `Duplicate of row 12` when one switch sits on several rows.
+
+Anything already in the cell is kept, and the note is added after it.
+
+### Free addresses
+
+On an IP plan, `--free-ips` decides for every row with an IP whether the
+address is free to use, and writes the answer into Remarks:
+
+1. **Something Netrune knows is on it** (online, or seen before and offline
+   now): not free. `In use (AP AP-LOBBY)`. If the row was empty, the device's
+   name (and MAC, when known) is written into it: it is a real device the
+   sheet did not have yet.
+2. **Anything answers on it** (every address Netrune holds no device for is
+   pinged, empty rows included): not free. `In use (answers ping)`.
+3. **Used within the last 30 days:** not free. `Used by PLC-7 until 2026-10-17`.
+4. **The row is empty** and nothing answered: free. `Free to use`, or
+   `Free to use (was CAM-3 until 2026-04-02)` when something used it long ago.
+5. **The row names something Netrune has never seen** and nothing answered:
+   - Netrune asks you: `y` marks it
+     `Free to use (old entry)`, `n` marks it `Allocated, offline` (spoken for,
+     just off), Enter skips it.
+   - Your answer stays in the remark, so you are not asked again.
+
+```bash
+netrune excel inspect ~/IP-Plan.xlsx --sheet "VLAN 20" --free-ips      # see the result first
+netrune excel sync ~/IP-Plan.xlsx --sheet "VLAN 20" --free-ips --confirm
+```
+
+The report lists **Suggested for allocation**: empty rows first, then
+addresses unused for a long time, then old entries you confirmed.
+
+- Questions are only asked with `--confirm` in a terminal. Elsewhere (a
+  preview, `--json`, a script) those rows are listed as awaiting you and left
+  alone. Answer on the command line with `--accept-free 192.0.2.31,192.0.2.40`
+  and `--reject-free 192.0.2.33`, or `all`.
+- Each run checks again. A `Free to use` address that has since been taken
+  becomes `In use (...)`.
+- A remark that says the address is reserved, DHCP, a gateway, a VIP, or
+  "do not use" is left alone.
+- The ping is followed by plain TCP connects on the usual remote-access,
+  Windows, camera, printer, and web ports. It never touches PLC protocols.
+  Run it from a machine that is allowed to reach those subnets.
+- Before checking, Netrune probes two addresses that cannot exist. A web
+  proxy that answers port 80/443 for every address is detected that way:
+  those ports are left out, and the report says so. If even ping answers for
+  them (a VPN or NAT faking replies), `--free-ips` refuses to run.
+
+### Refresh a whole column
+
+`--refresh mac,serial` (or any fields, or `all`) rewrites those columns on
+every matched row with Netrune's value:
+
+- cells that already hold the same value in another notation are rewritten
+  too, so the whole column ends up in one consistent form;
+- `--fill-only` does not protect them;
+- the refreshed columns do not decide which switch a row is, so a stale MAC
+  copied from another row no longer turns the row into a conflict. Rows are
+  matched by their other keys and only fall back to a refreshed column when
+  they have nothing else.
+
+```bash
+netrune excel sync ~/Assets.xlsx --sheet Switches --refresh mac,serial --dry-run
+```
 
 Netrune refuses to save when:
 
@@ -3896,6 +4319,47 @@ Netrune refuses to save when:
   `--output` to write a copy, or `--allow-feature-loss`.
 
 `.xls` files must be saved as `.xlsx` first; `.xlsm` macros are kept.
+
+### Reports
+
+```bash
+netrune excel report ~/netrune-reports.xlsx                    # every report, last 30 days of changes
+netrune excel report ~/aps.xlsx --report active-aps,ap-history --since all
+```
+
+One workbook, one sheet per report. The first sheet, **Report Info**,
+spells out exactly what each report lists, so nothing is left to
+interpretation:
+
+| Report | Sheet | What it lists |
+| --- | --- | --- |
+| `active-aps` | Active APs | APs online at the last check, with their model, switch, and port (switches hiding in the AP list are left out) |
+| `active-switches` | Active Switches | Switches online at the last check |
+| `transitions` | Transitions | Renames, IP changes, an IP now on another device, serial/model changes, AP moves |
+| `switch-history` | Switch History | Every switch, online or offline, plus each switch replaced at the same name or IP |
+| `ap-history` | AP History | Every AP, online or offline, plus each AP replaced at the same name |
+
+A replacement is new hardware, not a relabel: a different serial (or, for
+switches without one, a different MAC *and* model at once), or for an AP a
+different MAC or model. A change that reverts later is treated as a misread
+and left out.
+
+`--since 30d` (the default), `12w`, `6m`, `2026-09-01`, or `all` sets how far
+back the change rows go. An existing file is only replaced with `--confirm`,
+and is backed up first.
+
+A port on a neighbouring switch that used to see one switch or AP and now
+sees another is the strongest sign of a replacement, even when the name and
+the address both changed. Such swaps appear in Transitions:
+
+- `Replaced at neighbour port` when the MACs differ;
+- `Renamed (same MAC)` when they match;
+- `Replaced or renamed (no MAC to compare)` until `ap neighbors` has learned
+  the missing MAC.
+
+The confident ones (the rest of that neighbour barely changed) also go into
+the History sheets. The same evidence produces merge candidates for
+`inventory merge` / `ap merge`.
 
 ### Build a tracker workbook
 
@@ -3922,7 +4386,7 @@ the tracker or your notes:
 
 ```bash
 netrune excel sync ~/network-tracker.xlsx --sheet Inventory --add-missing \
-  --fields hostname,ip,platform,model,serial,mac,status,last_seen --confirm
+  --fields hostname,ip,manufacturer,platform,model,serial,mac,status,last_seen --confirm
 ```
 
 ## 22. Local Interfaces

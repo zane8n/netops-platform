@@ -300,7 +300,35 @@ def running_collector(app: Any) -> Dict[str, Any]:
         return {}
     except PermissionError:
         pass
+    if not _is_collector_process(pid):
+        # The pid outlived its collector -- a reboot or a kill -9 -- and now
+        # belongs to something else. Trusting it refuses every restart forever.
+        path.unlink(missing_ok=True)
+        return {}
     return record
+
+
+def _is_collector_process(pid: int) -> bool:
+    """Whether a live pid is still a traffic collector, where the OS can say.
+
+    os.kill() also accepts a thread id, so after a reboot a recorded pid can be
+    "alive" as a thread of an unrelated program. Linux names both the thread
+    group and the command line; elsewhere the signal probe is all there is.
+    """
+    proc = Path("/proc") / str(pid)
+    if not Path("/proc/self").is_dir():
+        return True
+    try:
+        status = (proc / "status").read_text(encoding="utf-8", errors="replace")
+        argv = (proc / "cmdline").read_bytes().split(b"\0")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    tgid = re.search(r"^Tgid:\s*(\d+)", status, re.MULTILINE)
+    if tgid and int(tgid.group(1)) != pid:
+        return False
+    return b"traffic" in argv and b"daemon" in argv
 
 
 def dispatch(app: Any, args: List[str], opts: Any) -> int:

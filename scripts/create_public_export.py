@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,6 +25,18 @@ PUBLIC_COMMIT_BODY = (
     "because the project was originally developed in a private engineering "
     "repository."
 )
+
+
+# Markdown between these markers is for the private repository only (its own
+# clone URL, the operator's move-to-a-new-machine notes) and never exported.
+PRIVATE_START = "<!-- private-only:start -->"
+PRIVATE_END = "<!-- private-only:end -->"
+
+
+def strip_private(text: str, relative: str) -> str:
+    if text.count(PRIVATE_START) != text.count(PRIVATE_END):
+        raise RuntimeError(f"public export refuses unbalanced private-only markers: {relative}")
+    return re.sub(re.escape(PRIVATE_START) + r".*?" + re.escape(PRIVATE_END) + r"\n*", "", text, flags=re.S)
 
 
 def repository_files(source: Path, include_untracked: bool = False) -> list[str]:
@@ -87,7 +100,11 @@ def main() -> int:
             raise RuntimeError(f"public export refuses non-file repository entry: {relative}")
         output = destination / relative_path
         output.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, output)
+        if relative.endswith(".md"):
+            output.write_text(strip_private(source_path.read_text(encoding="utf-8"), relative), encoding="utf-8")
+            shutil.copystat(source_path, output)
+        else:
+            shutil.copy2(source_path, output)
     findings = scan_tree(destination, denied)
     if findings:
         for finding in findings:

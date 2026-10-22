@@ -630,14 +630,20 @@ def parse_neighbor_detail_output(value: Any) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
 
     # CDP detail blocks begin with Device ID and include the local interface.
-    for block in re.split(r"(?=^Device ID\s*:)", text, flags=re.I | re.M):
-        if not re.search(r"^Device ID\s*:", block, re.I | re.M):
+    # Cisco writes "Interface: Gi1/0/5,  Port ID (outgoing port): ..."; AOS-S
+    # indents its fields and writes "Port : 5" and "Device Port : ...".
+    # AOS-S heads each entry "CDP neighbors information for port N" and lists
+    # "Port : N" before the Device ID, so its entries split on that header.
+    boundary = (r"(?=^[ \t]*CDP neighbors information for port\b)" if re.search(r"^[ \t]*CDP neighbors information for port\b", text, re.I | re.M)
+                else r"(?=^[ \t]*Device ID\s*:)")
+    for block in re.split(boundary, text, flags=re.I | re.M):
+        if not re.search(r"^[ \t]*Device ID\s*:", block, re.I | re.M):
             continue
-        name = _neighbor_block_value(block, [r"^Device ID\s*:\s*(.+)$"])
-        local = _neighbor_block_value(block, [r"^Interface\s*:\s*([^,]+)"])
-        remote_port = _neighbor_block_value(block, [r"Port ID \(outgoing port\)\s*:\s*(.+)$"])
-        platform = _neighbor_block_value(block, [r"^Platform\s*:\s*([^,]+)"])
-        capabilities = _neighbor_block_value(block, [r"Capabilities\s*:\s*(.+)$"])
+        name = _neighbor_block_value(block, [r"^[ \t]*Device ID\s*:\s*(.+)$"])
+        local = _neighbor_block_value(block, [r"^Interface\s*:\s*([^,]+)", r"^[ \t]*Port\s*:\s*(\S+)\s*$"])
+        remote_port = _neighbor_block_value(block, [r"Port ID \(outgoing port\)\s*:\s*(.+)$", r"^[ \t]*Device Port\s*:\s*(.+)$"])
+        platform = _neighbor_block_value(block, [r"^[ \t]*Platform\s*:\s*([^,\n]+)"])
+        capabilities = _neighbor_block_value(block, [r"Capabilities\s*:\s*(.+)$", r"^[ \t]*Capability\s*:\s*(.+)$"])
         ips = IP_RE.findall(block)
         records.append({
             "protocol": "cdp",
@@ -658,8 +664,15 @@ def parse_neighbor_detail_output(value: Any) -> List[Dict[str, Any]]:
         name = _neighbor_block_value(block, [r"^[ \t]*System Name[ \t]*:[ \t]*(.+)$", r"^[ \t]*SysName[ \t]*:[ \t]*(.+)$"])
         remote_port = _neighbor_block_value(block, [r"^[ \t]*Port ?[Ii]d[ \t]*:[ \t]*(.+)$", r"^[ \t]*Port ?Desc(?:ription|r)[ \t]*:[ \t]*(.+)$"])
         platform = _neighbor_block_value(block, [r"^[ \t]*System Descr(?:iption)?[ \t]*:[ \t]*(.+)$"])
+        if not platform:
+            # Cisco IOS puts the description on the line after its label.
+            following = re.search(r"^[ \t]*System Description[ \t]*:[ \t]*\n[ \t]*(\S.*)$", block, re.I | re.M)
+            platform = following.group(1).strip() if following else ""
         capabilities = _neighbor_block_value(block, [r"^[ \t]*System Capabilities Enabled[ \t]*:[ \t]*(.+)$", r"^[ \t]*Enabled Capabilities[ \t]*:[ \t]*(.+)$", r"^[ \t]*System Capabilities(?: Supported)?[ \t]*:[ \t]*(.+)$"])
-        ips = IP_RE.findall(block)
+        # The management address, not an address that only appears in the
+        # description or a VLAN name, is the neighbour's own.
+        managed = re.search(r"Management Address(?:es)?.*?((?:\d{1,3}\.){3}\d{1,3})", block, re.I | re.S)
+        ips = [managed.group(1)] if managed else IP_RE.findall(block)
         chassis = _neighbor_block_value(block, [r"^[ \t]*ChassisId[ \t]*:[ \t]*(.+)$", r"^[ \t]*Chassis id[ \t]*:[ \t]*(.+)$"])
         if local and (name or remote_port or ips):
             records.append({

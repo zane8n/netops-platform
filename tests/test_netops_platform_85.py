@@ -32,7 +32,7 @@ from netops_platform.profiles import NEUTRAL_PROFILE, ProfileStore, read_kv
 from netops_platform.release import release_metadata, write_release_metadata
 from netops_platform.support import create_support_bundle
 from netops_devices import REGISTRY as DEVICE_REGISTRY
-from create_public_export import PUBLIC_COMMIT_BODY, PUBLIC_COMMIT_SUBJECT, repository_files, stage_export
+from create_public_export import PUBLIC_COMMIT_BODY, PUBLIC_COMMIT_SUBJECT, repository_files, stage_export, PRIVATE_END, PRIVATE_START, strip_private
 
 
 INGEST_SCHEMA = """
@@ -1316,6 +1316,12 @@ class PrivacyTest(unittest.TestCase):
                 stdout=subprocess.PIPE, text=True,
             ).stdout.splitlines()
             self.assertIn("webui/dist/index.html", staged)
+
+    def test_private_only_markdown_never_reaches_the_public_export(self):
+        text = f"# Netrune\n\n{PRIVATE_START}\ngit clone private-url\n{PRIVATE_END}\n\npublic text\n"
+        self.assertEqual(strip_private(text, "README.md"), "# Netrune\n\npublic text\n")
+        with self.assertRaises(RuntimeError):
+            strip_private(f"{PRIVATE_START}\nunclosed\n", "README.md")
 
     def test_tree_archive_and_private_denylist_findings(self):
         with tempfile.TemporaryDirectory() as directory:

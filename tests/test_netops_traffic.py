@@ -595,11 +595,11 @@ class TrafficTransportTest(unittest.TestCase):
         lib = (ROOT / "netops-lib.sh").read_text()
         self.assertIn("snmp_cache_version()", lib)
         # Every SNMP entry point pays the blocked-v3 timeout otherwise, so all
-        # three carry the guard rather than only the ones used by one caller.
-        entry_points = [name for name in ("netops_snmp_get()", "netops_snmp_walk()", "netops_snmp_get_many()")
-                        if name in lib]
-        self.assertEqual(len(entry_points), 3)
-        self.assertEqual(lib.count('"$(snmp_cache_version "$ip")" != "v2c"'), 3)
+        # four carry the guard rather than only the ones used by one caller.
+        entry_points = [name for name in ("netops_snmp_get()", "netops_snmp_walk()", "netops_snmp_get_many()",
+                                          "netops_snmp_bulkwalk()") if name in lib]
+        self.assertEqual(len(entry_points), 4)
+        self.assertEqual(lib.count('"$(snmp_cache_version "$ip")" != "v2c"'), 4)
 
     def test_the_counter_read_asks_for_every_interface_field_in_one_request(self):
         control = (ROOT / "netops-control").read_text()

@@ -6,28 +6,29 @@ _netrune_complete() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     domain="${COMP_WORDS[1]}"
     if (( COMP_CWORD == 1 )); then
-        COMPREPLY=( $(compgen -W 'inventory ap topology memory health backup device vault vlan lookup diagnose workflow commands db ask init profile config secrets ingest plugin setup traffic path excel support' -- "$cur") )
+        COMPREPLY=( $(compgen -W 'inventory ap topology memory health backup device vault vlan lookup diagnose workflow commands db ask check init profile config secrets ingest plugin setup traffic path excel support' -- "$cur") )
         return
     fi
     if (( COMP_CWORD == 2 )); then
         case "$domain" in
             inventory) COMPREPLY=( $(compgen -W 'scan list details activity forget merge merges unmerge import-flat export-flat' -- "$cur") ) ;;
-            ap) COMPREPLY=( $(compgen -W 'scan list unjoined show on-switch moves timeline merge merges unmerge' -- "$cur") ) ;;
+            ap) COMPREPLY=( $(compgen -W 'scan controller neighbors list unjoined show on-switch moves timeline merge merges unmerge' -- "$cur") ) ;;
             topology) COMPREPLY=( $(compgen -W 'scan stp links show changes timeline' -- "$cur") ) ;;
             memory) COMPREPLY=( $(compgen -W 'refresh switch device ip mac port timeline explain export prune' -- "$cur") ) ;;
-            health) COMPREPLY=( $(compgen -W 'check status offline attention timeline' -- "$cur") ) ;;
+            health) COMPREPLY=( $(compgen -W 'check status offline review attention timeline' -- "$cur") ) ;;
             backup) COMPREPLY=( $(compgen -W 'run history diff verify' -- "$cur") ) ;;
             device) COMPREPLY=( $(compgen -W 'ssh show config inventory support identity trust-status trust-scan trust-enroll trust-forget' -- "$cur") ) ;;
             vault) COMPREPLY=( $(compgen -W 'status set migrate unlock lock' -- "$cur") ) ;;
             vlan) COMPREPLY=( $(compgen -W 'locate propagation set' -- "$cur") ) ;;
             lookup) COMPREPLY=( $(compgen -W 'core mac mac-online mac-registry mac-all mac-inspect mac-locate mac-profile mac-history mac-vendor' -- "$cur") ) ;;
             diagnose) COMPREPLY=( $(compgen -W 'latency core-ping speed throughput port-health cable doctor filtering interface' -- "$cur") ) ;;
-            workflow) COMPREPLY=( $(compgen -W 'morning-check refresh-inventory backup-online site-health ap-audit' -- "$cur") ) ;;
+            workflow) COMPREPLY=( $(compgen -W 'morning-check refresh-inventory backup-online site-health ap-audit weekly schedule' -- "$cur") ) ;;
             commands) COMPREPLY=( $(compgen -W 'list show run' -- "$cur") ) ;;
-            db) COMPREPLY=( $(compgen -W 'migrate status import-flat export-flat path integrity repair history prune vacuum' -- "$cur") ) ;;
+            db) COMPREPLY=( $(compgen -W 'migrate status import-flat export-flat path coherence integrity repair history prune vacuum' -- "$cur") ) ;;
             ask) COMPREPLY=( $(compgen -W 'chat question patterns aliases alias' -- "$cur") ) ;;
+            check) COMPREPLY=( $(compgen -W 'morning weekly weekly-resume attention pulse down alive status uptime links link-changes neighbours uplinks topology-refresh aps-on ap-ports ap-moves ap-history ap-unjoined ap-refresh find find-mac find-ip mac-history ip-history port-history vlan-where vlan-trace path port-health cable latency internet speed device same support merges hardware db db-fix db-deep db-size backups config-diff backup-all doctor vault' -- "$cur") ) ;;
             init) COMPREPLY=( $(compgen -W 'run' -- "$cur") ) ;;
-            profile) COMPREPLY=( $(compgen -W 'list show create use paths migrate-legacy' -- "$cur") ) ;;
+            profile) COMPREPLY=( $(compgen -W 'list show create use paths export pack import migrate-legacy' -- "$cur") ) ;;
             config) COMPREPLY=( $(compgen -W 'show get set unset validate paths' -- "$cur") ) ;;
             secrets) COMPREPLY=( $(compgen -W 'list status set delete import-ssh' -- "$cur") ) ;;
             ingest) COMPREPLY=( $(compgen -W 'channels validate run history rejects observations' -- "$cur") ) ;;
@@ -35,7 +36,7 @@ _netrune_complete() {
             setup) COMPREPLY=( $(compgen -W 'poller local' -- "$cur") ) ;;
             traffic) COMPREPLY=( $(compgen -W 'list watch ping subscribe name push dashboard health unwatch pause resume interval status interfaces poll daemon exporter backfill stack export pull remote verify report show' -- "$cur") ) ;;
             path) COMPREPLY=( $(compgen -W 'inspect findings history show' -- "$cur") ) ;;
-            excel) COMPREPLY=( $(compgen -W 'inspect sync export' -- "$cur") ) ;;
+            excel) COMPREPLY=( $(compgen -W 'inspect sync export report' -- "$cur") ) ;;
             support) COMPREPLY=( $(compgen -W 'bundle' -- "$cur") ) ;;
         esac
     fi

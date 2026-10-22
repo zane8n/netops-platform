@@ -322,7 +322,7 @@ class InventoryCommandsMixin:
                 resolved, choices = self.resolve_device_record(pattern)
                 detail_target = str(resolved.get("ip") or pattern) if resolved and len(choices) == 1 else pattern
                 return self.run_subprocess(self.legacy_cmd("netrune-discovery","--details",detail_target),opts)
-            rows=self.inventory_rows(pattern,opts); self.emit({"ok":True,"rows":rows,"count":len(rows)},opts,self.render_table(rows,["kind","ip","name","platform","status","last_seen"])); return SUCCESS
+            rows=self.inventory_rows(pattern,opts); self.emit({"ok":True,"rows":rows,"count":len(rows)},opts,self.render_table(rows,["kind","ip","name","manufacturer","model","platform","status","last_seen"])); return SUCCESS
         return self.unknown_action("inventory", verb, opts)
 
     def ping(self,target:str,timeout:int)->bool:

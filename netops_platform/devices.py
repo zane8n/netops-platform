@@ -46,6 +46,56 @@ def format_mac(value: Any, style: str) -> str:
     return clean
 
 
+# A model number names its maker outright, so it outranks every free-text
+# label. A stored platform label is netrune's own earlier guess, and fed back
+# in as evidence it would keep a wrong guess alive on every later scan.
+_MODEL_MANUFACTURERS: Tuple[Tuple[str, str], ...] = (
+    ("Cisco", r"^(?:WS-C\d|C\d{4}|CW9\d{3}|IE-?\d{4}|ISR\d|ASR\d|N[3579]K-|AIR-|CBS\d{3}|SG\d{3})"),
+    ("Aruba", r"^(?:J[A-Z]?\d{3,4}[A-Z]{1,2}\b|\d{4}R?zl2\b|\d{4}[A-Z]{0,2}-|I?AP-\d{3}|CX\s?\d{4})"),
+    ("Ruckus", r"^(?:ICX\s?\d|[RTHE]\d{3}[A-Z]?\b|ZF\d)"),
+    ("Ubiquiti", r"^(?:U(?:AP|SW)-|Rocket\b|NanoStation|PowerBeam|LiteBeam)"),
+)
+_MARKER_MANUFACTURERS: Tuple[Tuple[str, str], ...] = (
+    ("Cisco", r"\b(?:CISCO|CATALYST|NEXUS|MERAKI)\b"),
+    ("Aruba", r"\b(?:ARUBA|PROCURVE|HEWLETT[ -]?PACKARD|HPE?)\b"),
+    ("Ruckus", r"\b(?:RUCKUS|BROCADE|FOUNDRY|FASTIRON|ZONEFLEX|SMARTZONE|UNLEASHED)\b"),
+    ("Ubiquiti", r"\b(?:UBIQUITI|UNIFI|UBNT|AIRMAX)\b"),
+)
+_FAMILY_MANUFACTURERS = {"cisco": "Cisco", "aruba": "Aruba", "ruckus": "Ruckus"}
+
+
+def model_manufacturer(model: Any) -> str:
+    """The maker a model number belongs to, or "" when it names none."""
+    text = str(model or "").strip()
+    for maker, pattern in _MODEL_MANUFACTURERS:
+        if re.match(pattern, text, re.I):
+            return maker
+    return ""
+
+
+def family_manufacturer(family: Any) -> str:
+    return _FAMILY_MANUFACTURERS.get(str(family or "").split("-", 1)[0].lower(), "")
+
+
+def device_manufacturer(*, platform: Any = "", model: Any = "", sysdescr: Any = "", family: Any = "") -> str:
+    """Who made the hardware -- Cisco, Aruba, Ruckus, Ubiquiti -- or "".
+
+    Strongest evidence first: the model number, then a model number leading
+    the platform text (an AP's platform is often just its model), then the
+    earliest maker word in sysDescr or the platform label, then the detected
+    driver family.
+    """
+    maker = model_manufacturer(model) or model_manufacturer(platform)
+    if maker:
+        return maker
+    for text in (str(sysdescr or ""), str(platform or "")):
+        hits = [(found.start(), maker) for maker, pattern in _MARKER_MANUFACTURERS
+                for found in [re.search(pattern, text, re.I)] if found]
+        if hits:
+            return min(hits)[1]
+    return family_manufacturer(family)
+
+
 @dataclass(frozen=True)
 class DeviceDetection:
     family: str
@@ -376,6 +426,7 @@ class DeviceDriverRegistry:
         sysdescr: Any = "",
         hostname: Any = "",
         device_kind: Any = "",
+        _realigning: bool = False,
     ) -> DeviceDetection:
         evidence_fields = {
             "platform": str(platform or ""),
@@ -426,11 +477,25 @@ class DeviceDriverRegistry:
             family, confidence = "aruba-aos-switch", 88
         elif matched(r"\b(?:NX-OS|NEXUS|N[3579]K|CISCO NEXUS)\b", "Cisco NX-OS platform marker"):
             family, confidence = "cisco-nxos", 98
-        elif matched(r"\b(?:CISCO|IOS(?:-XE)?|CATALYST|WS-C\d|C\d{4})\b", "Cisco IOS platform marker"):
+        elif matched(r"\b(?:CISCO|IOS(?:-XE)?|CATALYST|WS-C\d|C\d{4}[A-Z]{0,3})\b", "Cisco IOS platform marker"):
             family, confidence = "cisco-ios", 95
         else:
             family, confidence = "unknown", 0
             reasons.append("no registered family signature matched")
+        # The platform label is usually netrune's own earlier verdict, so when
+        # it (or the hostname) names a different maker than the model number
+        # does, the model wins: a C9200L once mislabelled "Ruckus FastIron"
+        # otherwise stayed Ruckus on every later scan and got Ruckus commands.
+        maker = model_manufacturer(model)
+        if not (_realigning or external_matches) and maker and family_manufacturer(family) not in {"", maker}:
+            # The bare maker name stands in for the label, so a model number
+            # no family signature knows by itself (2930F) still lands on it.
+            # The hostname is left out too: a switch named after the vendor
+            # it replaced is the same kind of stale label.
+            redetected = self.detect(platform=maker, model=model, sysdescr=sysdescr, device_kind=device_kind, _realigning=True)
+            if family_manufacturer(redetected.family) == maker:
+                note = f"model {evidence_fields['model']} is {maker}; overrode the {family} reading of its labels"
+                return replace(redetected, reasons=(note,) + redetected.reasons)
         driver = self.get(family)
         return DeviceDetection(
             family=driver.family,
@@ -912,3 +977,30 @@ if __name__ == "__main__":
         with open(os.devnull, "w", encoding="ascii") as sink:
             os.dup2(sink.fileno(), sys.stdout.fileno())
         raise SystemExit(0)
+
+
+# --------------------------------------------------------------------------
+# What kind of box a neighbour record describes. Shared by the AP scans, the
+# coherence checks, and the reports, so all of them draw the line in one place.
+
+_SWITCH_MODEL = re.compile(r"\b(?:C9[2-5]\d{2}[A-Z]*|WS-C\d|C1000|C9500|IE-\d{4}|2930[FM]|2540|3810M|5412|6300|ICX\d)", re.IGNORECASE)
+_AP_MODEL = re.compile(
+    r"\b(CW9\d{3}[A-Z]*(?:-[A-Z]+)?|C9\d{3}[A-Z]*(?:-[A-Z]+)?|AIR-[A-Z0-9-]+|UAP-[A-Za-z0-9-]+|U6-[A-Za-z]+|"
+    r"Rocket\s+Prism\s+\w+)\b|\bRuckus\s+([RTH]\d{3}[A-Z]?)\b", re.IGNORECASE)
+
+
+def is_switch_row(row: Mapping[str, Any]) -> bool:
+    """An AP-inventory row that is really a switch seen as a neighbour."""
+    text = f"{row.get('platform') or ''} {row.get('model') or ''}"
+    return bool(re.search(r"\bswitch\b", text, re.IGNORECASE) or _SWITCH_MODEL.search(text))
+
+
+def ap_model(platform: Any, model: Any = "") -> str:
+    """The AP's model number from whatever the controller or LLDP reported, or ""."""
+    for text in (model, platform):
+        match = _AP_MODEL.search(str(text or ""))
+        if match:
+            found = match.group(1) or match.group(2)
+            if not _SWITCH_MODEL.match(found):
+                return found.upper() if not found.lower().startswith("rocket") else " ".join(found.split())
+    return ""

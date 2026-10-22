@@ -246,6 +246,162 @@ class ExporterEndpointTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body.strip(), "ok")
 
+    def test_a_scrape_behind_a_slow_render_is_told_busy_rather_than_queued_forever(self):
+        # A thread per scrape, each holding a connection while it waited, once
+        # grew a week-old exporter past 11 GB and out of file descriptors.
+        lock = self.server.RequestHandlerClass.render_lock
+        lock.acquire()
+        try:
+            with mock.patch("netops_platform.traffic_exporter.RENDER_WAIT_SECONDS", 0.05):
+                status, _, body = self.get("/metrics")
+        finally:
+            lock.release()
+        self.assertEqual(status, 503)
+        self.assertIn("busy", body)
+        self.assertEqual(self.get("/metrics")[0], 200)
+
+
+class NewestSampleSelectionTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        base = Path(self.temp.name)
+        self.env = mock.patch.dict(os.environ, {
+            "NETOPS_CONFIG_DIR": str(base / "config"),
+            "NETOPS_CACHE_DIR": str(base / "cache"),
+            "NETOPS_SQLITE_DB": str(base / "cache" / "netops.sqlite3"),
+            "NETOPS_PROGRESS": "0",
+        }, clear=False)
+        self.env.start()
+        self.app = netops.App(ROOT)
+        self.exporter = MetricsExporter(self.app.traffic)
+        self.probe = self.app.traffic.add_watch("icmp", target="198.51.100.20", interval_seconds=30)["watch_id"]
+        self.switch = self.app.traffic.add_watch("icmp", target="198.51.100.21", interval_seconds=30)["watch_id"]
+
+    def tearDown(self):
+        self.env.stop()
+        self.temp.cleanup()
+
+    def sample(self, watch_id, metric, observed_at, value=None, collector="laptop", raw_json=None):
+        self.app.state.execute(
+            "INSERT INTO traffic_samples(watch_id,observed_at,metric,value,collector,raw_json)"
+            " VALUES(?,?,?,?,?,?)", (watch_id, observed_at, metric, value, collector, raw_json))
+
+    def test_probe_results_are_the_newest_per_watch_metric_and_collector(self):
+        self.sample(self.probe, "rtt_ms", 300, 9.0)
+        self.sample(self.probe, "rtt_ms", 100, 1.0)
+        self.sample(self.probe, "rtt_ms", 200, 5.0, collector="poller")
+        self.sample(self.probe, "reachable", 150, 1)
+        self.sample(self.switch, "packet_loss_pct", 120, 25.0)
+        self.sample(self.switch, "in_bps", 999, 1e6)  # not a probe metric
+        self.assertEqual(self.exporter.latest_icmp(), {
+            self.probe: {
+                "laptop": {"rtt_ms": {"value": 9.0, "observed_at": 300},
+                           "reachable": {"value": 1.0, "observed_at": 150}},
+                "poller": {"rtt_ms": {"value": 5.0, "observed_at": 200}},
+            },
+            self.switch: {"laptop": {"packet_loss_pct": {"value": 25.0, "observed_at": 120}}},
+        })
+
+    def test_device_identity_is_the_newest_reading_that_parses_from_any_collector(self):
+        self.sample(self.probe, "device_info", 100, raw_json=json.dumps({"model": "old"}))
+        self.sample(self.probe, "device_info", 200, raw_json=json.dumps({"model": "newer"}), collector="poller")
+        self.sample(self.probe, "device_info", 300, raw_json="{not json")
+        self.sample(self.probe, "device_info", 400, raw_json="")
+        self.sample(self.switch, "device_info", 100, raw_json=json.dumps(["not", "a", "dict"]))
+        self.assertEqual(self.exporter.latest_device_info(), {self.probe: {"model": "newer"}})
+
+    def test_an_empty_store_has_nothing_to_report(self):
+        self.assertEqual(self.exporter.latest_icmp(), {})
+        self.assertEqual(self.exporter.latest_device_info(), {})
+
+
+class LegacyDuplicateSampleTest(unittest.TestCase):
+    def test_a_store_from_before_the_identity_index_opens_with_duplicates_collapsed(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as temp:
+            db = Path(temp) / "cache" / "netops.sqlite3"
+            db.parent.mkdir(parents=True)
+            con = sqlite3.connect(db)
+            con.execute(
+                "CREATE TABLE traffic_samples(id INTEGER PRIMARY KEY AUTOINCREMENT, watch_id TEXT NOT NULL,"
+                " observed_at INTEGER NOT NULL, metric TEXT NOT NULL, value REAL, unit TEXT, status TEXT,"
+                " collector TEXT NOT NULL DEFAULT 'local', raw_json TEXT)")
+            con.executemany(
+                "INSERT INTO traffic_samples(watch_id,observed_at,metric,value,collector) VALUES(?,?,?,?,?)",
+                [("wch-a", 100, "rtt_ms", 1.0, "laptop"), ("wch-a", 100, "rtt_ms", 2.0, "laptop"),
+                 ("wch-a", 160, "rtt_ms", 3.0, "laptop")])
+            con.commit()
+            con.close()
+            with mock.patch.dict(os.environ, {
+                "NETOPS_CONFIG_DIR": str(Path(temp) / "config"),
+                "NETOPS_CACHE_DIR": str(Path(temp) / "cache"),
+                "NETOPS_SQLITE_DB": str(db),
+                "NETOPS_PROGRESS": "0",
+            }, clear=False):
+                app = netops.App(ROOT)
+                rows = app.state.rows("SELECT observed_at,value FROM traffic_samples ORDER BY observed_at")
+                index = app.state.one("SELECT name FROM sqlite_master WHERE name='idx_traffic_samples_identity'")
+        # The later write for the same instant is the correction that survives.
+        self.assertEqual(rows, [{"observed_at": 100, "value": 2.0}, {"observed_at": 160, "value": 3.0}])
+        self.assertIsNotNone(index)
+
+
+class StaleCollectorRecordTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        base = Path(self.temp.name)
+        self.env = mock.patch.dict(os.environ, {
+            "NETOPS_CONFIG_DIR": str(base / "config"),
+            "NETOPS_CACHE_DIR": str(base / "cache"),
+            "NETOPS_SQLITE_DB": str(base / "cache" / "netops.sqlite3"),
+            "NETOPS_PROGRESS": "0",
+        }, clear=False)
+        self.env.start()
+        self.app = netops.App(ROOT)
+
+    def tearDown(self):
+        self.env.stop()
+        self.temp.cleanup()
+
+    def record(self, pid):
+        from netops_platform.traffic_cli import collector_pidfile
+        path = collector_pidfile(self.app)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"pid": pid, "collector": "laptop"}), encoding="utf-8")
+        return path
+
+    @unittest.skipUnless(Path("/proc/self").is_dir(), "needs /proc to tell processes apart")
+    def test_a_pid_now_owned_by_another_program_does_not_block_the_collector(self):
+        from netops_platform.traffic_cli import running_collector
+        path = self.record(os.getpid())  # alive, but the test runner, not a collector
+        self.assertEqual(running_collector(self.app), {})
+        self.assertFalse(path.exists())
+
+    @unittest.skipUnless(Path("/proc/self").is_dir(), "needs /proc to tell processes apart")
+    def test_a_pid_reused_as_a_thread_id_does_not_block_the_collector(self):
+        # After a reboot the recorded pid came back as a vmalert thread, and the
+        # collector refused to start thousands of times in a row.
+        import threading
+        from netops_platform.traffic_cli import running_collector
+        ready, done, tid = threading.Event(), threading.Event(), []
+        thread = threading.Thread(target=lambda: (tid.append(threading.get_native_id()), ready.set(), done.wait()))
+        thread.start()
+        try:
+            ready.wait()
+            self.record(tid[0])
+            with mock.patch("pathlib.Path.read_bytes", return_value=b"python3\0netrune\0traffic\0daemon\0"):
+                self.assertEqual(running_collector(self.app), {})
+        finally:
+            done.set()
+            thread.join()
+
+    @unittest.skipUnless(Path("/proc/self").is_dir(), "needs /proc to tell processes apart")
+    def test_a_live_collector_is_still_recognised(self):
+        from netops_platform.traffic_cli import running_collector
+        self.record(os.getpid())
+        with mock.patch("pathlib.Path.read_bytes", return_value=b"python3\0netrune\0traffic\0daemon\0"):
+            self.assertEqual(running_collector(self.app).get("pid"), os.getpid())
+
 
 class BindParsingTest(unittest.TestCase):
     def test_bind_forms_an_operator_would_type(self):

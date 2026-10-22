@@ -53,6 +53,9 @@ SQLite lifecycle and flat-file compatibility shortcuts.
 .B ask
 Deterministic state retrieval and registry-backed command planning from natural language.
 .TP
+.B check
+Memorable names for everyday checks, grouped by the question they answer.
+.TP
 .B init
 Initialize an isolated profile and check host capabilities.
 .TP
@@ -87,6 +90,9 @@ Correlate your own Excel workbooks with Netrune's inventory, and build tracker w
 Create privacy-redacted diagnostics for support and bug reports.
 .SH REGISTERED COMMANDS
 .TP
+.B ap-controller
+netrune ap controller '<target>' - Show what the wireless controllers last reported per AP: model, serial, firmware, connection status, uptime, and poll time.
+.TP
 .B ap-list
 netrune ap list '<target>' - Search current reconciled AP inventory.
 .TP
@@ -98,6 +104,9 @@ netrune ap merges - List active manual AP merges and their chronology.
 .TP
 .B ap-moves
 netrune ap moves - Show recorded AP attachment changes newest first.
+.TP
+.B ap-neighbors
+netrune ap neighbors --all - Read switches' CDP/LLDP neighbour tables over SSH and record which port each AP is on.
 .TP
 .B ap-on-switch
 netrune ap on-switch '<target>' - Show canonical APs attached to a switch or site.
@@ -144,6 +153,150 @@ netrune backup run '<target>' - Online-only changed-only config backup.
 .B backup-verify
 netrune backup verify - Review recorded backup checksums, paths, and statuses.
 .TP
+.B check-alive
+netrune check alive '<device[,...]>' - Ping just these devices now and say which answer.
+.TP
+.B check-ap-history
+netrune check ap-history '<ap>' - Where one AP has been attached over time.
+.TP
+.B check-ap-moves
+netrune check ap-moves - APs that changed switch or port, newest first.
+.TP
+.B check-ap-ports
+netrune check ap-ports '<switch[,...]>' - Live: read CDP/LLDP and the MAC table to confirm which port each AP is on.
+.TP
+.B check-ap-refresh
+netrune check ap-refresh - Re-read APs from the controllers and switches.
+.TP
+.B check-ap-unjoined
+netrune check ap-unjoined - APs the controller lists as not joined.
+.TP
+.B check-aps-on
+netrune check aps-on '<switch>' - Which APs hang off a switch, and on which ports.
+.TP
+.B check-attention
+netrune check attention - Everything that wants a look: outages, flapping, link changes, AP moves, failed backups, merge candidates.
+.TP
+.B check-backup-all
+netrune check backup-all - Back up every online device whose config changed.
+.TP
+.B check-backups
+netrune check backups '<device>' - Backup history for a device.
+.TP
+.B check-cable
+netrune check cable '<switch>' '<port>' - The last recorded cable (TDR) result for a port; starts no test.
+.TP
+.B check-config-diff
+netrune check config-diff '<device>' - What changed between a device's last two different configs.
+.TP
+.B check-db
+netrune check db - Quick database health: storage, references, labels, identities, merges, caches, stuck jobs.
+.TP
+.B check-db-deep
+netrune check db-deep - Full SQLite integrity check (slower).
+.TP
+.B check-db-fix
+netrune check db-fix - The same, and fix what has one right answer (re-apply merges, relabel, drop switches filed as APs).
+.TP
+.B check-db-size
+netrune check db-size - Where the database is, its size, schema, and record counts.
+.TP
+.B check-device
+netrune check device '<name|ip>' - Everything Netrune knows about one device: identity, history, relationships.
+.TP
+.B check-doctor
+netrune check doctor - Is this machine set up right: tools, routes, trust, core settings.
+.TP
+.B check-down
+netrune check down - What is down right now, from the last pulse.
+.TP
+.B check-find
+netrune check find - Find a switch or AP by any part of its name, IP, MAC, serial, or model.
+.TP
+.B check-find-ip
+netrune check find-ip '<ip|mac>' - Ask the core switch's ARP/MAC tables who an IP or MAC is.
+.TP
+.B check-find-mac
+netrune check find-mac '<mac>' - Live: which switch port a MAC is on now (access port, not the uplinks it crosses).
+.TP
+.B check-hardware
+netrune check hardware '<device>' - Live: re-read model, Motherboard serial, and base MAC over SSH.
+.TP
+.B check-internet
+netrune check internet - Is the Internet reachable and unfiltered: DNS, TLS, and filtering checks.
+.TP
+.B check-ip-history
+netrune check ip-history '<ip>' - Who has held an IP over time.
+.TP
+.B check-latency
+netrune check latency '<target>' - Round-trip time, jitter, and loss to a target.
+.TP
+.B check-link-changes
+netrune check link-changes - Links that appeared or disappeared, newest first.
+.TP
+.B check-links
+netrune check links - Quick: switch-to-switch links Netrune knows, with how sure it is of each.
+.TP
+.B check-mac-history
+netrune check mac-history '<mac>' - Every port and identity a MAC has had, newest first.
+.TP
+.B check-merges
+netrune check merges - Manual device merges in force.
+.TP
+.B check-morning
+netrune check morning - The daily routine: reachability, topology, realign memory, database health, filtering, the attention queue.
+.TP
+.B check-neighbours
+netrune check neighbours - What one switch sees on each port (LLDP/CDP).
+.TP
+.B check-path
+netrune check path '<endpoint>' '<vlan>' - The L2/L3 path to an endpoint on a VLAN, hop by hop, with findings.
+.TP
+.B check-port-health
+netrune check port-health '<switch>' '<port>' - Live: speed/duplex negotiation and error-counter growth on one port.
+.TP
+.B check-port-history
+netrune check port-history '<switch>' '<port>' - What has been plugged into one switch port over time.
+.TP
+.B check-pulse
+netrune check pulse - Ping every known switch and AP (or one target) and record who is up or down now.
+.TP
+.B check-same
+netrune check same '<device>' '<device>' - Are these two records the same switch? Evidence and conflicts.
+.TP
+.B check-speed
+netrune check speed - This machine's Internet speed.
+.TP
+.B check-status
+netrune check status - Up/down state, flaps, and outage start for everything.
+.TP
+.B check-support
+netrune check support '<device>' - Manufacturer, model, driver, and what Netrune can safely do on it.
+.TP
+.B check-topology-refresh
+netrune check topology-refresh - Re-read LLDP/CDP neighbours from every switch.
+.TP
+.B check-uplinks
+netrune check uplinks '<switch>' - Live spanning tree on a switch: root, blocked ports, which ports are uplinks.
+.TP
+.B check-uptime
+netrune check uptime - Up/down changes, newest first: when things went down and came back.
+.TP
+.B check-vault
+netrune check vault - Is the SSH vault locked or open, and until when.
+.TP
+.B check-vlan-trace
+netrune check vlan-trace '<switch>' '<vlan>' - Live: follow a VLAN switch by switch from a root and show where it stops.
+.TP
+.B check-vlan-where
+netrune check vlan-where '<switch>' '<vlan>' - Live: where a VLAN exists, starting from a switch.
+.TP
+.B check-weekly
+netrune check weekly - Every long scan, SSH reads of every switch (hardware, AP ports, spanning tree), backups.
+.TP
+.B check-weekly-resume
+netrune check weekly-resume - Run only the weekly SSH steps that waited for the vault.
+.TP
 .B commands-list
 netrune commands list - List the structured command registry and safety metadata.
 .TP
@@ -171,6 +324,9 @@ netrune config unset '<key>' - Remove one profile override.
 .B config-validate
 netrune config validate - Validate effective settings and legacy-secret state.
 .TP
+.B db-coherence
+netrune db coherence - Fast storage health and cross-table coherence checks; --realign also refreshes memory and fixes model-contradicted platform labels.
+.TP
 .B db-history
 netrune db history - Show recorded command executions with exit codes.
 .TP
@@ -196,7 +352,7 @@ netrune db status - Show database paths, schema version, file sizes, and record 
 netrune db vacuum - Compact the SQLite database.
 .TP
 .B device-config
-netrune device config '<target>' '<commands>' - Preview/confirmed config command wrapper, one device or a batch (comma list, --target, or --file; --commands-file, --skip-offline, --cisco/--aruba/--ruckus). Confirmed execution stays in the CLI.
+netrune device config '<target>' '<commands>' - Preview/confirmed config command wrapper, one device or a batch (comma list, --target, --file, or --all for every inventory device; --commands-file, --skip-offline, --cisco/--aruba/--ruckus). Confirmed execution stays in the CLI.
 .TP
 .B device-identity
 netrune device identity '<target>' '<target2>' - Explain confidence and conflicts between two switch identity records.
@@ -261,6 +417,9 @@ netrune excel export '<workbook>' - Write a new inventory, summary, and migratio
 .B excel-inspect
 netrune excel inspect '<workbook>' - Match a workbook's rows to Netrune switches and report what is out of date, without writing.
 .TP
+.B excel-report
+netrune excel report '<workbook>' - Write active AP/switch, transition, and switch/AP history reports from Netrune's memory into one workbook.
+.TP
 .B excel-sync
 netrune excel sync '<workbook>' --dry-run - Fill and update a workbook's switch rows from Netrune's inventory. Apply explicitly in the CLI with --confirm.
 .TP
@@ -272,6 +431,9 @@ netrune health check '<target>' - Ping known/supplied devices and APs, then refr
 .TP
 .B health-offline
 netrune health offline '<target>' - List current offline entities, optionally filtered by target.
+.TP
+.B health-review
+netrune health review - Go through every decision waiting for you (replaced switches/APs, rename clusters, workbook questions), one yes/no or pick at a time.
 .TP
 .B health-status
 netrune health status '<target>' - Read current canonical health, optionally filtered by target.
@@ -423,11 +585,20 @@ netrune plugin list - Discover plugins without importing disabled code.
 .B profile-create
 netrune profile create '<name>' - Create a neutral isolated profile.
 .TP
+.B profile-export
+netrune profile export '<bundle>' - Write the active profile (configuration, caches; optionally memory and encrypted SNMP communities) to one file for another machine.
+.TP
+.B profile-import
+netrune profile import '<bundle>' - Restore a profile bundle from another machine and make it the active profile.
+.TP
 .B profile-list
 netrune profile list - List isolated Netrune profiles.
 .TP
 .B profile-migrate-legacy
 netrune profile migrate-legacy '<name>' - Copy legacy netsnmp state without deleting the source.
+.TP
+.B profile-pack
+netrune profile pack --confirm - Write configuration, caches, memory, and SNMP communities to one passphrase-encrypted file; preview without --confirm.
 .TP
 .B profile-paths
 netrune profile paths - Show active profile XDG paths.
@@ -586,13 +757,19 @@ netrune workflow ap-audit - Refresh AP records and show AP moves.
 netrune workflow backup-online '<target>' - Changed-only backups for online devices.
 .TP
 .B workflow-morning-check
-netrune workflow morning-check - Health, topology refresh, memory, filtering, and attention summary.
+netrune workflow morning-check - Health, topology refresh, memory realignment, database coherence, filtering, and attention summary.
 .TP
 .B workflow-refresh-inventory
 netrune workflow refresh-inventory - Health, AP, topology, and memory refresh.
 .TP
+.B workflow-schedule
+netrune workflow schedule weekly - Install a persistent systemd user timer for the weekly workflow.
+.TP
 .B workflow-site-health
 netrune workflow site-health '<target>' - Latency and filtering checks for a target/site.
+.TP
+.B workflow-weekly
+netrune workflow weekly - Every scan, SSH hardware/neighbour/STP reads of every switch, backups, realignment, and attention.
 .SH FILES
 Configuration follows XDG base directories and is isolated under profiles/PROFILE.
 .SH SECURITY

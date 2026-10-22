@@ -215,7 +215,7 @@ class NetOpsV8Test(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(rc, netops.SUCCESS)
         self.assertEqual([row["target"] for row in payload["devices"]], ["SW1"])
-        self.assertEqual(payload["skipped"], [{"target": "SW2", "reason": "offline: no ping reply from 192.0.2.2"}])
+        self.assertEqual(payload["skipped"], [{"target": "SW2", "name": "SW2", "reason": "offline: no ping reply from 192.0.2.2"}])
         capture.assert_not_called()
 
     def test_device_config_skip_offline_never_connects_to_an_offline_device(self):
@@ -301,7 +301,7 @@ class NetOpsV8Test(unittest.TestCase):
         self.assertEqual(rc, netops.SUCCESS)
         self.assertEqual([row["target"] for row in payload["devices"]], ["SW1"])
         self.assertEqual([row["target"] for row in payload["filtered"]], ["ARUBA1", "ICX1"])
-        self.assertIn("aruba-aos-switch is not cisco", payload["filtered"][0]["reason"])
+        self.assertIn("Aruba is not cisco", payload["filtered"][0]["reason"])
 
     def test_device_config_vendor_flags_combine(self):
         self.add_mixed_vendor_devices()
@@ -311,6 +311,107 @@ class NetOpsV8Test(unittest.TestCase):
         self.assertEqual(rc, netops.SUCCESS)
         self.assertEqual([row["target"] for row in payload["devices"]], ["SW1", "ARUBA1"])
         self.assertEqual([row["target"] for row in payload["filtered"]], ["ICX1"])
+
+    def test_device_config_without_a_target_requires_all(self):
+        self.add_mixed_vendor_devices()
+        with mock.patch("sys.stdout", new_callable=io.StringIO), mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            rc = self.app.cmd_device(["config", "ntp server 198.51.100.5"], netops.GlobalOptions(dry_run=True))
+        self.assertEqual(rc, netops.USAGE)
+        self.assertIn("add --all", err.getvalue())
+        # A first argument that names no device is a command, not a typo'd
+        # target worth resolving further.
+        with mock.patch("sys.stdout", new_callable=io.StringIO), mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            rc = self.app.cmd_device(["config", "interface Gi1/0/7", "description AP", "--cisco"], netops.GlobalOptions(dry_run=True))
+        self.assertEqual(rc, netops.VALIDATION)
+        self.assertIn("No inventory device matches 'interface Gi1/0/7'", err.getvalue())
+        self.assertIn("add --all", err.getvalue())
+
+    def test_device_config_all_runs_every_device_and_vendor_flags_narrow_it(self):
+        self.add_mixed_vendor_devices()
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.cmd_device(["config", "description AP", "--skip-unverified"], netops.GlobalOptions(dry_run=True, json=True, all=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertEqual(payload["commands"], ["description AP"])
+        listed = [row["ip"] for row in payload["devices"]] + [row["target"] for row in payload["skipped"]]
+        self.assertEqual(sorted(listed), ["192.0.2.1", "192.0.2.2", "192.0.2.3"])
+        self.assertEqual({row["name"]: row["manufacturer"] for row in payload["devices"]}["SW1"], "Cisco")
+
+        # A C9200L that an earlier scan mislabelled is still Cisco to --cisco.
+        self.add_device(ip="192.0.2.4", hostname="SW4", platform="Ruckus FastIron", model="C9200L-24P-4G", serial="SER-SW4")
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.cmd_device(["config", "description AP", "--cisco"], netops.GlobalOptions(dry_run=True, json=True, all=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertEqual(sorted(row["name"] for row in payload["devices"]), ["SW1", "SW4"])
+        self.assertEqual(sorted(row["name"] for row in payload["filtered"]), ["ARUBA1", "ICX1"])
+
+    def test_device_config_all_does_not_combine_with_a_device_list(self):
+        self.add_device()
+        devices = self.base / "devices.txt"
+        devices.write_text("SW1\n", encoding="utf-8")
+        with mock.patch("sys.stdout", new_callable=io.StringIO), mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            rc = self.app.cmd_device(["config", "--file", str(devices), "description AP"], netops.GlobalOptions(dry_run=True, all=True))
+        self.assertEqual(rc, netops.VALIDATION)
+        self.assertIn("--all already means every inventory device", err.getvalue())
+
+    def test_db_coherence_flags_and_realigns_a_model_contradicted_platform_label(self):
+        self.add_device(ip="192.0.2.1", hostname="SW1", serial="SER-SW1")
+        self.add_device(ip="192.0.2.4", hostname="SW4", platform="Ruckus FastIron", model="C9200L-24P-4G", serial="SER-SW4")
+        self.app.state.export_flat_files()
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.dispatch(["db", "coherence", "--json"])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.PARTIAL)
+        labels = next(check for check in payload["checks"] if check["check"] == "platform_labels")
+        self.assertEqual(labels["status"], "WARN")
+        self.assertIn("'Ruckus FastIron' -> 'Cisco IOS'", labels["items"][0])
+        # Reporting alone changes nothing.
+        self.assertEqual(self.app.state.one("SELECT platform FROM devices WHERE ip='192.0.2.4'")["platform"], "Ruckus FastIron")
+
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            rc = self.app.dispatch(["db", "coherence", "--realign", "--json"])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, netops.SUCCESS, payload)
+        statuses = {check["check"]: check["status"] for check in payload["checks"]}
+        self.assertEqual(statuses["platform_labels"], "FIXED")
+        self.assertEqual(statuses["realign"], "PASS")
+        self.assertEqual(self.app.state.one("SELECT platform FROM devices WHERE ip='192.0.2.4'")["platform"], "Cisco IOS")
+        # The shell helpers read the flat cache, so the fix has to reach it
+        # too -- or the next import puts the wrong label back.
+        self.assertIn("192.0.2.4|SW4|Cisco IOS|", self.app.paths.devices_file.read_text(encoding="utf-8"))
+        changed = self.app.state.rows("SELECT previous_value,current_value FROM inventory_history WHERE field_name='platform'")
+        self.assertIn({"previous_value": "Ruckus FastIron", "current_value": "Cisco IOS"}, changed)
+
+    def test_db_coherence_realign_skips_reimporting_unchanged_caches(self):
+        self.add_device()
+        self.app.state.export_flat_files()
+        self.app.state.import_flat_files()
+        with mock.patch.object(self.app.state, "import_flat_files", wraps=self.app.state.import_flat_files) as imported, mock.patch("sys.stdout", new_callable=io.StringIO):
+            rc = self.app.dispatch(["db", "coherence", "--realign", "--json"])
+        self.assertEqual(rc, netops.SUCCESS)
+        imported.assert_not_called()
+        self.app.paths.devices_file.write_text(self.app.paths.devices_file.read_text(encoding="utf-8") + "192.0.2.9|SW9|Cisco IOS|C9300|S9||test|1700000000|ONLINE\n", encoding="utf-8")
+        with mock.patch.object(self.app.state, "import_flat_files", wraps=self.app.state.import_flat_files) as imported, mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.app.dispatch(["db", "coherence", "--realign", "--json"])
+        imported.assert_called_once()
+        self.assertTrue(self.app.state.one("SELECT ip FROM devices WHERE ip='192.0.2.9'"))
+
+    def test_db_coherence_dry_run_does_not_realign(self):
+        self.add_device(ip="192.0.2.4", hostname="SW4", platform="Ruckus FastIron", model="C9200L-24P-4G", serial="SER-SW4")
+        self.app.state.export_flat_files()
+        with mock.patch("sys.stdout", new_callable=io.StringIO):
+            rc = self.app.dispatch(["db", "coherence", "--realign", "--dry-run", "--json"])
+        self.assertEqual(rc, netops.PARTIAL)
+        self.assertEqual(self.app.state.one("SELECT platform FROM devices WHERE ip='192.0.2.4'")["platform"], "Ruckus FastIron")
+
+    def test_morning_check_realigns_in_place_of_a_separate_memory_refresh(self):
+        steps = self.app.workflow_steps("morning-check")
+        commands = [step[1:] for step in steps]
+        self.assertIn(["db", "coherence", "--realign"], commands)
+        self.assertNotIn(["memory", "refresh"], commands)
+        self.assertLess(commands.index(["topology", "scan"]), commands.index(["db", "coherence", "--realign"]))
+        self.assertLess(commands.index(["db", "coherence", "--realign"]), commands.index(["health", "attention"]))
 
     def test_device_config_vendor_filtered_devices_do_not_make_the_batch_partial(self):
         self.add_mixed_vendor_devices()

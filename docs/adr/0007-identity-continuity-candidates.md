@@ -2,6 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-10-05
+- Extended by: ADR 0008 (neighbour-port transitions are a structural signal)
+- Amended: 2026-10-22 (a re-keyed AP is linked, not proposed; see the end)
 
 ## Context
 
@@ -82,3 +84,34 @@ this feature existed. The manual merge commands remain the only path there.
   already had: preview/confirm, audit trail, reversible via `ap unmerge`.
 - No new table, no new auto-apply path, no change to how
   `identity_match_evidence` itself scores a pairwise match.
+
+## Amendment 2026-10-22: re-keyed APs are linked, not proposed
+
+> **Amended 2026-10-22.** "Detect, never auto-merge" still holds for every
+> replacement. It no longer covers a pair that is not a replacement at all.
+
+Once the controller polls reported every AP's true MAC, 22 APs changed
+identity key without changing hardware. A switch had recorded them under a
+port MAC one or two above the base MAC the controller reports, or under an
+address because no MAC was known. Each became a "disappeared, then
+appeared" pair, and continuity proposed it with confidence 100 as a swap
+that an operator would have to confirm 22 times.
+
+A continuity pair is now a **re-key** when the new side is an AP keyed by
+MAC and either both sides have the same real name and their MACs are within
+two of each other (same first five octets), or the old side was keyed by
+address or by name signature (the AP was known only by name before); or the
+old side has a default name (`AP<dotted MAC>`) that spells out the new side's
+MAC, meaning the AP was given a real name when it joined.
+`_continuity_candidate_rels` records a re-key as an `identity_rekey`
+relationship (confidence 100, re-affirmed while the new side is current)
+instead of an `identity_swap_candidate`. An existing candidate that is a
+re-key becomes the link, and the candidate lapses. The link is history in
+`relationship_events`; the AP's name-keyed history was continuous throughout.
+It never deletes or suppresses a reading the way a manual merge does, and
+`health attention` does not surface it.
+
+The same name with an unrelated MAC is still proposed, never linked. That
+pair is a real replacement, or a MAC table that put a client's MAC on the
+AP's port, and only an operator can tell which.
+

@@ -17,6 +17,8 @@ export XDG_CACHE_HOME="$work/cache"
 export XDG_DATA_HOME="$work/data"
 export NETRUNE_INSTALL_ROOT="$work/runtime"
 export NETRUNE_BIN_DIR="$work/bin"
+# Deterministic offline run: no extras from PyPI.
+export NETRUNE_INSTALL_EXTRAS=""
 
 bash "$root/install.sh" "$wheel"
 first=$(readlink -f "$NETRUNE_INSTALL_ROOT/current")

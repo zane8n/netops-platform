@@ -590,148 +590,68 @@ normalize_mac() {
     [[ ${#mac} -eq 12 ]] && printf "%s:%s:%s:%s:%s:%s\n" "${mac:0:2}" "${mac:2:2}" "${mac:4:2}" "${mac:6:2}" "${mac:8:2}" "${mac:10:2}" || echo "N/A"
 }
 
-cisco_wlc_ap_name_allowed() {
-    local name_upper token matched_prefix="false"
-    name_upper="$(sanitize_string "${1:-}" | tr '[:lower:]' '[:upper:]')"
-    [[ -z "$name_upper" ]] && return 1
-
-    for token in ${CONFIG[cisco_wlc_ap_name_contains]:-}; do
-        token="$(echo "$token" | tr '[:lower:]' '[:upper:]')"
-        [[ -n "$token" && "$name_upper" != *"$token"* ]] && return 1
-    done
-
-    if [[ -n "${CONFIG[cisco_wlc_ap_name_prefix]:-}" ]]; then
-        for token in ${CONFIG[cisco_wlc_ap_name_prefix]}; do
-            token="$(echo "$token" | tr '[:lower:]' '[:upper:]')"
-            [[ -n "$token" && "$name_upper" == "$token"* ]] && matched_prefix="true"
-        done
-        [[ "$matched_prefix" == "true" ]] || return 1
-    fi
-    return 0
-}
-
-cisco_wlc_ap_allowed() {
-    local ip="$1" name="$2" ip_filter="${CONFIG[cisco_wlc_ap_ip_filter]:-}"
-    if valid_ipv4 "$ip" && [[ -n "$ip_filter" && "$ip" != "$ip_filter"* ]]; then return 1; fi
-    cisco_wlc_ap_name_allowed "$name"
-}
-
-cisco_wlc_join_status() {
-    local upper
-    upper="$(echo "${1:-}" | tr '[:lower:]' '[:upper:]')"
-    if [[ "$upper" =~ NOT[[:space:]_-]*JOIN|NOT[[:space:]_-]*CONNECTED|DISJOIN|DISASSOC|FAILED|FAILURE|TIMEOUT|TIMED[[:space:]_-]*OUT|UNABLE|NEVER|DOWN ]]; then
-        echo "OFFLINE"
-    elif [[ "$upper" =~ JOINED|REGISTERED|CONNECTED|UP ]]; then
-        echo "ONLINE"
-    else
-        echo "UNKNOWN"
-    fi
-}
-
-discover_cisco_wlc_join_stats_aps() {
-    local ctrl_ip="${CONFIG[cisco_wlc_ip]}"
-    [[ -z "$ctrl_ip" || "${CONFIG[cisco_wlc_join_stats]:-true}" != "true" ]] && return 0
+cisco_wlc_join_stats() {
+    # The not-joined APs exist only in the join statistics, which SNMP does
+    # not carry. Catalyst 9800 first, AireOS as the fallback: a 9800 answers
+    # the AireOS command with "Line has invalid autocommand", the reverse
+    # with "Incorrect usage". A configured command is tried alone.
+    local ctrl_ip="$1" out_file="$2" lib_path timeout_val cmd output
+    [[ "${CONFIG[cisco_wlc_join_stats]:-true}" != "true" ]] && return 0
     command -v sshpass >/dev/null 2>&1 || { log "Skipping Cisco WLC join-stat lookup: sshpass missing."; return 0; }
     [[ -f "$PASSWORD_FILE" ]] || { log "Skipping Cisco WLC join-stat lookup: SSH password vault not initialized."; return 0; }
-
-    local lib_path join_cmd timeout_val output ts
     lib_path="$(dirname "$(realpath "$0")")/netrune-lib.sh"
-    join_cmd="${CONFIG[cisco_wlc_join_stats_cmd]:-show ap join stats summary all}"
     timeout_val="${CONFIG[cisco_wlc_join_stats_timeout]:-45}"
     [[ ! "$timeout_val" =~ ^[0-9]+$ ]] && timeout_val=45
-
-    output=$(timeout "$timeout_val" bash -c 'source "$1" >/dev/null 2>&1; netops_ssh "$2" "$3"' _ "$lib_path" "$ctrl_ip" "$join_cmd" 2>/dev/null | tr -d '\r')
-    [[ -z "$output" ]] && return 0
-    ts=$(date +%s)
-
-    while IFS= read -r line; do
-        local clean name token ip mac mac_compact status row_id
-        clean=$(sanitize_string "$line")
-        [[ -z "$clean" || "$clean" =~ ^[-=[:space:]]+$ ]] && continue
-        [[ "$clean" =~ ^(AP[[:space:]]+Name|Name[[:space:]]+|Base[[:space:]]+Mac|Ethernet|Number[[:space:]]+of|[-[:space:]]*\*) ]] && continue
-
-        name=""
-        for token in $clean; do
-            token="${token//,/}"
-            token="${token//;/}"
-            token="${token//\(/}"
-            token="${token//\)/}"
-            if cisco_wlc_ap_name_allowed "$token"; then name="$token"; break; fi
-        done
-        [[ -z "$name" ]] && continue
-
-        ip=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' <<< "$clean" | grep -v '^0\.0\.0\.0$' | head -1)
-        mac=$(grep -Eio '([0-9a-f]{2}[:-]){5}[0-9a-f]{2}|[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}|[0-9a-f]{12}' <<< "$clean" | head -1)
-        mac=$(normalize_mac "$mac")
-        status=$(cisco_wlc_join_status "$clean")
-        if [[ "$status" == "ONLINE" ]]; then continue; fi
-        if [[ "$status" == "UNKNOWN" ]] && ! valid_ipv4 "$ip"; then status="OFFLINE"; fi
-        cisco_wlc_ap_allowed "${ip:-N/A}" "$name" || continue
-
-        if valid_ipv4 "$ip"; then
-            row_id="$ip"
-        else
-            mac_compact=$(echo "$mac" | sed 's/[^0-9a-f]//g')
-            if [[ -n "$mac_compact" && "$mac" != "N/A" ]]; then row_id="wlc:${mac_compact}"; else row_id="wlc:${name}"; fi
+    local -a commands=()
+    if [[ -n "${CONFIG[cisco_wlc_join_stats_cmd]:-}" ]]; then
+        commands=("${CONFIG[cisco_wlc_join_stats_cmd]}")
+    else
+        commands=("show wireless stats ap join summary" "show ap join stats summary all")
+    fi
+    for cmd in "${commands[@]}"; do
+        output=$(timeout "$timeout_val" bash -c 'source "$1" >/dev/null 2>&1; netops_ssh "$2" "$3"' _ "$lib_path" "$ctrl_ip" "$cmd" < /dev/null 2>/dev/null | tr -d '\r')
+        # Only a refused command earns the other one; no output means SSH
+        # itself failed (vault locked, no answer), and would fail again.
+        [[ -z "$output" ]] && break
+        if ! grep -qiE "invalid autocommand|Invalid input detected|Incorrect usage|Unknown command" <<< "$output"; then
+            printf '%s\n' "$output" > "$out_file"
+            return 0
         fi
-        echo "${row_id}|${name}|Cisco-AP|${ctrl_ip}|Cisco-WLC|not-joined|${mac}|${ts}|${status}"
-    done <<< "$output"
+    done
+    log "Cisco WLC $ctrl_ip did not return join statistics; not-joined APs keep their last reading."
 }
 
 discover_cisco_wlc_aps() {
     local ctrl_ip="${CONFIG[cisco_wlc_ip]}"
     local ctrl_comm="${CREDS[cisco_wlc_comm]}"
-    if ! controller_reachable "$ctrl_ip" "$ctrl_comm"; then log_error "Cisco WLC $ctrl_ip unreachable via SNMP."; discover_cisco_wlc_join_stats_aps; return; fi
-    
-    local base_oid=".1.3.6.1.4.1.14179.2.2.1.1.28"
-    local ip_data=$(netops_snmp_walk "$ctrl_ip" "$base_oid" "-On" "$ctrl_comm")
-    [[ -z "$ip_data" ]] && { discover_cisco_wlc_join_stats_aps; return; }
+    [[ -z "$ctrl_ip" ]] && return 0
+    if ! controller_reachable "$ctrl_ip" "$ctrl_comm"; then log_error "Cisco WLC $ctrl_ip unreachable via SNMP."; return; fi
 
-    while IFS= read -r line; do
-        local oid_part="${line%% =*}"
-        local val_part="${line#*= }"
-        local ip=$(echo "${val_part#IpAddress: }" | tr -d '[:space:]')
-        if ! valid_ipv4 "$ip"; then continue; fi
-
-        local idx="${oid_part#$base_oid}"
-        local name=$(netops_snmp_get "$ctrl_ip" ".1.3.6.1.4.1.9.9.513.1.1.1.1.5${idx}" "$ctrl_comm" | tr -d '"')
-        [[ -z "$name" ]] && name="Cisco-AP"
-        cisco_wlc_ap_allowed "$ip" "$name" || continue
-        
-        local mac_raw=$(netops_snmp_get "$ctrl_ip" ".1.3.6.1.4.1.14179.2.2.1.1.1${idx}" "$ctrl_comm")
-        local mac="N/A"
-        if [[ "$mac_raw" =~ Hex-STRING:\ (.*) ]]; then mac=$(normalize_mac "${BASH_REMATCH[1]}"); fi
-
-        echo "${ip}|${name}|Cisco-AP|${ctrl_ip}|Cisco-WLC|wireless|${mac}|$(date +%s)|ONLINE"
-    done <<< "$ip_data"
-
-    discover_cisco_wlc_join_stats_aps
-}
-
-ruckus_model_from_text() {
-    local text model
-    text=$(sanitize_string "${1:-}" | tr '[:lower:]' '[:upper:]')
-    [[ -z "$text" ]] && return 1
-    if [[ "$text" =~ (^|[^A-Z0-9])((R|T|H|M|E|P)[0-9]{3,4}[A-Z0-9-]*)($|[^A-Z0-9]) ]]; then
-        model="${BASH_REMATCH[2]}"
-        echo "$model"
-        return 0
-    fi
-    return 1
-}
-
-ruckus_platform_for_ap() {
-    local ip="$1" idx="$2" ctrl_ip="$3" ctrl_comm="$4" val model oid_base
-    for oid_base in ${CONFIG[ruckus_vsz_model_oids]:-}; do
-        [[ -z "$oid_base" ]] && continue
-        val=$(netops_snmp_get "$ctrl_ip" "${oid_base}${idx}" "$ctrl_comm" | tr -d '"')
-        model=$(ruckus_model_from_text "$val") && { echo "Ruckus $model"; return 0; }
+    # One GETBULK pass per column of bsnAPTable and cLApTable (the whole
+    # tables are ~37 columns per AP), then the join statistics; decoded by
+    # netops_platform/wlc.py, which also applies the site filter
+    # (cisco_wlc_ap_ip_filter OR cisco_wlc_ap_name_prefix/_contains) and
+    # records the sidecar ap_controller.db.
+    local walk_file join_file note_file ingest_helper rc line oid
+    walk_file=$(discovery_mktemp cisco-ap-walk)
+    join_file=$(discovery_mktemp cisco-ap-join)
+    note_file=$(discovery_mktemp cisco-ap-note)
+    for oid in .1.3.6.1.4.1.14179.2.2.1.1.3 .1.3.6.1.4.1.14179.2.2.1.1.6 .1.3.6.1.4.1.14179.2.2.1.1.8 \
+               .1.3.6.1.4.1.14179.2.2.1.1.16 .1.3.6.1.4.1.14179.2.2.1.1.17 .1.3.6.1.4.1.14179.2.2.1.1.19 \
+               .1.3.6.1.4.1.14179.2.2.1.1.33 .1.3.6.1.4.1.9.9.513.1.1.1.1.6 .1.3.6.1.4.1.9.9.513.1.1.1.1.7; do
+        netops_snmp_bulkwalk "$ctrl_ip" "$oid" "$ctrl_comm" >> "$walk_file"
     done
-    if [[ "${CONFIG[ruckus_ap_model_snmp]:-false}" == "true" && -n "$ip" && "$ip" != "0.0.0.0" ]]; then
-        val=$(netops_snmp_get "$ip" "sysDescr.0" | tr -d '"')
-        model=$(ruckus_model_from_text "$val") && { echo "Ruckus $model"; return 0; }
-    fi
-    echo "Ruckus-AP"
+    cisco_wlc_join_stats "$ctrl_ip" "$join_file"
+    ingest_helper="${NETOPS_INGEST_HELPER:-$(netops_python_helper_path netops_ingest netops_ingest.py)}"
+    python3 "$ingest_helper" controller-aps --vendor cisco --controller-ip "$ctrl_ip" --controller "Cisco-WLC" \
+        --walk "$walk_file" --join-stats "$join_file" --sidecar "$(dirname "$AP_DB")/ap_controller.db" \
+        --ip-prefixes "${CONFIG[cisco_wlc_ap_ip_filter]:-}" --name-prefixes "${CONFIG[cisco_wlc_ap_name_prefix]:-}" \
+        --name-contains "${CONFIG[cisco_wlc_ap_name_contains]:-}" 2> "$note_file"
+    rc=$?
+    while IFS= read -r line; do [[ -n "$line" ]] && log "$line"; done < "$note_file"
+    [[ $rc -eq 3 ]] && log_error "Cisco WLC walk was incomplete; APs it did not return keep their last reading."
+    rm -f "$walk_file" "$join_file" "$note_file"
+    return 0
 }
 
 refresh_pingable_ap_status() {
@@ -768,28 +688,23 @@ discover_ruckus_vsz_aps() {
     local ctrl_comm="${CREDS[ruckus_vsz_comm]}"
     if ! controller_reachable "$ctrl_ip" "$ctrl_comm"; then log_error "Ruckus vSZ $ctrl_ip unreachable via SNMP."; return; fi
 
-    local base_oid=".1.3.6.1.4.1.25053.1.4.2.1.1.2.2.1.10"
-    local ip_data=$(netops_snmp_walk "$ctrl_ip" "$base_oid" "-On" "$ctrl_comm")
-    [[ -z "$ip_data" ]] && return
-
-    while IFS= read -r line; do
-        local oid_part="${line%% =*}"
-        local val_part="${line#*= }"
-        local ip=$(echo "${val_part#IpAddress: }" | tr -d '[:space:]')
-        [[ -z "$ip" || "$ip" == "0.0.0.0" ]] && continue
-
-        local idx="${oid_part#$base_oid}"
-        local name=$(netops_snmp_get "$ctrl_ip" ".1.3.6.1.4.1.25053.1.4.2.1.1.2.2.1.5${idx}" "$ctrl_comm" | tr -d '"')
-        [[ -z "$name" ]] && name="Ruckus-AP"
-
-        local mac_raw=$(netops_snmp_get "$ctrl_ip" ".1.3.6.1.4.1.25053.1.4.2.1.1.2.2.1.1${idx}" "$ctrl_comm")
-        local mac="N/A"
-        if [[ "$mac_raw" =~ Hex-STRING:\ (.*) ]]; then mac=$(echo "${BASH_REMATCH[1]}" | tr ' ' ':'); fi
-
-        local platform
-        platform=$(ruckus_platform_for_ap "$ip" "$idx" "$ctrl_ip" "$ctrl_comm")
-        echo "${ip}|${name}|${platform}|${ctrl_ip}|Ruckus-vSZ|wireless|${mac}|$(date +%s)|ONLINE"
-    done <<< "$ip_data"
+    # One GETBULK pass over ruckusSZAPTable; netops_platform/wlc.py decodes
+    # it (MAC from the row index, model/serial/firmware/uptime/connection
+    # state) and records the sidecar ap_controller.db. Every AP on the
+    # controller is Kibali's, so there is no filter here.
+    local walk_file note_file expected ingest_helper rc line
+    walk_file=$(discovery_mktemp ruckus-ap-walk)
+    note_file=$(discovery_mktemp ruckus-ap-note)
+    netops_snmp_bulkwalk "$ctrl_ip" ".1.3.6.1.4.1.25053.1.4.2.1.1.2.2.1" "$ctrl_comm" > "$walk_file"
+    expected=$(netops_snmp_get "$ctrl_ip" ".1.3.6.1.4.1.25053.1.4.1.1.1.15.1.0" "$ctrl_comm" | tr -cd '0-9')
+    ingest_helper="${NETOPS_INGEST_HELPER:-$(netops_python_helper_path netops_ingest netops_ingest.py)}"
+    python3 "$ingest_helper" controller-aps --vendor ruckus --controller-ip "$ctrl_ip" --controller "Ruckus-vSZ" \
+        --walk "$walk_file" --expected "$expected" --sidecar "$(dirname "$AP_DB")/ap_controller.db" 2> "$note_file"
+    rc=$?
+    while IFS= read -r line; do [[ -n "$line" ]] && log "$line"; done < "$note_file"
+    [[ $rc -eq 3 ]] && log_error "Ruckus vSZ walk was incomplete; APs it did not return keep their last reading."
+    rm -f "$walk_file" "$note_file"
+    return 0
 }
 
 discover_controller_aps() {
@@ -800,12 +715,32 @@ discover_controller_aps() {
 is_ap_device() {
     local hostname="$1" platform="$2" lldp_caps="$3"
     local search_string="${hostname^^} ${platform^^}"
-    local ap_patterns=("AP" "AIR-" "WLAN" "WIRELESS" "CISCO.*AIRONET" "ARUBA" "RUCKUS" "MERAKI" "UBNT")
+    # A maker's name is not evidence: "ARUBA" and "RUCKUS" matched every
+    # Aruba and ICX switch seen as a neighbour and filed it as an AP.
+    local ap_patterns=("AP" "AIR-" "WLAN" "WIRELESS" "CISCO.*AIRONET" "MERAKI" "UBNT")
     if [[ "$lldp_caps" =~ W ]]; then return 0; fi
+    if [[ "${platform^^}" =~ (^|[^A-Z])SWITCH([^A-Z]|$) || "${platform^^}" =~ PHONE ]]; then return 1; fi
     for pattern in "${ap_patterns[@]}"; do
         if [[ "$search_string" =~ $pattern ]]; then return 0; fi
     done
     return 1
+}
+
+# lldpRemSysCapEnabled is a BITS value: other(0) repeater(1) bridge(2)
+# wlanAccessPoint(3) ..., bit 0 being the top bit of the first octet, so a
+# WLAN AP has 0x10 set there. It arrives as hex ("28 00") or, when the bytes
+# happen to be printable, as characters ("(" is 0x28).
+lldp_caps_has_wlan() {
+    local raw="${1//\"/}" byte
+    [[ "$raw" =~ wlanAccessPoint ]] && return 0
+    if [[ "$raw" =~ ^[[:space:]]*([0-9A-Fa-f]{2})([[:space:]]|$) ]]; then
+        byte=$((16#${BASH_REMATCH[1]}))
+    elif [[ -n "$raw" ]]; then
+        byte=$(printf '%d' "'${raw:0:1}")
+    else
+        return 1
+    fi
+    (( byte & 0x10 ))
 }
 
 get_mac_for_ip() {
@@ -841,7 +776,7 @@ get_aps_from_switch_lldp() {
                 5) neighbors["$key.chassis_id"]="$val" ;;
                 9) neighbors["$key.hostname"]="$val" ;;
                 10) neighbors["$key.platform"]="$val" ;;
-                12) if [[ "$val" =~ (4|W) ]]; then neighbors["$key.caps"]="${neighbors[$key.caps]}W"; fi ;;
+                12) if lldp_caps_has_wlan "$val"; then neighbors["$key.caps"]="${neighbors[$key.caps]}W"; fi ;;
             esac
         fi
     done <<< "$lldp_data"
@@ -936,7 +871,7 @@ discover_aps() {
     progress_clear
     log_success "Controller Scan: Found $(wc -l < "$ctrl_file") AP(s)."
 
-    local funcs=$(declare -f sanitize_string compact_switch_name is_ap_device normalize_mac get_mac_for_ip get_port_name_from_index get_aps_from_switch_lldp get_aps_from_switch_cdp discover_aps_for_single_switch)
+    local funcs=$(declare -f sanitize_string compact_switch_name is_ap_device lldp_caps_has_wlan normalize_mac get_mac_for_ip get_port_name_from_index get_aps_from_switch_lldp get_aps_from_switch_cdp discover_aps_for_single_switch)
     local lib_path="$(dirname "$(realpath "$0")")/netrune-lib.sh"
     local switch_timeout="${CONFIG[ap_switch_timeout]:-45}"
     [[ ! "$switch_timeout" =~ ^[0-9]+$ ]] && switch_timeout=45
@@ -955,64 +890,23 @@ discover_aps() {
 
     db_tmp=$(discovery_db_tmp "$AP_DB") || return 10
     track_tmp "$db_tmp"
+    local ingest_helper
+    ingest_helper="${NETOPS_INGEST_HELPER:-$(netops_python_helper_path netops_ingest netops_ingest.py)}"
+    [[ -r "$ingest_helper" ]] || { log_error "Inventory ingest helper is unavailable: $ingest_helper"; return 10; }
     (
         flock -x 210 || exit 1
-        awk -F '|' -v OFS='|' '
-        function valid_ip(ip) { return ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && ip != "0.0.0.0" }
-        function valid_mac(mac) { return mac != "" && mac != "N/A" }
-        function norm_name(name,    n) { n = tolower(name); gsub(/^[[:space:]]+|[[:space:]]+$/, "", n); return n }
-        function good_name(name,    n) { n = norm_name(name); return n != "" && n != "n/a" && n != "cisco-ap" && n != "ruckus-ap" }
-        function ap_key(ip, name, switch_ip, switch_port, mac) {
-            if (valid_mac(mac)) return "mac:" tolower(mac)
-            if (good_name(name)) return "name:" norm_name(name)
-            if (valid_ip(ip)) return "ip:" ip
-            return "switch:" switch_ip "|port:" switch_port
-        }
-        function pick(primary, fallback) {
-            return (primary != "" && primary != "N/A") ? primary : fallback
-        }
-        function short_switch_name(name) {
-            gsub(/\r|\n|"/, "", name)
-            if (name == "" || name == "N/A") return name
-            sub(/\..*$/, "", name)
-            if (length(name) > 32) name = substr(name, 1, 32)
-            return name
-        }
-        function print_ap_line(line, forced_status,    a) {
-            split(line, a, "|")
-            a[5] = short_switch_name(a[5])
-            if (forced_status != "") a[9] = forced_status
-            print a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9]
-        }
-        function emit_ap(key,    c, s, swname) {
-            if (key in emitted) return
-            if (key in sw_data && key in ctrl_data) {
-                split(ctrl_data[key], c, "|"); split(sw_data[key], s, "|")
-                swname = short_switch_name(pick(s[5], c[5]))
-                print pick(s[1], c[1]), pick(s[2], c[2]), pick(s[3], c[3]), pick(s[4], c[4]), swname, pick(s[6], c[6]), pick(s[7], c[7]), pick(s[8], c[8]), "ONLINE"
-            } else if (key in sw_data) {
-                print_ap_line(sw_data[key], "")
-            } else if (key in ctrl_data) {
-                print_ap_line(ctrl_data[key], "")
-            }
-            emitted[key]=1
-        }
-        FILENAME == ARGV[1] { key = ap_key($1, $2, $4, $6, $7); ctrl_data[key] = $0; in_new[key]=1; next }
-        FILENAME == ARGV[2] { key = ap_key($1, $2, $4, $6, $7); sw_data[key] = $0; in_new[key]=1; next }
-        FILENAME == ARGV[3] {
-            key = ap_key($1, $2, $4, $6, $7)
-            if (key in emitted) next
-            if (in_new[key]) {
-                emit_ap(key)
-                delete in_new[key]
-            } else {
-                $5 = short_switch_name($5); $9 = "OFFLINE"; print $0; emitted[key]=1
-            }
-        }
-        END {
-            for(key in in_new) emit_ap(key)
-        }
-        ' "$ctrl_file" "$sw_file" "$AP_DB" > "$db_tmp" && mv "$db_tmp" "$AP_DB"
+        # The merge rules (controller identity, switch attachment, model
+        # precedence, joining by MAC then hostname then address, and keeping
+        # ports `ap neighbors` confirmed against the MAC table) live in
+        # netops_platform/ap_merge.py.
+        # The Cisco WLC is shared with other sites: rows recorded for them
+        # before the filter was set leave the inventory here.
+        python3 "$ingest_helper" merge-ap-scan \
+            --controller "$ctrl_file" --switch "$sw_file" --existing "$AP_DB" \
+            --attachments "$(dirname "$AP_DB")/ap_attachments.db" \
+            --scope-controller "Cisco-WLC" --ip-prefixes "${CONFIG[cisco_wlc_ap_ip_filter]:-}" \
+            --name-prefixes "${CONFIG[cisco_wlc_ap_name_prefix]:-}" --name-contains "${CONFIG[cisco_wlc_ap_name_contains]:-}" \
+            --output "$db_tmp" && mv "$db_tmp" "$AP_DB"
     ) 210> "${AP_DB}.lock" || { log_error "Could not commit AP discovery safely."; return 10; }
 
     rm -f "$ctrl_file" "$sw_file" "$switch_targets" "$progress_file"

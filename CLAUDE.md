@@ -13,10 +13,9 @@ stays resident for).
   smaller domains directly on the class) and `State` (the SQLite layer).
   Six larger domains are mixin classes composed onto `App`, each in its own
   file: `device_cli.py`, `inventory_cli.py`, `vlan_cli.py`,
-  `topology_cli.py`, `lookup_cli.py`, `diagnose_cli.py`. Four more
-  (`ask_cli.py`, `setup_cli.py`, `path_cli.py`, `excel_cli.py`) are free-function modules
-  with a `dispatch(app, args, opts)` entry point, same pattern as the
-  pre-existing `traffic_cli.py`.
+  `topology_cli.py`, `lookup_cli.py`, `diagnose_cli.py`. The other
+  `*_cli.py` domain modules are free functions with a
+  `dispatch(app, args, opts)` entry point (e.g. `traffic_cli.py`).
 - `netrune/` -- thin re-export shims (`sys.modules[__name__] = _implementation`)
   pointing at `netops_platform/`, the real implementation. Deliberate v8
   compatibility-window design, not duplication to clean up.
@@ -43,7 +42,7 @@ stays resident for).
 ## Architecture in one paragraph
 
 One process per invocation. `App.dispatch(argv)` parses global flags,
-routes on the first positional arg (the domain) to one of 26
+routes on the first positional arg (the domain) to one of 27
 `cmd_<domain>` handlers via a flat dict, which routes internally on the
 second arg (the verb). Every command returns an int exit code (0=success,
 see `docs/CLAUDE_REFERENCE.md` section 3 for the full table). State lives
@@ -56,11 +55,11 @@ never skip straight to `--confirm` on an unfamiliar change.
 
 ## Working in this repo
 
-- **Tests:** `.venv/bin/python -m pytest -q` (full suite, currently 782 tests).
-- **Doc/completion drift check:** `python scripts/generate_reference.py --check`
+- **Tests:** `.venv/bin/python -m pytest -q` (full suite).
+- **Doc/completion drift check:** `PYTHONPATH=. .venv/bin/python scripts/generate_reference.py --check`
   -- must pass after any change to `command_registry()`, `HELP_TOPICS`, or
   anything that affects generated docs/completions/man pages.
-- **Secret/PII scan:** `python scripts/privacy_check.py --root .`
+- **Secret/PII scan:** `PYTHONPATH=. .venv/bin/python scripts/privacy_check.py --root .`
 - **Build + smoke test:** `python -m build`, then
   `bash scripts/smoke_wheel.sh dist/*.whl` and
   `bash scripts/smoke_install.sh dist/*.whl`.

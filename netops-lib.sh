@@ -61,6 +61,7 @@ declare -gA CONFIG=(
     ["scan_host_timeout"]="20"
     ["ap_scan_workers"]="10"
     ["ap_switch_timeout"]="45"
+    ["controller_walk_timeout"]="180"
     ["enable_logging"]="true"
     ["ssh_host_key_mode"]="accept-new"
     ["management_vlan"]="4"
@@ -76,11 +77,9 @@ declare -gA CONFIG=(
     ["cisco_wlc_ap_name_contains"]=""
     ["cisco_wlc_ap_name_prefix"]=""
     ["cisco_wlc_join_stats"]="true"
-    ["cisco_wlc_join_stats_cmd"]="show ap join stats summary all"
+    ["cisco_wlc_join_stats_cmd"]=""
     ["cisco_wlc_join_stats_timeout"]="45"
     ["ruckus_vsz_ip"]=""
-    ["ruckus_vsz_model_oids"]=""
-    ["ruckus_ap_model_snmp"]="false"
     ["default_backup_dir"]="${DATA_DIR}/backups"
     ["device_writes_enabled"]="false"
     ["device_certified_firmware"]=""
@@ -154,8 +153,6 @@ cisco_wlc_join_stats="${CONFIG[cisco_wlc_join_stats]}"
 cisco_wlc_join_stats_cmd="${CONFIG[cisco_wlc_join_stats_cmd]}"
 cisco_wlc_join_stats_timeout="${CONFIG[cisco_wlc_join_stats_timeout]}"
 ruckus_vsz_ip="${CONFIG[ruckus_vsz_ip]}"
-ruckus_vsz_model_oids="${CONFIG[ruckus_vsz_model_oids]}"
-ruckus_ap_model_snmp="${CONFIG[ruckus_ap_model_snmp]}"
 default_backup_dir="${CONFIG[default_backup_dir]}"
 device_writes_enabled="${CONFIG[device_writes_enabled]}"
 device_certified_firmware="${CONFIG[device_certified_firmware]}"
@@ -395,6 +392,40 @@ netops_snmp_walk() {
             if [[ -n "$res" ]]; then snmp_cache_put "$ip" "$comm" "v2c"; echo "$res"; return 0; fi
         done
     fi
+    return 1
+}
+
+# A whole controller table in one pass. netops_snmp_walk's plain snmpwalk asks
+# for one value per round trip under a 15-second cap, which cut a 175-AP
+# SmartZone table to 55 rows; GETBULK with 25 repetitions reads it in about
+# 20 seconds. Same credential order as netops_snmp_walk; numeric OIDs, so the
+# caller can decode the row index.
+netops_snmp_bulkwalk() {
+    local ip="$1" oid="$2" custom_comm="$3"
+    local timeout_val="${CONFIG[controller_walk_timeout]:-180}" res cached_comm comm
+    [[ "$timeout_val" =~ ^[0-9]+$ ]] || timeout_val=180
+    local -a flags=(-On -t 10 -r 1 -Cr25)
+    if [[ "${CREDS[snmp_version]}" == "v3" && -n "${CREDS[snmpv3_user]}" && -z "$custom_comm" && "$(snmp_cache_version "$ip")" != "v2c" ]]; then
+        local -a v3_opts=()
+        _build_snmp3_opts v3_opts
+        res=$(timeout "$timeout_val" snmpbulkwalk "${v3_opts[@]}" "${flags[@]}" "$ip" "$oid" 2>/dev/null)
+        if [[ "$res" == .* ]]; then echo "$res"; return 0; fi
+    fi
+    if [[ -n "$custom_comm" ]]; then
+        res=$(timeout "$timeout_val" snmpbulkwalk -v2c -c "$custom_comm" "${flags[@]}" "$ip" "$oid" 2>/dev/null)
+        if [[ "$res" == .* ]]; then snmp_cache_put "$ip" "$custom_comm" "v2c"; echo "$res"; return 0; fi
+        return 1
+    fi
+    cached_comm=$(snmp_cache_get "$ip")
+    if [[ -n "$cached_comm" ]]; then
+        res=$(timeout "$timeout_val" snmpbulkwalk -v2c -c "$cached_comm" "${flags[@]}" "$ip" "$oid" 2>/dev/null)
+        if [[ "$res" == .* ]]; then echo "$res"; return 0; fi
+    fi
+    for comm in ${CREDS[communities]}; do
+        [[ -n "$cached_comm" && "$comm" == "$cached_comm" ]] && continue
+        res=$(timeout "$timeout_val" snmpbulkwalk -v2c -c "$comm" "${flags[@]}" "$ip" "$oid" 2>/dev/null)
+        if [[ "$res" == .* ]]; then snmp_cache_put "$ip" "$comm" "v2c"; echo "$res"; return 0; fi
+    done
     return 1
 }
 

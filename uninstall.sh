@@ -25,6 +25,20 @@ for command in netrune netops netop; do
     fi
 done
 
+# Completions and man pages install.sh placed (only Netrune's own names).
+data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+for path in "$data_home"/bash-completion/completions/{netrune,netops,netop} \
+            "$data_home"/zsh/site-functions/{_netrune,_netops} \
+            "$HOME"/.config/fish/completions/{netrune,netops}.fish \
+            "$data_home"/man/man1/{netrune,netops}.1; do
+    [[ -f "$path" ]] && rm -f -- "$path"
+done
+for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    if [[ -f "$rc" ]] && grep -qF '# >>> netrune >>>' "$rc"; then
+        printf 'Notice: %s still has the netrune block (between the # >>> netrune >>> markers); remove it if you no longer want it.\n' "$rc" >&2
+    fi
+done
+
 if [[ "$remove_runtime" == true ]]; then
     if [[ -z "$runtime" || "$runtime" == "/" ]]; then
         printf 'Error: unsafe runtime directory.\n' >&2

@@ -1,0 +1,46 @@
+name: Bug report
+description: Something Netrune did that it should not have, or did not do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time! Please **redact** addresses, hostnames, serials, and credentials: use documentation addresses such as `192.0.2.10` and names like `SITE-A-SW01`.
+  - type: input
+    id: version
+    attributes:
+      label: Netrune version
+      description: Output of `netrune version`.
+      placeholder: "8.5.0b3"
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      description: The exact command you ran (redacted).
+      placeholder: "netrune ap scan"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: Paste the output (redacted). `--json` output helps most.
+      render: text
+  - type: input
+    id: device
+    attributes:
+      label: Device family and firmware (if a device was involved)
+      placeholder: "Cisco C9200L, IOS-XE 17.9.4"
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Where Netrune runs
+      options: ["Linux", "WSL2", "macOS (experimental)", "Other"]

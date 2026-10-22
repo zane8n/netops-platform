@@ -147,34 +147,71 @@ class MetricsExporter:
             ] = {"value": row["value"], "observed_at": row["observed_at"]}
         return readings
 
+    @staticmethod
+    def _sample_series(con: Any) -> List[Tuple[str, str]]:
+        """Every (collector, watch) pair that has stored samples.
+
+        Walks the identity index one distinct key at a time. traffic_samples
+        grows by the minute and this endpoint is scraped every few seconds, so
+        a scan of it here is a cost that only ever grows -- it once outran the
+        scrape interval and piled up a thread per scrape.
+        """
+        pairs: List[Tuple[str, str]] = []
+        collectors = [row[0] for row in con.execute(
+            "WITH RECURSIVE c(name) AS ("
+            " SELECT MIN(collector) FROM traffic_samples"
+            " UNION ALL"
+            " SELECT (SELECT MIN(collector) FROM traffic_samples WHERE collector > c.name)"
+            " FROM c WHERE c.name IS NOT NULL)"
+            " SELECT name FROM c WHERE name IS NOT NULL")]
+        for collector in collectors:
+            pairs.extend((collector, row[0]) for row in con.execute(
+                "WITH RECURSIVE w(id) AS ("
+                " SELECT MIN(watch_id) FROM traffic_samples WHERE collector=?1"
+                " UNION ALL"
+                " SELECT (SELECT MIN(watch_id) FROM traffic_samples WHERE collector=?1 AND watch_id > w.id)"
+                " FROM w WHERE w.id IS NOT NULL)"
+                " SELECT id FROM w WHERE id IS NOT NULL", (collector,)))
+        return pairs
+
     def latest_icmp(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
         """Newest sample per watch, metric, and collector for probe results."""
         newest: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        for row in self.state.rows(
-            "SELECT watch_id,collector,metric,value,observed_at FROM traffic_samples"
-            " WHERE metric IN ('rtt_ms','jitter_ms','packet_loss_pct','reachable')"
-            " ORDER BY observed_at ASC"
-        ):
-            newest.setdefault(str(row["watch_id"]), {}).setdefault(str(row["collector"]), {})[
-                str(row["metric"])
-            ] = {"value": row["value"], "observed_at": row["observed_at"]}
+        with self.state.connect() as con:
+            for collector, watch_id in self._sample_series(con):
+                for metric in ("rtt_ms", "jitter_ms", "packet_loss_pct", "reachable"):
+                    row = con.execute(
+                        "SELECT value,observed_at FROM traffic_samples"
+                        " WHERE collector=? AND watch_id=? AND metric=?"
+                        " ORDER BY observed_at DESC LIMIT 1", (collector, watch_id, metric)).fetchone()
+                    if row is not None:
+                        newest.setdefault(str(watch_id), {}).setdefault(str(collector), {})[metric] = {
+                            "value": row["value"], "observed_at": row["observed_at"]}
         return newest
 
     def latest_device_info(self) -> Dict[str, Dict[str, Any]]:
         """What each device last said it is, from the newest `device_info` sample."""
         facts: Dict[str, Dict[str, Any]] = {}
-        for row in self.state.rows(
-            "SELECT watch_id,raw_json FROM traffic_samples WHERE metric='device_info'"
-            " ORDER BY observed_at ASC"
-        ):
-            if not row["raw_json"]:
-                continue
-            try:
-                payload = json.loads(str(row["raw_json"]))
-            except (TypeError, ValueError):
-                continue
-            if isinstance(payload, dict):
-                facts[str(row["watch_id"])] = payload
+        taken_at: Dict[str, int] = {}
+        with self.state.connect() as con:
+            for collector, watch_id in self._sample_series(con):
+                # Newest first, stopping at the first reading that parses: an
+                # empty or garbled one is skipped in favour of the one before.
+                for row in con.execute(
+                    "SELECT raw_json,observed_at FROM traffic_samples"
+                    " WHERE collector=? AND watch_id=? AND metric='device_info'"
+                    " ORDER BY observed_at DESC", (collector, watch_id)):
+                    if not row["raw_json"]:
+                        continue
+                    try:
+                        payload = json.loads(str(row["raw_json"]))
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(payload, dict):
+                        key = str(watch_id)
+                        if key not in taken_at or int(row["observed_at"]) > taken_at[key]:
+                            facts[key], taken_at[key] = payload, int(row["observed_at"])
+                        break
         return facts
 
     def render_replay(self, since: int, until: int = 0) -> str:

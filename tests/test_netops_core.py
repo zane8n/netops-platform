@@ -1445,6 +1445,112 @@ class NetOpsCoreTest(unittest.TestCase):
         active = self.app.state.rows("SELECT * FROM relationships_current WHERE rel_type='identity_swap_candidate' AND status!='disappeared'")
         self.assertEqual(len(active), 0)
 
+    def test_an_ap_rekeyed_to_its_true_mac_is_linked_not_proposed_as_a_swap(self):
+        now = int(time.time())
+        # A switch recorded the AP under its port MAC; the controller then
+        # reported the base MAC, one below.
+        self.add_ap("192.0.2.60", "SITE-A-AP60", "198.51.100.10", "SITE-A-SW01", "Gi1/0/14", "aabbccdd0e01", seen=now - 3600)
+        self.app.state.sync_derived_state()
+        self.app.state.execute("DELETE FROM aps WHERE ip='192.0.2.60'")
+        self.add_ap("192.0.2.61", "SITE-A-AP60", "198.51.100.10", "SITE-A-SW01", "Gi1/0/14", "aabbccdd0e00", seen=now)
+        self.app.state.sync_derived_state()
+        swaps = self.app.state.rows("SELECT * FROM relationships_current WHERE rel_type='identity_swap_candidate' AND status!='disappeared'")
+        self.assertEqual(swaps, [])
+        links = self.app.state.rows("SELECT * FROM relationships_current WHERE rel_type='identity_rekey' AND status='active'")
+        self.assertEqual([(row["subject_id"], row["object_id"], row["confidence"]) for row in links],
+                         [("mac:aabbccdd0e01", "mac:aabbccdd0e00", 100)])
+        payload = self.app.attention_payload()
+        self.assertEqual([item for item in payload["items"] if item["kind"] == "identity_swap_candidate"], [])
+        # It stays linked on later ticks.
+        self.app.state.sync_derived_state()
+        self.assertEqual(len(self.app.state.rows("SELECT * FROM relationships_current WHERE rel_type='identity_rekey' AND status='active'")), 1)
+
+    def _swap_on_port_12(self):
+        now = int(time.time())
+        self.add_ap("192.0.2.50", "SITE-A-AP12", "198.51.100.10", "SITE-A-SW01", "Gi1/0/12", "aabbccddeeff", seen=now - 3600)
+        self.app.state.sync_derived_state()
+        self.app.state.execute("DELETE FROM aps WHERE ip='192.0.2.50'")
+        self.add_ap("192.0.2.51", "NEWCISCO-AP-01", "198.51.100.10", "SITE-A-SW01", "Gi1/0/12", "001122334455", seen=now)
+        self.app.state.sync_derived_state()
+
+    def review(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = self.app.dispatch(["health", "review", *args, "--json"])
+        return code, json.loads(out.getvalue())
+
+    def test_review_no_keeps_a_swap_candidate_apart_for_good(self):
+        self._swap_on_port_12()
+        code, waiting = self.review("--list")
+        self.assertEqual(code, netops.PARTIAL)
+        item = next(row for row in waiting["items"] if row["kind"] == "identity")
+        self.assertEqual(item["question"], "SITE-A-AP12 -> NEWCISCO-AP-01: same AP, or a replacement?")
+        self.assertEqual(self.review("answer", item["id"], "n")[0], netops.SUCCESS)
+        self.app.state.sync_derived_state()
+        self.app.state.sync_derived_state()
+        self.assertEqual(self.review("--list")[1]["items"], [])
+        self.assertEqual(self.app.state.rows("SELECT * FROM relationships_current WHERE rel_type='identity_swap_candidate' AND status!='disappeared'"), [])
+        event = self.app.state.one("SELECT detail FROM relationship_events WHERE event_type='resolved'")
+        self.assertIn("different", event["detail"])
+
+    def test_review_yes_merges_the_old_record_into_the_new_one(self):
+        self._swap_on_port_12()
+        item = next(row for row in self.review("--list")[1]["items"] if row["kind"] == "identity")
+        code, answered = self.review("answer", item["id"], "y")
+        self.assertEqual(code, netops.SUCCESS, answered)
+        self.assertEqual(answered["result"], "merged 1.")
+        merge = self.app.state.one("SELECT source_name,target_name,reason FROM inventory_merges WHERE revoked_at IS NULL")
+        self.assertEqual((merge["source_name"], merge["target_name"], merge["reason"]),
+                         ("SITE-A-AP12", "NEWCISCO-AP-01", "confirmed in health review"))
+        self.assertEqual(self.review("--list")[1]["items"], [])
+        self.assertEqual(self.review("answer", item["id"], "y")[0], netops.VALIDATION)
+
+    def test_latency_target_names_resolve_to_one_address_or_open_the_numbered_picker(self):
+        self.add_device("198.51.100.20", "SITE-A-CORE-SW01")
+        self.add_device("198.51.100.21", "SITE-A-CORE-SW02")
+        self.add_ap("192.0.2.70", "SITE-A-CORE-AP01")
+        opts = netops.GlobalOptions()
+        # Addresses and abbreviations go to the probe as typed.
+        self.assertEqual(self.app._latency_target("198.51.100.20", opts), "198.51.100.20")
+        self.assertEqual(self.app._latency_target("34", opts), "34")
+        # An exact name wins over the names it is part of.
+        self.assertEqual(self.app._latency_target("SITE-A-CORE-SW01", opts), "198.51.100.20")
+        # Several matches: no terminal keeps the probe's own behaviour ...
+        self.assertEqual(self.app._latency_target("SITE-A-CORE", opts), "SITE-A-CORE")
+        # ... a terminal gets the picker, over switches and APs alike.
+        tty = mock.patch("sys.stdin.isatty", return_value=True), mock.patch("sys.stdout.isatty", return_value=True)
+        with tty[0], tty[1], mock.patch.object(self.app, "_select_row", side_effect=lambda rows, *a, **k: rows[-1]) as picker:
+            picked = self.app._latency_target("SITE-A-CORE", opts)
+        self.assertEqual(len(picker.call_args.args[0]), 3)
+        self.assertIn(picked, {"198.51.100.20", "198.51.100.21", "192.0.2.70"})
+        with tty[0], tty[1], mock.patch.object(self.app, "_select_row", return_value=None):
+            self.assertIsNone(self.app._latency_target("SITE-A-CORE", opts))
+
+    def test_morning_check_ends_with_the_review_step(self):
+        steps = [step["id"] for step in self.app.workflow_manifest("morning-check", "")["steps"]]
+        self.assertEqual(steps[-2:], ["attention", "review"])
+
+    def test_rekey_recognizes_name_keyed_and_default_named_aps_but_not_other_hardware(self):
+        rekey = netops.State._is_identity_rekey
+        self.assertTrue(rekey("ap", {"name": "SITE-A-AP33", "canonical_id": "sig:site-a:ap33"}, {"name": "SITE-A-AP33", "canonical_id": "mac:aabbccdd0e00"}))
+        self.assertTrue(rekey("ap", {"name": "SITE-A-AP33", "canonical_id": "ip:192.0.2.33"}, {"name": "SITE-A-AP33", "canonical_id": "mac:aabbccdd0e00"}))
+        self.assertTrue(rekey("ap", {"name": "APaabb.ccdd.0e00", "canonical_id": "ip:192.0.2.34"}, {"name": "SITE-A-AP34", "canonical_id": "mac:aabbccdd0e00"}))
+        self.assertFalse(rekey("ap", {"name": "APaabb.ccdd.0e00", "canonical_id": "ip:192.0.2.34"}, {"name": "SITE-A-AP34", "canonical_id": "mac:aabbccdd9900"}))
+        self.assertFalse(rekey("ap", {"name": "SITE-A-AP33", "canonical_id": "sig:site-a:ap33"}, {"name": "SITE-A-AP35", "canonical_id": "mac:aabbccdd0e00"}))
+        self.assertFalse(rekey("ap", {"name": "SITE-A-AP33", "canonical_id": "mac:38002593d848"}, {"name": "SITE-A-AP33", "canonical_id": "mac:c4d666846250"}))
+        self.assertFalse(rekey("device", {"name": "SW1", "canonical_id": "ip:192.0.2.1"}, {"name": "SW1", "canonical_id": "mac:aabbccdd0e00"}))
+
+    def test_the_same_name_with_unrelated_hardware_is_still_a_swap_for_the_operator(self):
+        now = int(time.time())
+        self.add_ap("192.0.2.62", "SITE-A-AP62", "198.51.100.10", "SITE-A-SW01", "Gi1/0/15", "38002593d848", seen=now - 3600)
+        self.app.state.sync_derived_state()
+        self.app.state.execute("DELETE FROM aps WHERE ip='192.0.2.62'")
+        self.add_ap("192.0.2.62", "SITE-A-AP62", "198.51.100.10", "SITE-A-SW01", "Gi1/0/15", "c4d666846250", seen=now)
+        self.app.state.sync_derived_state()
+        self.assertEqual(self.app.state.rows("SELECT * FROM relationships_current WHERE rel_type='identity_rekey'"), [])
+        swaps = self.app.state.rows("SELECT * FROM relationships_current WHERE rel_type='identity_swap_candidate' AND status!='disappeared'")
+        self.assertEqual([(row["subject_id"], row["object_id"]) for row in swaps], [("mac:38002593d848", "mac:c4d666846250")])
+
     def test_attention_payload_surfaces_identity_swap_candidate_with_actionable_command(self):
         now = int(time.time())
         self.add_ap("192.0.2.50", "SITE-A-AP12", "198.51.100.10", "SITE-A-SW01", "Gi1/0/12", "aabbccddeeff", seen=now - 3600)

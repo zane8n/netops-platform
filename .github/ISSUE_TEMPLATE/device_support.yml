@@ -1,0 +1,33 @@
+name: Device or controller support
+description: Netrune does not understand a switch, AP, or wireless controller you have, or reads it wrongly.
+labels: ["device-support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Device support grows from real evidence. Output from **your** hardware is the single most useful contribution you can make, even if you never write code. Redact addresses, names, and serials.
+  - type: input
+    id: model
+    attributes:
+      label: Vendor, model, and firmware
+      placeholder: "Aruba 2930F, WC.16.11.0012 / Ruckus SmartZone 6.1 / UniFi Network 8"
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of device
+      options: ["Switch", "Access point", "Wireless controller", "Router or firewall", "Other"]
+    validations:
+      required: true
+  - type: textarea
+    id: wrong
+    attributes:
+      label: What Netrune does today
+      description: Wrong model, missing MAC, unknown platform, command refused...
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence (redacted)
+      description: "`show version`, `snmpwalk -On` of the relevant table, or `netrune device support <target> --json`."
+      render: text

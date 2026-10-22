@@ -1632,7 +1632,7 @@ class NaturalAskEngine:
 
         target_actions = {
             "inventory-scan", "inventory-list", "inventory-details", "inventory-activity",
-            "health-check", "health-status", "health-offline", "health-timeline", "ap-list", "ap-unjoined", "ap-on-switch", "ap-timeline",
+            "health-check", "health-status", "health-offline", "health-timeline", "ap-list", "ap-unjoined", "ap-on-switch", "ap-timeline", "ap-controller",
             "topology-show", "topology-timeline", "memory-switch", "memory-device", "memory-ip", "memory-mac",
             "memory-timeline", "memory-explain", "backup-run", "backup-history", "backup-diff", "diagnose-latency", "diagnose-filtering",
             "diagnose-core-ping", "diagnose-throughput", "lookup-core", "device-ssh", "device-inventory", "device-trust-status", "device-trust-scan", "device-trust-enroll", "device-trust-forget", "workflow-backup-online", "workflow-site-health",
