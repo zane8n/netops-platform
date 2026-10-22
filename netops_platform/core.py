@@ -7595,6 +7595,21 @@ WantedBy=timers.target
             "graphical_pinentry": False if mode in {"legacy-gpg", "sudo-gpg-v1"} else None,
         }
 
+    def _redact_vault_status_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        redacted = dict(payload)
+        redacted["path"] = "<redacted>"
+        redacted["legacy_vault_path"] = "<redacted>"
+        redacted["credential_store"] = "named-secret <redacted>" if str(payload.get("credential_store", "")).startswith("named-secret") else payload.get("credential_store")
+        session = payload.get("session")
+        if isinstance(session, dict):
+            redacted_session = dict(session)
+            if "path" in redacted_session:
+                redacted_session["path"] = "<redacted>"
+            redacted["session"] = redacted_session
+        if "root_key" in redacted:
+            redacted["root_key"] = "<redacted>"
+        return redacted
+
     def cmd_vault(self, args: List[str], opts: GlobalOptions) -> int:
         if self.handle_help("vault", args, opts):
             return SUCCESS
@@ -7635,7 +7650,7 @@ WantedBy=timers.target
                     ),
                 ]
             )
-            self.emit(payload, opts, text)
+            self.emit(self._redact_vault_status_payload(payload), opts, text)
             return SUCCESS
         if verb not in {"set", "migrate", "unlock", "lock"}:
             return self.unknown_action("vault", verb, opts)
