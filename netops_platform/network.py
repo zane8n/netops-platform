@@ -790,6 +790,130 @@ def parse_mac_table_output(value: Any, requested_mac: Any) -> List[Dict[str, Any
     return list(unique.values())
 
 
+def parse_aruba_mac_lookup(value: Any, requested_mac: Any) -> List[Dict[str, Any]]:
+    """Read AOS-Switch `show mac-address <mac>` output.
+
+    Unlike Cisco, the answer is not a table row carrying the address: the
+    address appears only in the heading, and the port follows on its own line
+    ("Located on Port : 25") or in a short Port/VLAN table. Reading only lines
+    that contain the address, as the Cisco parser does, finds the heading and
+    never the port. A full-table row ("<mac> <port> <vlan>") is read as well,
+    since that is what `show mac-address | include <mac>` returns.
+    """
+    wanted = normalize_mac(requested_mac)
+    if not wanted:
+        return []
+    text = clean_network_output(value)
+    hits: List[Dict[str, Any]] = []
+
+    def add(port: str, vlan: str, line: str) -> None:
+        port = port.strip(",;()")
+        if port and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9./:_-]{0,31}", port):
+            hits.append({
+                "mac": wanted,
+                "mac_dotted": f"{wanted[:4]}.{wanted[4:8]}.{wanted[8:]}",
+                "vlan": vlan,
+                "entry_type": "",
+                "port": port,
+                "raw_line": line.strip(),
+            })
+
+    in_answer = False
+    in_table = False
+    vlan_hint = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        match = MAC_TOKEN_RE.search(line)
+        if match and normalize_mac(match.group(0)) == wanted:
+            after = line[match.end():].split()
+            if re.search(r"(?i)address table", line[:match.start()]):
+                in_answer, in_table = True, False
+                continue
+            if "show" in line[:match.start()].lower():
+                continue
+            # A full-table row: the address, then the port, then the VLAN.
+            if after and not after[0].startswith(":"):
+                add(after[0], after[1] if len(after) > 1 and re.fullmatch(r"\d{1,4}", after[1]) else "", line)
+            continue
+        if not in_answer or not line:
+            continue
+        located = re.match(r"(?i)located on port\s*:\s*(\S+)", line)
+        if located:
+            add(located.group(1), vlan_hint, line)
+            continue
+        vlan_line = re.match(r"(?i)vlans?\s*(?:id)?\s*:\s*([\d,\s-]+)$", line)
+        if vlan_line:
+            vlan_hint = vlan_line.group(1).replace(" ", "")
+            for row in hits:
+                row["vlan"] = row["vlan"] or vlan_hint
+            continue
+        if re.match(r"(?i)port\s+vlan", line):
+            in_table = True
+            continue
+        if in_table:
+            if set(line) <= set("- "):
+                continue
+            fields = line.split()
+            if len(fields) >= 2 and re.fullmatch(r"[\d,-]+", fields[1]):
+                add(fields[0], fields[1], line)
+            else:
+                in_table = False
+        elif re.search(r"(?i)invalid|not found|^\S+[#>]", line):
+            in_answer = False
+    unique: Dict[tuple, Dict[str, Any]] = {}
+    for row in hits:
+        unique[(row["vlan"], normalize_interface(row["port"]))] = row
+    return list(unique.values())
+
+
+PORT_VLAN_MODES = {"tagged", "untagged", "native-untagged", "native-tagged", "trunk", "access"}
+
+
+def parse_port_mode(value: Any) -> Dict[str, Any]:
+    """Say whether one switch port is a trunk or an access port.
+
+    Reads the per-port answer of each supported family: Cisco
+    `show interfaces <port> switchport`, AOS-Switch `show vlans ports <port>
+    detail`, and AOS-CX `show vlan port <port>`. A voice VLAN does not make a
+    port a trunk: an AOS-Switch edge port tags the phone's VLAN, and the
+    device behind the phone is still on an access port. Returns mode "" when
+    the output says neither.
+    """
+    text = clean_network_output(value)
+    result: Dict[str, Any] = {"mode": "", "tagged_vlans": [], "untagged_vlans": [], "voice_vlans": []}
+    operational = re.search(r"(?im)^\s*Operational Mode:\s*(.+?)\s*$", text)
+    administrative = re.search(r"(?im)^\s*Administrative Mode:\s*(.+?)\s*$", text)
+    for found in (operational, administrative):
+        word = found.group(1).lower() if found else ""
+        if "trunk" in word:
+            result["mode"] = "trunk"
+            return result
+        if "access" in word:
+            result["mode"] = "access"
+            return result
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not re.match(r"\d{1,4}\s", line):
+            continue
+        vlan = int(line.split()[0])
+        right = line.split("|", 1)[1].split() if "|" in line else line.split()[1:]
+        modes = [token.lower() for token in right if token.lower() in PORT_VLAN_MODES]
+        mode = modes[-1] if modes else ""
+        # AOS-Switch columns after the bar: Status, Voice, Jumbo, Mode.
+        voice = "|" in line and len(right) >= 4 and right[-3].lower() == "yes"
+        if mode == "untagged" or mode in {"native-untagged", "access"}:
+            result["untagged_vlans"].append(vlan)
+            if mode == "access":
+                result["mode"] = result["mode"] or "access"
+        elif mode == "tagged" or mode in {"trunk", "native-tagged"}:
+            (result["voice_vlans"] if voice else result["tagged_vlans"]).append(vlan)
+    if result["tagged_vlans"]:
+        result["mode"] = "trunk"
+    elif result["untagged_vlans"] or result["voice_vlans"]:
+        result["mode"] = "access"
+    return result
+
+
 def parse_svi_output(value: Any, vlan: int) -> Dict[str, Any]:
     """Parse common Cisco, Aruba, and FastIron VLAN-interface state output.
 

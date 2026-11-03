@@ -999,7 +999,7 @@ class NetOpsCoreTest(unittest.TestCase):
         covered_by_caller = {
             "inspect_spanning_tree", "inspect_path_forwarding_node", "inspect_path_layer3",
             "collect_path_capabilities", "live_switch_neighbors", "profile_mac_port",
-            "locate_mac_live", "core_lookup_workflow", "cable_diagnostic", "apply_vlan_change",
+            "locate_mac_live", "core_lookup_workflow", "sweep_mac", "cable_diagnostic", "apply_vlan_change",
             "apply_device_config_change", "_run_guarded_device_config_change", "_run_guarded_vlan_change",
         }
         unscoped = sorted(
@@ -1044,6 +1044,200 @@ class NetOpsCoreTest(unittest.TestCase):
         self.assertIn("oui", payload)
         self.assertEqual(payload["vendor"], payload["oui"].get("vendor") or "Unknown")
         self.assertIn("Vendor/OUI:", text)
+
+    def add_aruba(self, ip, name):
+        self.app.state.execute(
+            "INSERT INTO devices(ip,hostname,platform,model,serial,mac,source,last_seen,status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (ip, name, "Aruba AOS-S", "2930F", f"SERIAL-{ip}", "", "test", 1000, "ONLINE"),
+        )
+
+    def mac_sweep_network(self):
+        """A core, an Aruba access switch, and a Cisco switch with an AP on a trunk.
+
+        The MAC passes through the core on its uplink, is plugged into port 25
+        of the Aruba, and (as a wireless client) is also seen on the AP trunk.
+        """
+        self.add_device("192.0.2.1", "SITE-A-CORE-01")
+        self.add_aruba("192.0.2.2", "SITE-A-ACCESS-01")
+        self.add_device("192.0.2.3", "SITE-A-ACCESS-02")
+        self.app.state.execute(
+            "INSERT INTO neighbors(local_ip,local_name,local_port,remote_name,remote_port,remote_ip) VALUES(?,?,?,?,?,?)",
+            ("192.0.2.1", "SITE-A-CORE-01", "Te1/1/1", "SITE-A-ACCESS-01", "A24", "192.0.2.2"),
+        )
+        self.add_ap("192.0.2.40", "SITE-A-AP-01", switch_ip="192.0.2.3", switch_name="SITE-A-ACCESS-02", switch_port="Gi1/0/5")
+        answers = {
+            ("192.0.2.1", "show mac address-table address 0200.0000.0025"): " 112  0200.0000.0025  DYNAMIC  Te1/1/1\n",
+            ("192.0.2.2", "show mac-address 020000-000025"):
+                " Status and Counters - Address Table - 020000-000025\n\n  MAC Address : 020000-000025\n  Located on Port : 25\n",
+            ("192.0.2.2", "show vlans ports 25 detail"):
+                "  VLAN ID Name     | Status     Voice Jumbo Mode\n  112     DATA     | Port-based No    No    Untagged\n",
+            ("192.0.2.3", "show mac address-table address 0200.0000.0025"): " 112  0200.0000.0025  DYNAMIC  Gi1/0/5\n",
+            ("192.0.2.3", "show interfaces Gi1/0/5 switchport"): "Administrative Mode: trunk\nOperational Mode: trunk\n",
+        }
+        envs = {}
+        calls = []
+
+        def capture_batch(target, commands, timeout=120, opts=None, extra_env=None):
+            calls.append((target, list(commands)))
+            envs[target] = dict(extra_env or {})
+            return [(command, answers.get((target, command), "")) for command in commands]
+
+        return capture_batch, calls, envs
+
+    def test_mac_search_flags_the_access_port_and_ignores_trunks(self):
+        capture_batch, calls, envs = self.mac_sweep_network()
+        with mock.patch.object(self.app, "capture_batch", side_effect=capture_batch), \
+             mock.patch.object(self.app, "emit") as emit:
+            rc = self.app.lookup_mac_all("02:00:00:00:00:25", netops.GlobalOptions(), ping="")
+        payload, _, text = emit.call_args.args
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertEqual([(row["switch"], row["port"]) for row in payload["access"]], [("SITE-A-ACCESS-01", "25")])
+        self.assertEqual([(row["switch"], row["port"]) for row in payload["ap_trunk"]], [("SITE-A-ACCESS-02", "Gi1/0/5")])
+        self.assertEqual([(row["switch"], row["placement"]) for row in payload["transit"]], [("SITE-A-CORE-01", "uplink")])
+        self.assertIn("On an access port", text)
+        self.assertIn("Behind an AP", text)
+        self.assertIn("Ignored 1 trunk/uplink port(s)", text)
+        # One login per switch, plus one port read where the MAC is on a port
+        # not already known to face another switch. The core's uplink is not read.
+        self.assertEqual(sorted(target for target, _ in calls), ["192.0.2.1", "192.0.2.2", "192.0.2.2", "192.0.2.3", "192.0.2.3"])
+        # Cisco does not redraw its screen, so its reads skip the long settle;
+        # the Aruba keeps the wrapper's default.
+        self.assertEqual(envs["192.0.2.1"].get("NETOPS_SSH_SETTLE_TIMEOUT"), "1")
+        self.assertEqual(envs["192.0.2.2"], {})
+        located = self.app.state.one("SELECT * FROM relationships_current WHERE rel_type='mac_location' AND switch_ip='192.0.2.2'")
+        self.assertEqual(located["switch_port"], "25")
+
+    def test_mac_search_names_an_ap_found_by_its_own_mac(self):
+        # Found live: the MAC searched for was the AP on the trunk, not a
+        # client behind it, and the output called it a wireless client.
+        capture_batch, _, _ = self.mac_sweep_network()
+        self.app.state.execute("UPDATE aps SET mac=? WHERE name=?", ("0200.0000.0025", "SITE-A-AP-01"))
+        with mock.patch.object(self.app, "capture_batch", side_effect=capture_batch), \
+             mock.patch.object(self.app, "emit") as emit:
+            self.app.lookup_mac_all("02:00:00:00:00:25", netops.GlobalOptions(), ping="")
+        payload, _, text = emit.call_args.args
+        self.assertEqual([(row["switch"], row["port"]) for row in payload["ap_self"]], [("SITE-A-ACCESS-02", "Gi1/0/5")])
+        self.assertEqual(payload["ap_trunk"], [])
+        self.assertIn("This MAC is the AP itself (SITE-A-AP-01)", text)
+
+    def test_mac_search_does_not_trust_spanning_tree_uplinks_alone(self):
+        # The STP sweep marks every forwarding port without portfast as an
+        # uplink, which is most access ports on some switches. That alone must
+        # not hide a device on one of them.
+        self.add_device("192.0.2.5", "SITE-A-ACCESS-05")
+        self.app.state.execute(
+            "INSERT INTO capability_evidence(device_id,capability,state,observed_at,source,confidence,facts_json,raw_evidence_hash,driver_family,parser_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            ("192.0.2.5", "stp", "supported", 1000, "fixture", 90,
+             json.dumps({"uplinks": ["Gi1/0/3"], "uplink_evidence": {"Gi1/0/3": {"uplink": True, "reasons": ["stp-forwarding-non-edge"]}}}),
+             "x", "cisco-ios", "fixture-v1"),
+        )
+
+        def capture_batch(target, commands, timeout=120, opts=None, extra_env=None):
+            answers = {
+                "show mac address-table address 0200.0000.0025": " 112  0200.0000.0025  DYNAMIC  Gi1/0/3\n",
+                "show interfaces Gi1/0/3 switchport": "Operational Mode: static access\n",
+            }
+            return [(command, answers.get(command, "")) for command in commands]
+
+        with mock.patch.object(self.app, "capture_batch", side_effect=capture_batch), mock.patch.object(self.app, "emit") as emit:
+            self.app.lookup_mac_all("02:00:00:00:00:25", netops.GlobalOptions(), ping="")
+        payload = emit.call_args.args[0]
+        self.assertEqual([row["port"] for row in payload["access"]], ["Gi1/0/3"])
+
+    def test_mac_search_covers_more_than_a_hundred_switches(self):
+        for index in range(1, 106):
+            self.add_device(f"192.0.2.{index}", f"SITE-A-SW{index:03d}")
+        # --limit caps printed rows. Applied to the switch list, it used to
+        # leave every switch after the hundredth out of the search.
+        self.assertEqual(len(self.app.current_switch_targets(netops.GlobalOptions())), 105)
+
+    def test_quick_mac_search_stops_at_the_first_access_port(self):
+        for index in range(1, 7):
+            self.add_device(f"192.0.2.{index}", f"SITE-A-SW{index:02d}")
+        # The switch it was last seen on is asked first.
+        self.app.state.record_mac_observation("02:00:00:00:00:25", "192.0.2.6", "SITE-A-SW06", "Gi1/0/9", "112", "DYNAMIC")
+
+        def capture_batch(target, commands, timeout=120, opts=None, extra_env=None):
+            found = target == "192.0.2.6"
+            answers = {
+                "show mac address-table address 0200.0000.0025": " 112  0200.0000.0025  DYNAMIC  Gi1/0/9\n" if found else "",
+                "show interfaces Gi1/0/9 switchport": "Operational Mode: static access\n",
+            }
+            return [(command, answers.get(command, "")) for command in commands]
+
+        with mock.patch.object(self.app, "capture_batch", side_effect=capture_batch), mock.patch.object(self.app, "emit") as emit:
+            rc = self.app.lookup_mac_all("02:00:00:00:00:25", netops.GlobalOptions(), jobs=1, ping="", quick=True)
+        payload, _, text = emit.call_args.args
+        self.assertEqual(rc, netops.SUCCESS)
+        self.assertTrue(payload["stopped_early"])
+        # One worker: the hit, plus at most the switch already picked up.
+        self.assertLessEqual(len(payload["rows"]), 2)
+        self.assertEqual(payload["access"][0]["switch_ip"], "192.0.2.6")
+        self.assertIn("--quick", text)
+
+    def test_mac_search_keeps_the_address_fresh_with_a_ping(self):
+        capture_batch, _, _ = self.mac_sweep_network()
+        self.app.config.public["core_switch_ip"] = "192.0.2.1"
+        started = []
+
+        class FakePing:
+            def __init__(self, address):
+                self.address = address
+
+            def start(self):
+                started.append(self.address)
+                return True
+
+            def stop(self):
+                return {"address": self.address, "sent": 12, "received": 11}
+
+        arp = " Internet  192.0.2.77   3   0200.0000.0025  ARPA   Vlan112\n"
+
+        def with_arp(target, commands, timeout=120, opts=None, extra_env=None):
+            if commands == ["show arp | include 0200.0000.0025"]:
+                return [(commands[0], arp)]
+            return capture_batch(target, commands, timeout, opts, extra_env)
+
+        with mock.patch("netops_platform.lookup_cli.KeepFreshPing", FakePing), \
+             mock.patch.object(self.app, "capture_batch", side_effect=with_arp), \
+             mock.patch.object(self.app, "emit") as emit:
+            self.app.lookup_mac_all("02:00:00:00:00:25", netops.GlobalOptions())
+        payload, _, text = emit.call_args.args
+        # The IP comes from the core's ARP table and the ping starts before
+        # the search, so a quiet device is learned again in time.
+        self.assertEqual(started, ["192.0.2.77"])
+        self.assertEqual((payload["ip"], payload["ping"]["received"]), ("192.0.2.77", 11))
+        self.assertIn("Kept fresh by pinging 192.0.2.77", text)
+
+    def test_keep_fresh_ping_counts_replies_and_reads_the_summary(self):
+        from netops_platform.lookup_cli import KeepFreshPing
+        ping = KeepFreshPing("192.0.2.77")
+        ping.process = mock.Mock(stdout=iter([
+            "PING 192.0.2.77 (192.0.2.77) 56(84) bytes of data.\n",
+            "64 bytes from 192.0.2.77: icmp_seq=1 ttl=63 time=1.2 ms\n",
+            "64 bytes from 192.0.2.77: icmp_seq=2 ttl=63 time=1.1 ms\n",
+            "--- 192.0.2.77 ping statistics ---\n",
+            "3 packets transmitted, 2 received, 33.3333% packet loss, time 2003ms\n",
+        ]))
+        ping._read()
+        self.assertEqual((ping.sent, ping.received), (3, 2))
+
+    def test_lookup_mac_all_parses_ping_and_quick_flags(self):
+        with mock.patch.object(self.app, "lookup_mac_all", return_value=0) as search:
+            self.app.cmd_lookup(["mac", "all", "0200.0000.0025", "--ping", "192.0.2.77", "--quick"], netops.GlobalOptions())
+            self.app.cmd_lookup(["mac", "all", "0200.0000.0025", "--no-ping"], netops.GlobalOptions())
+            self.app.cmd_lookup(["mac", "all", "0200.0000.0025", "--ping"], netops.GlobalOptions())
+        calls = [(call.args[0], call.kwargs["ping"], call.kwargs["quick"]) for call in search.call_args_list]
+        self.assertEqual(calls, [
+            ("0200.0000.0025", "192.0.2.77", True),
+            ("0200.0000.0025", "", False),
+            ("0200.0000.0025", "auto", False),
+        ])
+        with mock.patch.object(self.app, "emit"):
+            self.assertEqual(
+                self.app.lookup_mac_all("0200.0000.0025", netops.GlobalOptions(), ping="not-an-ip"),
+                netops.VALIDATION,
+            )
 
     def write_named_ssh_secret(self, recorded_at):
         """Mimic what `vault set` leaves behind: a named secret plus its rotation time."""

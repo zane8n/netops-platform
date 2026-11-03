@@ -75,6 +75,8 @@ netrune ap controller T300          # what the controller says about each AP
 netrune health review               # settle what is waiting for you
 netrune path inspect 02:00:00:00:00:25 --vlan 120
 netrune excel sync ~/switches.xlsx --dry-run
+netrune map import ~/site.vsdx --dry-run   # your own network map (Visio, draw.io, Excel, text)
+netrune map check                   # ...against what the network shows
 netrune help                        # everything else
 ```
 

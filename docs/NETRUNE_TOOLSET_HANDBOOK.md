@@ -56,6 +56,7 @@ The files named `netrune-discovery`, `netrune-control`, `netrune-probe`, `netrun
 20. [Natural Ask](#20-natural-ask)
 21. [Traffic Monitoring](#21-traffic-monitoring)
 21A. [Excel Workbooks](#21a-excel-workbooks)
+21B. [Network Map](#21b-network-map)
 22. [Local Interfaces](#22-local-interfaces)
 23. [Operational Playbooks](#23-operational-playbooks)
 24. [Security Model](#24-security-model)
@@ -1690,10 +1691,21 @@ Lists cached raw neighbor rows, optionally filtered. This is the best first comm
 ### 12.4 `topology changes`
 
 ```text
-netrune topology changes [--limit N]
+netrune topology changes [--since 24h|7d|2w] [--limit N]
 ```
 
-Shows `link_added` and `link_removed` events. A scan that is partial, unauthenticated, or interrupted can produce apparent removals; validate scan completeness before escalating.
+Shows `link_added` and `link_removed` events, newest first, under a summary:
+links added, removed, the switches involved, and the net change (a link that
+vanished and came back inside the span is no change at the end of it). With
+`--since` it covers a span instead of the last N events; the weekly workflow
+runs `--since 7d`. A single scan that removed 100 or more links is called out
+as a scan from off the site network or with SNMP silent, not a real change.
+A scan that is partial, unauthenticated, or interrupted can still produce
+smaller apparent removals; validate scan completeness before escalating.
+
+The neighbour scan itself refuses to commit a result with no links, or under
+half of those known before (see section 18, "Scheduling"), so a whole-network
+removal no longer happens; `NETRUNE_TOPOLOGY_ACCEPT_DROP=1` accepts a real one.
 
 ### 12.5 `topology timeline`
 
@@ -2456,14 +2468,29 @@ authentication/device-tracking, or another local observation supplies it.
 Locally administered/randomized MACs have no authoritative IEEE manufacturer
 assignment. Netrune reports these as evidence and hints, not certainties.
 
-The older direct forms remain for compatibility:
+To find the port a device is plugged into, search every switch:
+
+```bash
+netrune lookup mac all 0200.0000.0025            # or: netrune check find-mac 0200.0000.0025
+netrune lookup mac all 0200.0000.0025 --quick    # stop at the first access port
+netrune lookup mac all 0200.0000.0025 --ping 192.0.2.25
+```
+
+Every switch between the device and the core lists its MAC, so the search reads
+each reporting port's mode on the switch itself. Only access ports are flagged.
+Trunks and links to other switches are ports the MAC passes through, and are
+ignored. A trunk with an AP on it is listed separately, since that is where a
+wireless client shows up. While the search runs the device is pinged once a
+second, so a quiet device does not drop out of the tables halfway through; the
+IP comes from the core switch's ARP table unless you give one (`--no-ping`
+turns this off). `--quick` asks the switches that held the MAC before first and
+stops at the first access port.
+
+The single-switch form remains for ad hoc debugging:
 
 ```bash
 netrune lookup mac CORE01 0200.0000.0025
-netrune lookup mac all 0200.0000.0025 --limit 50
 ```
-
-They query one switch or all current switches but provide less correlation than `locate`/`profile`. Prefer the explicit subcommands for new procedures.
 
 ### 17.3 `diagnose latency`
 
@@ -2894,7 +2921,14 @@ Everything too slow for the morning, in one run:
    - `ap neighbors --all`;
    - a spanning-tree sweep;
    - changed-only backups of everything;
-3. realignment, and the attention queue.
+3. realignment;
+4. the week in topology: `topology changes --since 7d` (links added and
+   removed, the net change, and a call-out for any scan that lost 100 or more
+   links at once), then `map check`, your network map against what the scans
+   just found (section 21B); both read local state, so they run even when the
+   SSH steps were deferred;
+5. the attention queue, which leads with the map check's result when the map
+   and the network disagree.
 
 If the vault cannot be unlocked (nobody at the desk to answer Windows
 Hello), or no switch answered the reachability step (the laptop is off the
@@ -2902,19 +2936,40 @@ site network), the SSH steps are marked `DEFERRED` instead of failing one
 switch at a time. The attention queue (and so your morning check) then says
 `weekly workflow: ... waiting since ...; run: netrune workflow weekly --resume`.
 
-#### Scheduling the weekly run
+#### Scheduling the weekly run and the daily morning check
 
 ```bash
+netrune workflow schedule status                                   # what is scheduled, and the last runs
 netrune workflow schedule weekly                                   # Sundays 02:00
 netrune workflow schedule weekly --when 'Sat *-*-* 22:00:00'
+netrune workflow schedule daily                                    # the morning check, every day 06:30
+netrune workflow schedule daily --when 'Mon..Fri *-*-* 06:30:00'
 netrune workflow schedule weekly --dry-run                         # show the units
 netrune workflow schedule weekly --remove
 ```
 
 This installs a systemd user timer rather than a cron entry. The timer is
 `Persistent=true`: if the laptop was off or asleep at the scheduled time, the
-missed run starts as soon as it is back. When it runs, Windows Hello may ask
-once for the SSH steps.
+missed run starts as soon as it is back. When the weekly one runs, Windows
+Hello may ask once for the SSH steps; the daily one needs no credentials.
+Exit code 3 (the run finished and left findings for the attention queue) is
+declared a success to systemd (`SuccessExitStatus=3`), so `systemctl --user
+status` no longer shows a run that found something as failed.
+
+Every workflow run is recorded (the last 60: workflow, status, steps, which
+were deferred or failed, and whether a timer or a person started it).
+`workflow schedule status` shows each schedule's next and last firing next to
+those records, which answers "did the weekly actually run?" without the
+journal. Runs before this version are only in `journalctl --user -u
+netrune-weekly`.
+
+A scheduled run from off the site network (a laptop at home on a Sunday)
+used to empty the topology: no switch answered, the empty result was
+committed, and every link was recorded as removed. The neighbour scan now
+refuses to commit a result with no links, or fewer than half the links known
+before, and keeps the previous topology with an error saying why (exit 3).
+After a real large change, `NETRUNE_TOPOLOGY_ACCEPT_DROP=1 netrune topology
+scan` accepts it.
 
 #### `workflow refresh-inventory`
 
@@ -4389,6 +4444,235 @@ netrune excel sync ~/network-tracker.xlsx --sheet Inventory --add-missing \
   --fields hostname,ip,manufacturer,platform,model,serial,mac,status,last_seen --confirm
 ```
 
+## 21B. Network Map
+
+Everything else Netrune knows it *discovered*: LLDP/CDP neighbours, spanning
+tree, controller polls, MAC tables. The network map is what you *declare*:
+your own picture of which switch hangs off which, where each one lives, and
+what is plugged into its ports. Each is evidence about the other. The map
+catches what discovery cannot know (the switch that should be there but is
+dark, the cable that was moved, the closet a switch is in); discovery catches
+what the map got wrong or never had (a typo, a replaced switch, a new edge
+switch someone added). `netrune map` keeps the two apart and compares them.
+
+The map is one text file per profile:
+
+```bash
+netrune map path        # ~/.config/netrune/profiles/<profile>/network-map.txt
+```
+
+It is yours. Netrune adds to it (each addition marked `# netrune <date>`) and
+fills blanks, but never deletes, reorders, or reformats what you wrote. Every
+write is previewed first, needs `--confirm`, backs the old file up to
+`<data dir>/map-backups/`, is read back and verified, and is recorded in the
+audit log.
+
+### 21B.1 Getting your map in: start from what you already have
+
+| You have | Do this |
+| --- | --- |
+| A Visio drawing (`.vsdx`) | `netrune map import site.vsdx --dry-run`, then `--confirm` |
+| A draw.io / diagrams.net file | `netrune map import site.drawio --dry-run`, then `--confirm` |
+| An Excel sheet or CSV of switches and links | `netrune map import links.xlsx --sheet Uplinks --dry-run`, then `--confirm` |
+| A PDF or a picture of the map | Have it transcribed into the text format (21B.2); Claude can read the picture and write the file. Then `map check`. |
+| Nothing written down | `netrune map init --from-network --dry-run`, then without `--dry-run`: a draft of every switch and link Netrune knows, for you to add locations to and correct |
+| A partial map | Import or write what you have; `map update --add-new` grows it one hop at a time from what you mapped |
+
+What each importer reads:
+
+- **Visio `.vsdx`** (an older `.vsd` must be re-saved as `.vsdx`): each shape
+  with text is a device; each connector glued at both ends is a cable; the
+  connector's text gives the ports (`Gi1/0/49 - Te1/1/1`: the first is the end
+  the connector starts from). Shape Data such as *IP Address*, *Serial
+  Number*, *Network Name* is read. A grouped shape is one device, whichever
+  sub-shape holds its text. The stencil (master) name says what a shape is:
+  phone, access point, printer, router, firewall, switch.
+- **draw.io**: vertices are devices, edges are cables. Port names come from
+  the edge label (`Gi1/0/1 - Gi1/0/49`) or, better, from a label at each end
+  of the edge. A container or swimlane becomes the `@location` of what is in
+  it. Custom properties on a shape (Edit Data: `ip`, `serial`, `model`,
+  `location`, `kind`) are read. Compressed and uncompressed files both work.
+  Text boxes not connected to anything (titles, notes) are ignored.
+- **CSV / Excel**: the header row is found automatically (first 30 rows). It
+  needs a device column (`Device`, `Switch`, `Hostname`, `Name`, ...) plus any
+  of: `IP`, `Location`/`Building`/`Room`, `Model`, `Serial`, `MAC`, `Port`,
+  `Connects To`/`Neighbour`/`Uplink`, `Remote Port`, `Type`, `Description`.
+  A row is a device (no port), a cable (a port and what it connects to), or
+  something plugged in (a port and a type such as `phone`). A blank device
+  cell repeats the one above, so a sheet that names each switch once per block
+  of rows works. A port range (`Gi1/0/1-24`) covers many ports.
+
+Shapes that are phones, APs, printers, cameras, or PCs become things plugged
+into a switch port, not devices of the map in their own right.
+
+Into an existing map, an import *merges*: new devices, cables, and plugged-in
+things are added; blank IP/model/serial/location fields are filled;
+`--overwrite` also replaces differing ones; nothing is removed. `--replace`
+starts the map over from the file (the old one is backed up).
+
+### 21B.2 The text format
+
+```text
+# Anything after # is a comment.
+
+[Server room]                                   # sets @location for the devices below
+SITE-A-CORE-01  192.0.2.1  model=C9500-24Y4C
+  Te1/1/1   -> SITE-A-DIST-01 Te1/1/1           # a cable: my port -> device, its port
+  Te1/1/2   -> SITE-A-DIST-02                   # far port unknown: fine
+  Te1/1/8   -> SITE-A-FW-01
+
+SITE-A-FW-01  firewall  192.0.2.254
+
+[Admin block]
+SITE-A-DIST-01  192.0.2.10  serial=FOC1234ABCD
+  Gi1/0/1-24   phone                            # 24 phones, one line
+  Gi1/0/25     ap   SITE-A-AP-012               # an AP, by name
+  Gi1/0/26     Reception printer                # kind guessed from the words
+  Gi1/0/48     -> SITE-A-ACC-01 Gi1/1/1
+  -> SITE-A-ACC-02                              # linked, local port unknown
+
+SITE-A-ACC-01  192.0.2.20  @"Admin first floor" # @location on the line itself
+SITE-A-ACC-02  192.0.2.21
+
+SITE-A-DIST-02 Gi1/0/49 -> SITE-A-ACC-03 Gi1/1/1   # a cable on a line of its own
+```
+
+The rules, all of them:
+
+- A line at the left margin is a device: `NAME [kind] [IP] [key=value ...]
+  [@location]`. `kind` is `switch` unless you write `router`, `firewall`,
+  `controller`, `server`, ... Names with spaces go in quotes.
+- An indented line under it is one of its ports. `PORT -> DEVICE [PORT]` is a
+  cable; `PORT phone|ap|printer|camera|pc [label]` is something plugged in;
+  `PORT any words` guesses the kind from the words (`printer`, `phone`,
+  `ext 2001`, a name ending in `AP12`, a Cisco phone's `SEP...` name).
+- `Gi1/0/1-24` and `1-8,10` cover many ports at once.
+- `[Location]` on its own line sets the location for the devices after it.
+- A device named only by a cable (`-> SITE-A-ACC-02`) needs no line of its
+  own; give it one when you want to record its IP or location.
+- Port spellings are compared loosely: `Gi1/0/1` = `GigabitEthernet1/0/1`,
+  Aruba's `49` = `"SWITCH port 49"`.
+
+`netrune map edit` opens the file in `$VISUAL`/`$EDITOR` (else nano or vi),
+then reads it back and lists any line it could not understand, with its line
+number.
+
+### 21B.3 Adding many switches at once
+
+- One line per switch is enough to start; cables and ports can come later.
+  Fifty new edge switches are fifty lines:
+  `SITE-B-EDGE-14 192.0.2.114 @"Workshop 3"`.
+- Group them under `[Building]` headers instead of repeating `@location`.
+- Paste from a spreadsheet: save the rows as CSV and `map import` them; the
+  import merges into the map you already have.
+- Let the network type it: `map update --add-new --dry-run` lists every
+  switch next to one you mapped, with its IP, model, serial, MAC, and the
+  cable between them; `--confirm` writes them in a marked section at the end
+  of the file. Each run reaches one hop further, so it grows the map at the
+  pace you review it.
+- `map update --attachments` fills in the APs and phones the network sees on
+  your mapped switches' ports, so you never type a phone list by hand.
+
+### 21B.4 Checking: `netrune map check`
+
+```bash
+netrune map check                      # the whole map
+netrune map check SITE-A-DIST-01       # one device: its line, cables, ports
+netrune map check --all                # also list what agrees
+netrune map check --file plan.vsdx     # check any map file without importing it
+```
+
+Each device is matched to the inventory by serial, then MAC, then its name,
+then its IP (a typed name is more trustworthy than a typed address). Each
+cable is compared with LLDP/CDP from both ends (spanning-tree links count
+only where LLDP/CDP says nothing about the two). Each AP is compared with the
+AP inventory and the port's neighbours; each phone with the CDP/LLDP
+neighbour on that port. Then the other direction: what the network shows next
+to your mapped devices that the map does not have.
+
+| Result | Means | What to do |
+| --- | --- | --- |
+| `OK` | Map and network agree | Nothing |
+| `DIFFERENT` | Both have it, details differ: a cable on another port, a port that leads elsewhere, another IP, a different serial (*replaced?*), another AP on the port, two map lines for one switch | Decide which is right. Fix the map (`map update --overwrite` takes the network's values), or fix the network |
+| `NOT SEEN` | The switch was scanned and does not show it | A cable or phone that is gone, unplugged, or never there; or a device that does not speak CDP/LLDP |
+| `NO MATCH` | A device Netrune has never discovered | Usually a typo (the line says *did you mean ...?*), or a switch not yet scanned (`inventory scan`) |
+| `NOT ON MAP` | A cable between two mapped devices that the map lacks | `map update` adds it |
+| `STALE` | Seen before, not in the current scan of either end | Run `topology scan` on the site network |
+| `UNKNOWN` | No evidence either way | Printers, cameras, and PCs rarely speak CDP/LLDP: `netrune lookup mac` finds them |
+| `INFO` | Switches, APs, phones next to mapped devices that are not on the map | `map update --add-new` / `--attachments`, or ignore for a partial map |
+
+The command exits 3 when anything disagrees (`DIFFERENT`, `NOT SEEN`,
+`NO MATCH`, `NOT ON MAP`) and 0 otherwise. The last check's result is kept,
+shown by `map show`, and put at the top of `health attention` while there are
+disagreements.
+
+The check reads only what Netrune already has; it takes about a second for
+200 switches. For current evidence, run it after `topology scan` on the site
+network, which the weekly workflow does for you.
+
+### 21B.5 Writing discoveries back: `netrune map update`
+
+```bash
+netrune map update --dry-run                           # the diff, nothing written
+netrune map update --confirm
+netrune map update --add-new --attachments --dry-run   # also grow the map
+netrune map update --overwrite --dry-run               # take the network's values where they differ
+```
+
+By default it fills only blanks: IP, model, serial, and MAC on mapped
+devices; a cable's missing port where exactly one cable joins the two
+switches (written into your line in place, keeping your spacing and comment);
+and cables between mapped devices that the map lacks. `--add-new`,
+`--attachments`, and `--overwrite` widen it as their names say. It never
+removes anything: a `NOT SEEN` cable stays on the map until you decide.
+
+### 21B.6 The weekly loop
+
+The weekly workflow ends with `topology changes --since 7d` and `map check`,
+so a week's topology work is:
+
+1. Monday: read the weekly result (`netrune workflow schedule status`, then
+   `netrune health attention`). The map line says how many items disagree.
+2. `netrune map check`: for each `DIFFERENT`/`NOT SEEN`, decide whether the
+   map or the network is wrong.
+3. Fix the network (a cable back where it belongs), or the map
+   (`map edit`, or `map update --overwrite --confirm` to take the network's
+   values).
+4. `netrune map update --dry-run`, then `--confirm`, to take in what is new.
+5. Next week's check starts from a map that matches the network, so anything
+   it flags is a real change.
+
+### 21B.7 Getting the map out
+
+```bash
+netrune map export ~/network-map.csv       # edit in Excel, bring back with map import
+netrune map export ~/network-map.drawio    # a diagram, coloured by a fresh check
+netrune map show                           # devices per location, last check
+netrune map show SITE-A-DIST-01            # one device and what links to it
+```
+
+The draw.io diagram lays devices out in rows by hops from the most connected
+one, labels both ends of each cable with its port, summarises each switch's
+phones and APs, and colours everything by a fresh check: green agrees, red
+not seen, orange different, dashed blue on the network but not the map, grey
+no evidence.
+
+### 21B.8 Limits
+
+- A phone that does not announce itself over CDP/LLDP, a printer, a camera,
+  or a PC cannot be confirmed from neighbour data; they show `UNKNOWN`.
+  `netrune lookup mac` finds them by MAC.
+- Spanning tree knows only its own side of a link, so a link it alone shows
+  confirms that the two switches are joined, not the far port.
+- Visio containers are not read as locations (draw.io containers are); put
+  locations in Shape Data or in `[Location]` sections after the import.
+- Pictures and PDFs carry no machine-readable links; they need transcribing.
+- The map file holds your organisation's names and rooms: it lives in the
+  profile (mode 0600), travels with `profile pack`/`profile export`, and is
+  never part of a public export.
+
+---
+
 ## 22. Local Interfaces
 
 Netrune opens no listening socket. Every interface is a local process reading
@@ -5532,7 +5816,14 @@ netrune ap timeline [ap]
 netrune topology scan
 netrune topology show [target]
 netrune topology neighbors [target]
-netrune topology changes
+netrune topology changes [--since 7d]
+netrune map check [device]
+netrune map update --dry-run | --confirm
+netrune map import <file.vsdx|.drawio|.xlsx|.csv|.txt> --dry-run
+netrune map init --from-network --dry-run
+netrune map edit
+netrune map export <file.drawio|.csv>
+netrune workflow schedule status
 netrune memory refresh
 netrune memory switch <switch>
 netrune memory device <entity>

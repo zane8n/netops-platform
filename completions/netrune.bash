@@ -6,7 +6,7 @@ _netrune_complete() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     domain="${COMP_WORDS[1]}"
     if (( COMP_CWORD == 1 )); then
-        COMPREPLY=( $(compgen -W 'inventory ap topology memory health backup device vault vlan lookup diagnose workflow commands db ask check init profile config secrets ingest plugin setup traffic path excel support' -- "$cur") )
+        COMPREPLY=( $(compgen -W 'inventory ap topology memory health backup device vault vlan lookup diagnose workflow commands db ask check init profile config secrets ingest plugin setup traffic path map excel support' -- "$cur") )
         return
     fi
     if (( COMP_CWORD == 2 )); then
@@ -36,6 +36,7 @@ _netrune_complete() {
             setup) COMPREPLY=( $(compgen -W 'poller local' -- "$cur") ) ;;
             traffic) COMPREPLY=( $(compgen -W 'list watch ping subscribe name push dashboard health unwatch pause resume interval status interfaces poll daemon exporter backfill stack export pull remote verify report show' -- "$cur") ) ;;
             path) COMPREPLY=( $(compgen -W 'inspect findings history show' -- "$cur") ) ;;
+            map) COMPREPLY=( $(compgen -W 'show check update import init edit export path' -- "$cur") ) ;;
             excel) COMPREPLY=( $(compgen -W 'inspect sync export report' -- "$cur") ) ;;
             support) COMPREPLY=( $(compgen -W 'bundle' -- "$cur") ) ;;
         esac

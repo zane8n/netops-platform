@@ -83,6 +83,9 @@ Interface and reachability monitoring. Collection is watchlist driven: only targ
 .B path
 Inspect a bounded endpoint path across cached topology and live read-only forwarding evidence.
 .TP
+.B map
+Your own network map (switches, links, phones, APs), checked against what Netrune discovers and kept up to date from it.
+.TP
 .B excel
 Correlate your own Excel workbooks with Netrune's inventory, and build tracker workbooks.
 .TP
@@ -217,7 +220,7 @@ netrune check find - Find a switch or AP by any part of its name, IP, MAC, seria
 netrune check find-ip '<ip|mac>' - Ask the core switch's ARP/MAC tables who an IP or MAC is.
 .TP
 .B check-find-mac
-netrune check find-mac '<mac>' - Live: which switch port a MAC is on now (access port, not the uplinks it crosses).
+netrune check find-mac '<mac>' - Live: the access port a MAC is plugged into now; trunks and uplinks it crosses are ignored.
 .TP
 .B check-hardware
 netrune check hardware '<device>' - Live: re-read model, Motherboard serial, and base MAC over SSH.
@@ -499,7 +502,7 @@ netrune lookup core '<target>' - Core IP/MAC lookup cached into memory.
 netrune lookup mac '<target>' '<mac>' - MAC lookup from one target or from all current switches with target=all.
 .TP
 .B lookup-mac-all
-netrune lookup mac all '<mac>' - Search every online switch for a MAC and separate the access port it is attached to from the uplinks it transits.
+netrune lookup mac all '<mac>' - Search every online switch for a MAC, flag the access port it is plugged into, and ignore the trunks it passes through.
 .TP
 .B lookup-mac-history
 netrune lookup mac history '<mac>' - Show newest-first identity and switch-port events for a MAC.
@@ -524,6 +527,30 @@ netrune lookup mac registry refresh - Refresh all IEEE public MAC assignment CSV
 .TP
 .B lookup-mac-vendor
 netrune lookup mac vendor '<mac>' - Resolve a MAC prefix from the locally installed OUI database.
+.TP
+.B map-check
+netrune map check - Compare the network map with discovered inventory and LLDP/CDP/spanning-tree links: what agrees, differs, is not seen, or is not on the map.
+.TP
+.B map-edit
+netrune map edit - Open the network map in your editor, then validate it.
+.TP
+.B map-export
+netrune map export '<file>' - Write the map as CSV, text, or a draw.io diagram coloured by a fresh check.
+.TP
+.B map-import
+netrune map import '<file>' --dry-run - Merge a text, CSV, Excel, draw.io, or Visio map into the network map. Apply explicitly in the CLI with --confirm.
+.TP
+.B map-init
+netrune map init - Write an empty map template, or with --from-network a draft from discovered switches and links.
+.TP
+.B map-path
+netrune map path - Print where the active profile keeps its network map.
+.TP
+.B map-show
+netrune map show - Summarise the operator's network map: devices per location and the last check.
+.TP
+.B map-update
+netrune map update --dry-run - Fill blanks and add discovered links (and with flags, neighbouring switches, APs, and phones) into the map file. Apply explicitly in the CLI with --confirm.
 .TP
 .B memory-device
 netrune memory device '<target>' - Show current identity relationships and history for a device.
@@ -763,7 +790,7 @@ netrune workflow morning-check - Health, topology refresh, memory realignment, d
 netrune workflow refresh-inventory - Health, AP, topology, and memory refresh.
 .TP
 .B workflow-schedule
-netrune workflow schedule weekly - Install a persistent systemd user timer for the weekly workflow.
+netrune workflow schedule weekly - Install a persistent systemd user timer for the weekly workflow or the daily morning check; 'schedule status' shows them and their last runs.
 .TP
 .B workflow-site-health
 netrune workflow site-health '<target>' - Latency and filtering checks for a target/site.

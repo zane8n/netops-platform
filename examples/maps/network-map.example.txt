@@ -1,0 +1,30 @@
+# Example network map (documentation names and addresses only).
+# Copy into place with:  netrune map import examples/maps/network-map.example.txt --dry-run
+# The format is explained at the top of the file 'netrune map init' writes,
+# and in the handbook, section 21B.
+
+[Server room]
+SITE-A-CORE-01  192.0.2.1  model=C9500-24Y4C
+  Te1/1/1   -> SITE-A-DIST-01 Te1/1/1
+  Te1/1/2   -> SITE-A-DIST-02 Te1/1/1
+  Te1/1/8   -> SITE-A-FW-01                  # far port unknown: fine
+
+SITE-A-FW-01  firewall  192.0.2.254
+
+[Admin block]
+SITE-A-DIST-01  192.0.2.10
+  Gi1/0/1-24   phone                         # 24 phones on one line
+  Gi1/0/25     ap   SITE-A-AP-012
+  Gi1/0/26     Reception printer             # kind guessed from the words
+  Gi1/0/48     -> SITE-A-ACC-01 Gi1/1/1
+
+SITE-A-ACC-01  192.0.2.20  @"Admin first floor"
+  Gi1/0/1-8    phone
+
+[Workshop]
+SITE-A-DIST-02  192.0.2.11
+  Gi1/0/48     -> SITE-A-ACC-02 Gi1/1/1
+  Gi1/0/47     -> SITE-A-ACC-03
+
+SITE-A-ACC-02  192.0.2.21
+SITE-A-ACC-03  192.0.2.22

@@ -1045,6 +1045,21 @@ discover_neighbors() {
             print $1, $2, $3, $4, $5, remote_ip
         }
     ' "$temp_file" | sort -u > "$neighbor_output" || return 10
+    # A scan that reached (almost) nothing says where this machine is, not
+    # what the network looks like: off the site network every switch is
+    # silent, and committing that empty result recorded every link as removed
+    # (754 of them on one Sunday) and emptied the topology until the next
+    # on-site scan. Keep the previous links and say why; a real large change
+    # is accepted with NETRUNE_TOPOLOGY_ACCEPT_DROP=1.
+    local previous_links new_links
+    previous_links=$(wc -l < "$NEIGHBOR_DB" 2>/dev/null || echo 0)
+    new_links=$(wc -l < "$neighbor_output" 2>/dev/null || echo 0)
+    if [[ "${NETOPS_TOPOLOGY_ACCEPT_DROP:-0}" != "1" ]] && (( previous_links > 0 )) \
+        && { (( new_links == 0 )) || { (( previous_links >= 20 )) && (( new_links * 2 < previous_links )); }; }; then
+        rm -f "$neighbor_output" "$temp_file"
+        log_error "Neighbor discovery found ${new_links} link(s) where ${previous_links} were known; kept the previous topology (off the site network, or SNMP not answering?). If the network really shrank, re-run with NETRUNE_TOPOLOGY_ACCEPT_DROP=1."
+        return 3
+    fi
     (
         flock -x 210 || exit 1
         mv "$neighbor_output" "$NEIGHBOR_DB"

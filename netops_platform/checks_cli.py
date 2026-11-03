@@ -94,7 +94,7 @@ CHECKS: Tuple[Check, ...] = (
     Check("find", "where", ("inventory", "list"), "[text]",
           "Find a switch or AP by any part of its name, IP, MAC, serial, or model.", "none", "instant"),
     Check("find-mac", "where", ("lookup", "mac", "all", "{1}"), "<mac>",
-          "Live: which switch port a MAC is on now (access port, not the uplinks it crosses).", "SSH", "seconds"),
+          "Live: the access port a MAC is plugged into now; trunks and uplinks it crosses are ignored.", "SSH", "seconds"),
     Check("find-ip", "where", ("lookup", "core", "{1}"), "<ip|mac>",
           "Ask the core switch's ARP/MAC tables who an IP or MAC is.", "SSH", "seconds"),
     Check("mac-history", "where", ("lookup", "mac", "history", "{1}"), "<mac>",

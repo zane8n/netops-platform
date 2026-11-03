@@ -42,7 +42,7 @@ stays resident for).
 ## Architecture in one paragraph
 
 One process per invocation. `App.dispatch(argv)` parses global flags,
-routes on the first positional arg (the domain) to one of 27
+routes on the first positional arg (the domain) to one of 28
 `cmd_<domain>` handlers via a flat dict, which routes internally on the
 second arg (the verb). Every command returns an int exit code (0=success,
 see `docs/CLAUDE_REFERENCE.md` section 3 for the full table). State lives

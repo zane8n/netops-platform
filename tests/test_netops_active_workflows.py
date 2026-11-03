@@ -589,17 +589,20 @@ class NetOpsActiveWorkflowTest(unittest.TestCase):
         self.add_device("192.0.2.1", "SW-A")
         self.add_device("192.0.2.2", "SW-B")
 
-        def capture(command, timeout):
-            if command[-2] == "192.0.2.2":
-                return 0, " 131  0200.0000.0025  DYNAMIC  Gi1/0/7\n", ""
-            return 0, "[192.0.2.1] SW-A -> MAC NOT FOUND\n", ""
+        def capture_batch(target, commands, timeout=120, opts=None, extra_env=None):
+            answers = {
+                "show mac address-table address 0200.0000.0025": " 131  0200.0000.0025  DYNAMIC  Gi1/0/7\n" if target == "192.0.2.2" else "",
+                "show interfaces Gi1/0/7 switchport": "Name: Gi1/0/7\nAdministrative Mode: static access\nOperational Mode: static access\n",
+            }
+            return [(command, answers.get(command, "")) for command in commands]
 
-        with mock.patch.object(self.app, "capture", side_effect=capture), mock.patch.object(self.app, "live_log"), mock.patch.object(self.app, "emit") as emit:
+        with mock.patch.object(self.app, "capture_batch", side_effect=capture_batch), mock.patch.object(self.app, "live_log"), mock.patch.object(self.app, "emit") as emit:
             rc = self.app.locate_mac_live("02:00:00:00:00:25", netops.GlobalOptions(limit=10), "all", False)
         payload = emit.call_args.args[0]
         self.assertEqual(rc, netops.SUCCESS)
         self.assertEqual(payload["counts"]["hits"], 1)
         self.assertEqual(payload["hits"][0]["role"], "edge-candidate")
+        self.assertEqual(payload["hits"][0]["placement"], "access")
         location = self.app.state.one("SELECT * FROM relationships_current WHERE rel_type='mac_location'")
         self.assertEqual(location["switch_ip"], "192.0.2.2")
         self.assertEqual(location["switch_port"], "Gi1/0/7")

@@ -119,9 +119,63 @@ class TopologyCommandsMixin:
         if verb=="show":
             if rest and not is_all_keyword(rest[0]) and not opts.json: return self.run_subprocess(self.legacy_cmd("netrune-discovery","--topology",rest[0]),opts)
             rows=self.state.rows("SELECT * FROM neighbors ORDER BY local_name,local_port LIMIT ?",(opts.limit,)); self.emit({"ok":True,"rows":rows},opts,self.render_table(rows,["local_ip","local_name","local_port","remote_name","remote_port","remote_ip"])); return SUCCESS
-        if verb=="changes": rows=self.state.rows("SELECT * FROM topology_events ORDER BY created_at DESC,id DESC LIMIT ?",(opts.limit,)); self.emit({"ok":True,"rows":rows},opts,self.render_table(rows,["created_at","event_type","local_ip","local_port","remote_name","remote_port","detail"])); return SUCCESS
+        if verb=="changes": return self.topology_changes(opts)
         if verb=="timeline": return self.relationship_timeline(rest[0] if rest else "neighbor_link",opts,rel_type="neighbor_link")
         return self.unknown_action("topology", verb, opts)
+
+    # One scan that removes this many links at once is almost never the
+    # network: it is a scan from off the site network or with SNMP silent
+    # (the discovery script now refuses to commit those, see netops-discovery).
+    BULK_REMOVAL = 100
+
+    def topology_changes(self, opts: GlobalOptions) -> int:
+        """`topology changes [--since 7d] [--limit N]`: link events, newest
+        first, with a one-line summary the weekly workflow shows."""
+        from netops_platform.core import SUCCESS, VALIDATION, fmt_time
+        since_text = (opts.since or "").strip().lower()
+        cutoff = 0
+        if since_text:
+            match = re.fullmatch(r"(\d+)\s*([hdw])", since_text)
+            if not match:
+                return self.usage_error("topology", "changes", opts, f"'{opts.since}' is not a span; use 24h, 7d, or 2w.",
+                                        "netrune topology changes --since 7d", VALIDATION)
+            cutoff = int(time.time()) - int(match.group(1)) * {"h": 3600, "d": 86400, "w": 7 * 86400}[match.group(2)]
+            rows = self.state.rows("SELECT * FROM topology_events WHERE created_at>=? ORDER BY created_at DESC,id DESC", (cutoff,))
+        else:
+            rows = self.state.rows("SELECT * FROM topology_events ORDER BY created_at DESC,id DESC LIMIT ?", (opts.limit,))
+        added = sum(1 for row in rows if row.get("event_type") == "link_added")
+        removed = sum(1 for row in rows if row.get("event_type") == "link_removed")
+        switches = len({row.get("local_ip") for row in rows})
+        per_scan: Dict[int, int] = {}
+        for row in rows:
+            if row.get("event_type") == "link_removed":
+                per_scan[int(row.get("created_at") or 0)] = per_scan.get(int(row.get("created_at") or 0), 0) + 1
+        bulk = [{"at": at, "at_iso": fmt_time(at), "removed": count} for at, count in sorted(per_scan.items()) if count >= self.BULK_REMOVAL]
+        span = f"since {fmt_time(cutoff)}" if cutoff else f"in the last {len(rows)} event(s)"
+        # A link that went and came back (or came and went) inside the span
+        # is no change at the end of it; the net figures are what moved.
+        net: Dict[Tuple[Any, ...], int] = {}
+        for row in sorted(rows, key=lambda row: (int(row.get("created_at") or 0), int(row.get("id") or 0))):
+            key = (row.get("local_ip"), row.get("local_port"), row.get("remote_name"), row.get("remote_port"))
+            net[key] = net.get(key, 0) + (1 if row.get("event_type") == "link_added" else -1 if row.get("event_type") == "link_removed" else 0)
+        net_added = sum(1 for value in net.values() if value > 0)
+        net_removed = sum(1 for value in net.values() if value < 0)
+        summary = f"{added} link(s) added, {removed} removed on {switches} switch(es) {span}" if rows else f"No topology changes {span}."
+        if rows and (net_added, net_removed) != (added, removed):
+            summary += f"; net {net_added} added, {net_removed} removed"
+        lines = [summary]
+        for item in bulk:
+            lines.append(f"  {item['removed']} links vanished in one scan at {item['at_iso']}: a scan from off the site network "
+                         "or with SNMP silent, not a real change; the links come back as 'added' with the next good scan.")
+        shown = rows[:opts.limit]
+        if shown:
+            lines.append(self.render_table(shown, ["created_at","event_type","local_ip","local_port","remote_name","remote_port","detail"]))
+        if len(rows) > len(shown):
+            lines.append(f"{len(rows) - len(shown)} more (--limit N shows more).")
+        self.emit({"ok": True, "rows": rows, "summary": summary, "added": added, "removed": removed, "switches": switches,
+                   "net_added": net_added, "net_removed": net_removed,
+                   "since": cutoff or None, "bulk_removals": bulk}, opts, "\n".join(lines))
+        return SUCCESS
 
     def inspect_spanning_tree(
         self,

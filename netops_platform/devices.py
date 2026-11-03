@@ -610,6 +610,7 @@ REGISTRY.register(_driver(
         "cdp_neighbors": ("show cdp neighbors",),
         "neighbor_detail": ("show lldp neighbors {interface} detail",),
         "trunk_summary": ("show interfaces trunk",),
+        "port_mode": ("show interfaces {interface} switchport",),
         "stp_summary": ("show spanning-tree",),
         "fdb": ("show mac address-table",),
         "vlan_membership": ("show vlan id {vlan}", "show interfaces trunk"),
@@ -643,6 +644,7 @@ REGISTRY.register(_driver(
         "vlan_locate": ("show vlan id {vlan}", "show interface trunk"),
         "mac_lookup": ("show mac address-table address {mac_dotted}",),
         "arp_lookup": ("show ip arp | include {lookup}",),
+        "port_mode": ("show interface {interface} switchport",),
         "core_lookup": ("show ip arp | include {lookup}", "show mac address-table | include {lookup}"),
         "ping": ("ping {destination} count {count} timeout {timeout}",),
         "neighbors": ("show lldp neighbors detail", "show cdp neighbors detail"),
@@ -680,6 +682,9 @@ REGISTRY.register(_driver(
         "vlan_locate": ("show vlan {vlan}", "show running-config"),
         "mac_lookup": ("show mac-address {mac_hyphen}",),
         "arp_lookup": ("show arp | include {lookup}",),
+        # Lists every VLAN on the port with its Tagged/Untagged mode and
+        # whether it is the voice VLAN, which is what makes it a trunk or not.
+        "port_mode": ("show vlans ports {interface} detail",),
         "core_lookup": ("show arp | include {lookup}", "show mac-address | include {lookup}"),
         "ping": ("ping {destination} repetitions {count}",),
         "neighbors": ("show lldp info remote-device",),
@@ -720,6 +725,7 @@ REGISTRY.register(_driver(
         "vlan_locate": ("show vlan {vlan}", "show running-config"),
         "mac_lookup": ("show mac-address-table address {mac_colon}",),
         "arp_lookup": ("show arp | include {lookup}",),
+        "port_mode": ("show vlan port {interface}",),
         "core_lookup": ("show arp | include {lookup}", "show mac-address-table | include {lookup}"),
         "ping": ("ping {destination} repetitions {count}",),
         "neighbors": ("show lldp neighbor-info",),

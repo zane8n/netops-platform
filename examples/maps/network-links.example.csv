@@ -1,0 +1,7 @@
+Switch,Mgmt IP,Building,Local Port,Connected To,Remote Port,Type,Description
+SITE-A-CORE-01,192.0.2.1,Server room,Te1/1/1,SITE-A-DIST-01,Te1/1/1,,
+,,,Te1/1/2,SITE-A-DIST-02,Te1/1/1,,
+SITE-A-DIST-01,192.0.2.10,Admin block,Gi1/0/1-24,,,phone,
+,,,Gi1/0/25,,,ap,SITE-A-AP-012
+,,,Gi1/0/48,SITE-A-ACC-01,Gi1/1/1,,
+SITE-A-DIST-02,192.0.2.11,Workshop,Gi1/0/48,SITE-A-ACC-02,Gi1/1/1,,

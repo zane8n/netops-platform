@@ -67,7 +67,7 @@ Every entry below comes from the registry used by the CLI, previews, and workflo
 | `check-down` | `netrune check down` | `read-only` | `text` | What is down right now, from the last pulse. |
 | `check-find` | `netrune check find` | `read-only` | `text` | Find a switch or AP by any part of its name, IP, MAC, serial, or model. |
 | `check-find-ip` | `netrune check find-ip '<ip\|mac>'` | `read-only` | `text` | Ask the core switch's ARP/MAC tables who an IP or MAC is. |
-| `check-find-mac` | `netrune check find-mac '<mac>'` | `read-only` | `text` | Live: which switch port a MAC is on now (access port, not the uplinks it crosses). |
+| `check-find-mac` | `netrune check find-mac '<mac>'` | `read-only` | `text` | Live: the access port a MAC is plugged into now; trunks and uplinks it crosses are ignored. |
 | `check-hardware` | `netrune check hardware '<device>'` | `network-read/local-write` | `text` | Live: re-read model, Motherboard serial, and base MAC over SSH. |
 | `check-internet` | `netrune check internet` | `read-only` | `text` | Is the Internet reachable and unfiltered: DNS, TLS, and filtering checks. |
 | `check-ip-history` | `netrune check ip-history '<ip>'` | `read-only` | `text` | Who has held an IP over time. |
@@ -216,7 +216,7 @@ Every entry below comes from the registry used by the CLI, previews, and workflo
 |---|---|---|---|---|
 | `lookup-core` | `netrune lookup core '<target>'` | `network-read/local-write` | `log` | Core IP/MAC lookup cached into memory. |
 | `lookup-mac` | `netrune lookup mac '<target>' '<mac>'` | `network-read/local-write` | `log` | MAC lookup from one target or from all current switches with target=all. |
-| `lookup-mac-all` | `netrune lookup mac all '<mac>'` | `network-read` | `table` | Search every online switch for a MAC and separate the access port it is attached to from the uplinks it transits. |
+| `lookup-mac-all` | `netrune lookup mac all '<mac>'` | `network-read` | `table` | Search every online switch for a MAC, flag the access port it is plugged into, and ignore the trunks it passes through. |
 | `lookup-mac-history` | `netrune lookup mac history '<mac>'` | `read-only` | `table` | Show newest-first identity and switch-port events for a MAC. |
 | `lookup-mac-inspect` | `netrune lookup mac inspect '<mac>'` | `read-only` | `table` | Correlate cached MAC identity, location, IP, vendor, and history evidence. |
 | `lookup-mac-locate` | `netrune lookup mac locate '<mac>'` | `network-read/local-write` | `log` | Search switch forwarding tables without requiring an endpoint IP. |
@@ -225,6 +225,19 @@ Every entry below comes from the registry used by the CLI, previews, and workflo
 | `lookup-mac-registry` | `netrune lookup mac registry status` | `read-only` | `table` | Show cached IEEE registry files, row counts, checksums, sources, and last refresh time. |
 | `lookup-mac-registry-refresh` | `netrune lookup mac registry refresh` | `network-read` | `table` | Refresh all IEEE public MAC assignment CSV registries into the private local cache. |
 | `lookup-mac-vendor` | `netrune lookup mac vendor '<mac>'` | `read-only` | `text` | Resolve a MAC prefix from the locally installed OUI database. |
+
+## map
+
+| Command ID | Invocation | Safety | Output | Purpose |
+|---|---|---|---|---|
+| `map-check` | `netrune map check` | `read-only` | `text` | Compare the network map with discovered inventory and LLDP/CDP/spanning-tree links: what agrees, differs, is not seen, or is not on the map. |
+| `map-edit` | `netrune map edit` | `local-write` | `terminal` | Open the network map in your editor, then validate it. |
+| `map-export` | `netrune map export '<file>'` | `local-write` | `text` | Write the map as CSV, text, or a draw.io diagram coloured by a fresh check. |
+| `map-import` | `netrune map import '<file>' --dry-run` | `local-write` | `text` | Merge a text, CSV, Excel, draw.io, or Visio map into the network map. Apply explicitly in the CLI with --confirm. |
+| `map-init` | `netrune map init` | `local-write` | `text` | Write an empty map template, or with --from-network a draft from discovered switches and links. |
+| `map-path` | `netrune map path` | `read-only` | `text` | Print where the active profile keeps its network map. |
+| `map-show` | `netrune map show` | `read-only` | `text` | Summarise the operator's network map: devices per location and the last check. |
+| `map-update` | `netrune map update --dry-run` | `local-write` | `text` | Fill blanks and add discovered links (and with flags, neighbouring switches, APs, and phones) into the map file. Apply explicitly in the CLI with --confirm. |
 
 ## memory
 
@@ -364,6 +377,6 @@ Every entry below comes from the registry used by the CLI, previews, and workflo
 | `workflow-backup-online` | `netrune workflow backup-online '<target>'` | `network-read/local-write` | `log` | Changed-only backups for online devices. |
 | `workflow-morning-check` | `netrune workflow morning-check` | `network-read/local-write` | `log` | Health, topology refresh, memory realignment, database coherence, filtering, and attention summary. |
 | `workflow-refresh-inventory` | `netrune workflow refresh-inventory` | `network-read/local-write` | `log` | Health, AP, topology, and memory refresh. |
-| `workflow-schedule` | `netrune workflow schedule weekly` | `local-write` | `log` | Install a persistent systemd user timer for the weekly workflow. |
+| `workflow-schedule` | `netrune workflow schedule weekly` | `local-write` | `log` | Install a persistent systemd user timer for the weekly workflow or the daily morning check; 'schedule status' shows them and their last runs. |
 | `workflow-site-health` | `netrune workflow site-health '<target>'` | `network-read/local-write` | `log` | Latency and filtering checks for a target/site. |
 | `workflow-weekly` | `netrune workflow weekly` | `network-read/local-write` | `log` | Every scan, SSH hardware/neighbour/STP reads of every switch, backups, realignment, and attention. |

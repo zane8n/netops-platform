@@ -228,8 +228,38 @@ class WeeklyWorkflowTest(AppTest):
         self.assertIn("OnCalendar=Sat *-*-* 22:00:00", output)
         self.assertIn("NETRUNE_VAULT_DESKTOP_PROMPT=1", output)
         self.assertIn("workflow weekly", output)
-        code, output = self.run_cli("workflow", "schedule", "morning-check")
+        # Exit 3 is "finished with findings", not a failure, to systemd.
+        self.assertIn("SuccessExitStatus=3", output)
+        # Refused before any unit is written or systemctl is called.
+        code, output = self.run_cli("workflow", "schedule", "ap-audit")
         self.assertEqual(code, netops.VALIDATION)
+
+    def test_daily_schedule_runs_the_morning_check_without_the_vault_prompt(self):
+        for name in ("daily", "morning-check"):
+            with self.subTest(name=name):
+                code, output = self.run_cli("workflow", "schedule", name, "--dry-run")
+                self.assertEqual(code, netops.SUCCESS, output)
+                self.assertIn("netrune-daily.timer", output)
+                self.assertIn("workflow morning-check", output)
+                self.assertIn("OnCalendar=*-*-* 06:30:00", output)
+                self.assertIn("SuccessExitStatus=3", output)
+                self.assertNotIn("NETRUNE_VAULT_DESKTOP_PROMPT", output)
+
+    def test_schedule_status_reports_recorded_runs(self):
+        self.app.record_workflow_run({"workflow": "weekly", "status": "ATTENTION", "started_at": 1_700_000_000,
+                                      "finished_at": 1_700_000_100, "completed_steps": 13, "total_steps": 13,
+                                      "steps": [{"id": "stp", "status": "DEFERRED"}, {"id": "map-check", "status": "ATTENTION"}]})
+        with mock.patch.object(type(self.app), "_systemctl_user", staticmethod(lambda *command: (0, ""))), \
+                mock.patch.dict(os.environ, {"HOME": self.temp.name}):
+            code, output = self.run_cli("workflow", "schedule", "status")
+        self.assertEqual(code, netops.SUCCESS, output)
+        self.assertIn("weekly: not scheduled", output)
+        self.assertIn("last weekly run", output)
+        self.assertIn("deferred: stp", output)
+        runs = json.loads(self.app.state.get_marker("workflow_runs"))
+        self.assertEqual(runs[-1]["deferred"], ["stp"])
+        if "INVOCATION_ID" not in os.environ:
+            self.assertEqual(runs[-1]["trigger"], "manual")
 
     def test_device_inventory_all_refreshes_each_online_switch_once(self):
         asked = []

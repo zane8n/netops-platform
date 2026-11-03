@@ -7,7 +7,9 @@ from netops_network import (
     lookup_oui,
     normalize_interface,
     parse_arp_output,
+    parse_aruba_mac_lookup,
     parse_mac_table_output,
+    parse_port_mode,
     parse_cable_diagnostics_output,
     parse_interface_health_output,
     parse_iperf3_output,
@@ -303,6 +305,77 @@ Gi1/0/2             Altn BLK 4         128.2    P2p
         self.assertNotIn("26", uplinks)
         # An access point is not an uplink even though it advertises S.
         self.assertNotIn("1", uplinks)
+
+    def test_aruba_mac_lookup_reads_the_port_line_not_the_heading(self):
+        # The address appears only in the heading; the old line filter kept
+        # the heading, dropped the port, and so never placed a MAC on AOS-S.
+        located = parse_aruba_mac_lookup("""
+ Status and Counters - Address Table - f814dd-c7e4a0
+
+  MAC Address : f814dd-c7e4a0
+  Located on Port : 25
+""", "f8:14:dd:c7:e4:a0")
+        self.assertEqual([(row["port"], row["vlan"]) for row in located], [("25", "")])
+
+        table = parse_aruba_mac_lookup("""
+ Status and Counters - Address Table - f814dd-c7e4a0
+
+  Port   VLANs
+  ------ ------------------
+  A21    112
+""", "f814.ddc7.e4a0")
+        self.assertEqual([(row["port"], row["vlan"]) for row in table], [("A21", "112")])
+
+        # `show mac-address | include <mac>` prints the full-table row: address,
+        # port, VLAN. The Cisco parser would read the port as the VLAN here.
+        row = parse_aruba_mac_lookup(" f814dd-c7e4a0   Trk1   112\n", "f814ddc7e4a0")
+        self.assertEqual([(item["port"], item["vlan"]) for item in row], [("Trk1", "112")])
+
+        self.assertEqual(parse_aruba_mac_lookup("""
+ Status and Counters - Address Table - f814dd-c7e4a0
+
+HP-2930F# 
+""", "f814ddc7e4a0"), [])
+        self.assertEqual(parse_aruba_mac_lookup("show mac-address f814dd-c7e4a0\n", "f814ddc7e4a0"), [])
+
+    def test_port_mode_reads_cisco_switchport(self):
+        self.assertEqual(parse_port_mode("Name: Gi1/0/7\nAdministrative Mode: static access\nOperational Mode: static access\n")["mode"], "access")
+        self.assertEqual(parse_port_mode("Name: Te1/1/1\nAdministrative Mode: trunk\nOperational Mode: trunk\n")["mode"], "trunk")
+        # A port that is down still says what it is configured as.
+        self.assertEqual(parse_port_mode("Administrative Mode: trunk\nOperational Mode: down\n")["mode"], "trunk")
+        self.assertEqual(parse_port_mode("% Invalid input detected at '^' marker.")["mode"], "")
+
+    def test_port_mode_does_not_call_a_phone_port_a_trunk(self):
+        header = """
+ Status and Counters - VLAN Information - for ports 12
+
+  VLAN ID Name                             | Status     Voice Jumbo Mode
+  ------- -------------------------------- + ---------- ----- ----- --------
+"""
+        access = parse_port_mode(header + "  112     DATA                             | Port-based No    No    Untagged\n")
+        self.assertEqual(access["mode"], "access")
+        # AOS-Switch tags the voice VLAN on an ordinary desk port; the PC
+        # behind the phone is still on an access port.
+        phone = parse_port_mode(header
+                                + "  112     DATA                             | Port-based No    No    Untagged\n"
+                                + "  704     VOICE                            | Port-based Yes   No    Tagged\n")
+        self.assertEqual(phone["mode"], "access")
+        self.assertEqual(phone["voice_vlans"], [704])
+        trunk = parse_port_mode(header
+                                + "  1       DEFAULT_VLAN                     | Port-based No    No    Untagged\n"
+                                + "  112     DATA                             | Port-based No    No    Tagged\n"
+                                + "  704     VOICE                            | Port-based Yes   No    Tagged\n")
+        self.assertEqual(trunk["mode"], "trunk")
+        self.assertEqual(trunk["tagged_vlans"], [112])
+
+    def test_port_mode_reads_aos_cx_vlan_port(self):
+        self.assertEqual(parse_port_mode("""
+VLAN  Name             Mode             Mapping
+----- ---------------- ---------------- --------
+1     DEFAULT_VLAN_1   native-untagged  port
+112   DATA             trunk            port
+""")["mode"], "trunk")
+        self.assertEqual(parse_port_mode("112   DATA             access           port\n")["mode"], "access")
 
     def test_trunk_summary_parses_every_section(self):
         trunks = parse_trunk_summary("""

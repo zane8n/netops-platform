@@ -4,6 +4,42 @@
 
 ### Added
 
+- `netrune map`: your own network map beside the discovered topology
+  (ADR 0009). One text file per profile, typed by hand (a device per line,
+  ports indented beneath it, `Gi1/0/1-24 phone` ranges, `[Location]`
+  sections) or brought in as it is from CSV/Excel, draw.io, or Visio
+  (`map import`, merging into what is there), or drafted from discovery
+  (`map init --from-network`). `map check` matches every device (serial,
+  MAC, name, then IP), cable (LLDP/CDP from both ends, spanning tree where
+  LLDP is silent), AP, and phone against what the network shows, and names
+  each disagreement: DIFFERENT, NOT SEEN, NO MATCH (with a did-you-mean),
+  NOT ON MAP, STALE, UNKNOWN, plus what sits next to the mapped devices
+  but is not on the map. `map update` writes discoveries back (blank
+  fields, missing ports, missing cables; `--add-new` neighbouring switches,
+  `--attachments` APs and phones, `--overwrite` differing values) without
+  touching the operator's lines, under the preview/backup/verify/audit
+  lifecycle. `map export` writes CSV or a draw.io diagram coloured by the
+  check. The last check leads `health attention` while it disagrees.
+- The weekly workflow reviews the week's topology: `topology changes --since
+  7d` (added, removed, the net change, and a call-out for a scan that lost
+  100+ links at once) and `map check`, before the attention queue.
+- `netrune workflow schedule daily` schedules the morning check (06:30 by
+  default) beside the weekly run; `workflow schedule status` shows each
+  timer's next and last firing and the last runs, which every workflow now
+  records (marker `workflow_runs`, last 60). Units declare
+  `SuccessExitStatus=3`, so a run that finished with findings no longer
+  shows as a failed unit in systemd.
+
+### Fixed
+
+- A neighbour scan from off the site network no longer empties the topology.
+  It found no links, committed the empty result, and every link was recorded
+  as removed (754 on 2026-11-01). The scan now keeps the previous topology
+  when it finds none, or under half of those known, and exits 3 saying why;
+  `NETRUNE_TOPOLOGY_ACCEPT_DROP=1` accepts a real shrink.
+- `vault status --json` redacts paths and the root-key detail (public
+  repository code-scanning fix, brought across).
+
 - Real terminal output. `rich` has been a declared dependency since the
   Textual console (ADR 0001, superseded 2026-08-15) but nothing has
   imported it since -- every table was hand-rolled fixed-width text. Tables

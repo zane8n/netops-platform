@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import contextlib
 import base64
-import concurrent.futures
 import difflib
 import hashlib
 import hmac
@@ -59,7 +58,7 @@ from netops_platform.identity import (
     reconcile_device_rows,
 )
 from netops_platform.inventory_cli import InventoryCommandsMixin
-from netops_platform.lookup_cli import LookupCommandsMixin
+from netops_platform.lookup_cli import ATTACHED_PLACEMENTS, LookupCommandsMixin
 from netops_platform.mac_registry import IeeeMacRegistry, lookup_ieee_mac
 from netops_platform.network import (
     clean_network_output,
@@ -3115,7 +3114,7 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
             "stp": {"usage": "netrune topology stp [target] [--jobs N] [--failed] [--dry-run]", "about": "Read spanning tree from switches and derive switch links from designated-bridge addresses. Finds links where LLDP is not enabled, including redundant links spanning tree is blocking, and records each switch's own bridge MAC as identity evidence.", "args": [{"name":"target", "text":"Optional switch hostname or IP; all switches by default."}], "options": [{"name":"--jobs N", "text":"Switches to read at a time, 1 to 32 (default 8)."}, {"name":"--failed", "text":"Re-read only the switches whose last spanning-tree read did not parse."}], "examples": ["netrune topology stp", "netrune topology stp --failed", "netrune topology stp --jobs 16"]},
             "links": {"usage": "netrune topology links [--limit N]", "about": "List spanning-tree derived switch links with their source confidence.", "examples": ["netrune topology links --json"]},
             "show": {"usage": "netrune topology show [target]", "about": "Show topology links. With a target in plain mode, opens the legacy topology view for that target.", "args": [{"name":"target", "text":"Optional switch/site/IP."}], "examples": ["netrune topology show", "netrune topology show ZONE10"]},
-            "changes": {"usage": "netrune topology changes [--limit N]", "about": "Show topology change events.", "examples": ["netrune topology changes"]},
+            "changes": {"usage": "netrune topology changes [--since 24h|7d|2w] [--limit N]", "about": "Show link added/removed events, newest first, with a summary line (added, removed, switches). --since covers a span instead of the last N events; the weekly workflow uses --since 7d. A scan that removed 100 or more links at once is called out as a scan from off the site network, not a real change.", "examples": ["netrune topology changes", "netrune topology changes --since 7d"]},
             "timeline": {"usage": "netrune topology timeline [target]", "about": "Show neighbor relationship timeline.", "examples": ["netrune topology timeline ZONE10"]},
         },
     },
@@ -3201,7 +3200,7 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
             "mac": {"usage": "netrune lookup mac <inspect|locate|profile|history|vendor|online|registry> ...", "about": "Inspect local evidence, search forwarding tables, profile an edge port, show movement history, or query cached authoritative IEEE MA-L/MA-M/MA-S assignments.", "examples": ["netrune lookup mac online 00:00:5e:00:53:01", "netrune lookup mac inspect 0200.0000.0025", "netrune lookup mac locate 0200.0000.0025 ZONE34", "netrune lookup mac registry refresh"]},
             "mac-online": {"usage": "netrune lookup mac online <mac> [--refresh|--offline]", "about": "Resolve the longest matching IEEE MA-L, MA-M, or MA-S assignment with organization details, cache time, and source provenance.", "examples": ["netrune lookup mac online 00:00:5e:00:53:01", "netrune lookup mac online 00:00:5e:00:53:01 --refresh"]},
             "mac-registry": {"usage": "netrune lookup mac registry <status|refresh>", "about": "Inspect or refresh the private cache of all three IEEE public MAC assignment registries.", "examples": ["netrune lookup mac registry status", "netrune lookup mac registry refresh"]},
-            "mac-all": {"usage": "netrune lookup mac all <mac> [--jobs N]", "about": "Search every online switch's forwarding table for a MAC and report where it is attached. Each switch along the path lists the MAC, so hits on known uplink ports are shown separately as transit and the remaining hit is the access port the device is on. Run 'netrune topology stp' first so uplinks are known, and ping the address first so the switches have learned it.", "options": [{"name":"--jobs N", "text":"Switches to query at a time, 1 to 32 (default 8)."}], "examples": ["netrune lookup mac all 0200.0000.0025", "netrune lookup mac all f814.ddc7.e4a0 --jobs 16"]},
+            "mac-all": {"usage": "netrune lookup mac all <mac> [--ping [ip]|--no-ping] [--quick] [--jobs N]", "about": "Search every online switch's forwarding table for a MAC and report the access port it is plugged into. Each reporting port's mode is read live from the switch: only access ports are flagged, trunks and links to other switches are ports the MAC only passes through and are ignored, and a trunk to an AP (a wireless client) is listed on its own. While the search runs, the device is pinged once a second so a quiet device does not age out of the tables; its IP comes from the core switch's ARP table, or from inventory.", "options": [{"name":"--ping [ip]", "text":"Keep the device fresh by pinging this IP. On by default; without an IP it is looked up in the core switch's ARP table."}, {"name":"--no-ping", "text":"Do not ping the device during the search."}, {"name":"--quick", "text":"Stop at the first access port instead of asking every switch. Switches that held the MAC before are asked first."}, {"name":"--jobs N", "text":"Switches to query at a time, 1 to 32 (default 16)."}], "examples": ["netrune lookup mac all 0200.0000.0025", "netrune lookup mac all f814.ddc7.e4a0 --quick", "netrune lookup mac all f814.ddc7.e4a0 --ping 192.0.2.25"]},
             "mac-inspect": {"usage": "netrune lookup mac inspect <mac>", "about": "Correlate cached identity, L2 location, IP, vendor, inventory, and movement evidence without touching devices.", "examples": ["netrune lookup mac inspect 0200.0000.0025"]},
             "mac-locate": {"usage": "netrune lookup mac locate <mac> [--site SITE] [--limit N]", "about": "Search switch forwarding tables directly, independent of whether the endpoint has an IP address.", "examples": ["netrune lookup mac locate 0200.0000.0025", "netrune lookup mac locate 0200.0000.0025 --site ZONE34"]},
             "mac-profile": {"usage": "netrune lookup mac profile <mac> [--site SITE]", "about": "Locate a MAC, then gather best-effort interface, LLDP/CDP, PoE, device-tracking, OUI, and core ARP evidence at likely edge ports.", "examples": ["netrune lookup mac profile 0200.0000.0025"]},
@@ -3233,8 +3232,8 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
             "backup-online": {"usage": "netrune workflow backup-online [target]", "about": "Run changed-only backups for online devices.", "examples": ["netrune workflow backup-online ZONE10"]},
             "site-health": {"usage": "netrune workflow site-health <target>", "about": "Latency and filtering checks for a target/site.", "examples": ["netrune workflow site-health google.com"]},
             "ap-audit": {"usage": "netrune workflow ap-audit", "about": "Refresh AP data, recompute memory, show AP moves and attention.", "examples": ["netrune workflow ap-audit"]},
-            "weekly": {"usage": "netrune workflow weekly [--resume]", "about": "Every long-running task: import, reachability, inventory scan, AP scan, topology scan, then over SSH a hardware refresh of every switch (Motherboard serials), AP ports from CDP/LLDP checked against MAC tables, a spanning-tree sweep, and changed-only backups, then realignment and the attention queue. The SSH steps share one vault session opened before the first of them; when the vault cannot be unlocked they are DEFERRED, the attention queue lists them, and --resume runs just those.", "examples": ["netrune workflow weekly --dry-run", "netrune workflow weekly --resume"]},
-            "schedule": {"usage": "netrune workflow schedule weekly [--when 'Sun *-*-* 02:00:00'] [--remove]", "about": "Install (or --remove) a systemd user timer that runs the weekly workflow. Persistent=true runs a week the laptop missed while off as soon as it is back. The service may raise the Windows Hello prompt once for the SSH steps; unanswered, they are deferred to --resume. --dry-run prints the units.", "examples": ["netrune workflow schedule weekly", "netrune workflow schedule weekly --when 'Sat *-*-* 22:00:00'", "netrune workflow schedule weekly --remove"]},
+            "weekly": {"usage": "netrune workflow weekly [--resume]", "about": "Every long-running task: import, reachability, inventory scan, AP scan, topology scan, then over SSH a hardware refresh of every switch (Motherboard serials), AP ports from CDP/LLDP checked against MAC tables, a spanning-tree sweep, and changed-only backups, then realignment, the week's topology changes (topology changes --since 7d), the network map checked against the network (map check), and the attention queue. The SSH steps share one vault session opened before the first of them; when the vault cannot be unlocked they are DEFERRED, the attention queue lists them, and --resume runs just those.", "examples": ["netrune workflow weekly --dry-run", "netrune workflow weekly --resume"]},
+            "schedule": {"usage": "netrune workflow schedule <weekly|daily|status> [--when CALENDAR] [--remove]", "about": "Install (or --remove) a systemd user timer: weekly runs the weekly workflow (default Sun 02:00), daily runs the morning check (default every day 06:30). Persistent=true runs one the laptop missed while off as soon as it is back. Exit 3 (findings for the attention queue) counts as success, so systemd does not list such runs as failed. The weekly service may raise the Windows Hello prompt once for the SSH steps; unanswered, they are deferred to --resume. status (the default) shows each schedule, its next and last firing, and the last runs Netrune recorded. --dry-run prints the units.", "examples": ["netrune workflow schedule status", "netrune workflow schedule weekly", "netrune workflow schedule daily --when 'Mon..Fri *-*-* 06:30:00'", "netrune workflow schedule weekly --remove"]},
         },
     },
     "commands": {
@@ -3397,6 +3396,20 @@ HELP_TOPICS.update({
             "findings": {"usage": "netrune path findings [--severity LEVEL]", "about": "Query findings across every recorded path run, newest first, with a frequency summary. Answers which switches or interfaces keep failing rather than what one run said.", "options": [{"name":"--severity LEVEL", "text":"critical, error, warning, or info."}], "examples": ["netrune path findings", "netrune path findings --severity critical"]},
             "history": {"usage": "netrune path history [endpoint] [--vlan ID]", "about": "Show chronological path runs newest first with reusable compact run references.", "examples": ["netrune path history", "netrune path history 02:00:00:00:00:25 --vlan 120"]},
             "show": {"usage": "netrune path show <run-id|run-prefix|endpoint|last> [--vlan ID]", "about": "Reopen a persisted path by full ID, compact history reference, or latest endpoint/VLAN match.", "examples": ["netrune path show path-0123456789", "netrune path show 02:00:00:00:00:25 --vlan 120", "netrune path show last"]},
+        },
+    },
+    "map": {
+        "summary": "Your own network map (switches, links, phones, APs), checked against what Netrune discovers and kept up to date from it.",
+        "usage": "netrune map <show|check|update|import|init|edit|export|path>",
+        "actions": {
+            "show": {"usage": "netrune map show [device] [--file PATH]", "about": "Summarise the map (devices per location, the last check's result) or print one device with its ports and the links that lead to it. --file reads another map (text, CSV, Excel, draw.io, Visio) without importing it.", "examples": ["netrune map show", "netrune map show CORE-SW01"]},
+            "check": {"usage": "netrune map check [device] [--file PATH] [--all]", "about": "Compare the map with the inventory and topology. Each device is matched by serial, MAC, IP, then name; each link against LLDP/CDP (and spanning tree); each AP and phone against what its switch port shows. Reports DIFFERENT (both have it, details differ: a moved cable, a replaced switch), NOT SEEN (the switch was scanned and does not show it), NO MATCH (a device Netrune never discovered, with a did-you-mean), NOT ON MAP (a link between two mapped devices the map lacks), STALE (seen before, no current scan), UNKNOWN (no evidence either way), and INFO (switches, APs, and phones next to mapped devices but not on the map). Exits PARTIAL when anything disagrees, so the weekly workflow raises it; the result also feeds the attention queue. --file checks a map file without importing it; --all lists the agreeing items too.", "examples": ["netrune map check", "netrune map check CORE-SW01", "netrune map check --file ~/site-plan.vsdx", "netrune map check --json"]},
+            "update": {"usage": "netrune map update [--add-new] [--attachments] [--overwrite] (--dry-run | --confirm)", "about": "Write what the network shows into the map: blank IP/model/serial/MAC fields filled, a link's missing ports filled where exactly one cable joins the two switches, and links between mapped devices that the map lacks. --add-new also adds switches seen next to mapped ones; --attachments adds the APs and phones seen on mapped switches' ports; --overwrite replaces differing values instead of only filling blanks. Your lines, order, and comments are kept; additions are marked with a dated '# netrune' comment; nothing is removed. Without --confirm it prints the diff; --confirm backs the map up, writes it atomically, reads it back, and records an audit event.", "examples": ["netrune map update --dry-run", "netrune map update --add-new --attachments --dry-run", "netrune map update --confirm"]},
+            "import": {"usage": "netrune map import <file.txt|.csv|.xlsx|.drawio|.vsdx> [--sheet NAME] [--overwrite] [--replace] (--dry-run | --confirm)", "about": "Bring a map in as it is. Text in the map format; a CSV or Excel sheet with a device/switch column plus any of IP, location, model, serial, port, connects-to, remote port, and label (a blank device cell repeats the one above; a port range such as Gi1/0/1-24 covers many ports); a draw.io diagram (shapes are devices, connectors are cables, port names on the connector labels, containers become locations, custom properties such as ip= are read); or a Visio .vsdx drawing (shapes, connectors with their text, Shape Data such as IP Address). Into an existing map it merges: new devices, links, and attachments are added and blank fields filled (--overwrite replaces differing ones); --replace starts the map over from the file. Preview by default; --confirm writes, backing the old map up first.", "examples": ["netrune map import ~/Downloads/site-network.vsdx --dry-run", "netrune map import ~/links.csv --confirm", "netrune map import ~/Assets.xlsx --sheet Uplinks --dry-run"]},
+            "init": {"usage": "netrune map init [--from-network] [--attachments] [--confirm]", "about": "Start the map: an empty file with the format guide at the top, or with --from-network a draft of every switch Netrune knows and every LLDP/CDP and spanning-tree link between them (--attachments adds the APs and phones on their ports), for you to add locations to and correct. Replacing an existing map needs --confirm (it is backed up first); --dry-run prints the draft.", "examples": ["netrune map init --from-network --dry-run", "netrune map init"]},
+            "edit": {"usage": "netrune map edit", "about": "Open the map in $VISUAL/$EDITOR (nano or vi otherwise), then parse it and report any line it could not read. Creates the template first when there is no map.", "examples": ["netrune map edit", "EDITOR=code netrune map edit"]},
+            "export": {"usage": "netrune map export <file.csv|.txt|.drawio> [--confirm]", "about": "Write the map out: .csv to edit in Excel and bring back with map import, .txt as a copy, or .drawio as a diagram laid out by hops from the core and coloured by a fresh check (green agrees, red not seen, orange differs, dashed blue on the network but not the map, grey no evidence). Replacing a file needs --confirm.", "examples": ["netrune map export ~/network-map.drawio", "netrune map export ~/network-map.csv"]},
+            "path": {"usage": "netrune map path", "about": "Print where the active profile keeps its map.", "examples": ["netrune map path", "$EDITOR $(netrune map path)"]},
         },
     },
     "excel": {
@@ -4056,10 +4069,12 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             eprint(f"Missing helper: {cmd[0]}")
             return UNSUPPORTED
 
-    def capture(self, cmd: List[str], timeout: int=120, opts: Optional[GlobalOptions]=None) -> Tuple[int,str,str]:
+    def capture(self, cmd: List[str], timeout: int=120, opts: Optional[GlobalOptions]=None, extra_env: Optional[Mapping[str, str]]=None) -> Tuple[int,str,str]:
         proc: Optional[subprocess.Popen] = None
         try:
-            proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, env=self.child_env(opts or GlobalOptions()))
+            env = self.child_env(opts or GlobalOptions())
+            env.update(extra_env or {})
+            proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, env=env)
             out, err = proc.communicate(timeout=timeout)
             code = normalized_exit_code(proc.returncode)
             self._terminate_process_group(proc, signal.SIGTERM, 0.25)
@@ -4355,7 +4370,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             if noun == "ghoster":
                 noun = "path"
                 args.insert(0, "inspect")
-            table={"init":self.cmd_init,"setup":self.cmd_setup,"profile":self.cmd_profile,"config":self.cmd_config,"secrets":self.cmd_secrets,"ingest":self.cmd_ingest,"plugin":self.cmd_plugin,"path":self.cmd_path,"excel":self.cmd_excel,"check":self.cmd_check,"traffic":self.cmd_traffic,"support":self.cmd_support,"inventory":self.cmd_inventory,"ap":self.cmd_ap,"topology":self.cmd_topology,"memory":self.cmd_memory,"health":self.cmd_health,"backup":self.cmd_backup,"device":self.cmd_device,"vault":self.cmd_vault,"vlan":self.cmd_vlan,"lookup":self.cmd_lookup,"diagnose":self.cmd_diagnose,"workflow":self.cmd_workflow,"commands":self.cmd_commands,"ask":self.cmd_ask,"db":self.cmd_db}
+            table={"init":self.cmd_init,"setup":self.cmd_setup,"profile":self.cmd_profile,"config":self.cmd_config,"secrets":self.cmd_secrets,"ingest":self.cmd_ingest,"plugin":self.cmd_plugin,"path":self.cmd_path,"excel":self.cmd_excel,"map":self.cmd_map,"check":self.cmd_check,"traffic":self.cmd_traffic,"support":self.cmd_support,"inventory":self.cmd_inventory,"ap":self.cmd_ap,"topology":self.cmd_topology,"memory":self.cmd_memory,"health":self.cmd_health,"backup":self.cmd_backup,"device":self.cmd_device,"vault":self.cmd_vault,"vlan":self.cmd_vlan,"lookup":self.cmd_lookup,"diagnose":self.cmd_diagnose,"workflow":self.cmd_workflow,"commands":self.cmd_commands,"ask":self.cmd_ask,"db":self.cmd_db}
             if noun not in table:
                 legacy = self._legacy_suggestion(noun, args)
                 if legacy:
@@ -4832,6 +4847,10 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
 
     def cmd_excel(self, args: List[str], opts: GlobalOptions) -> int:
         from netops_platform.excel_cli import dispatch
+        return dispatch(self, args, opts)
+
+    def cmd_map(self, args: List[str], opts: GlobalOptions) -> int:
+        from netops_platform.map_cli import dispatch
         return dispatch(self, args, opts)
 
     def cmd_support(self, args: List[str], opts: GlobalOptions) -> int:
@@ -5777,18 +5796,22 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         commands: Sequence[str],
         timeout: int = 120,
         opts: Optional[GlobalOptions] = None,
+        extra_env: Optional[Mapping[str, str]] = None,
     ) -> List[Tuple[str, str]]:
         """Run several read-only commands in one SSH login.
 
         Returns one (command, output) pair per requested command. Logging in
         once instead of once per command is the difference between six
-        authentications for a switch and one.
+        authentications for a switch and one. `extra_env` reaches the SSH
+        wrapper, e.g. a shorter NETOPS_SSH_SETTLE_TIMEOUT for a platform that
+        does not redraw its screen.
         """
         wanted = [str(item).strip() for item in commands if str(item).strip()]
         if not target or not wanted:
             return []
         rc, out, err = self.capture(
-            self.legacy_cmd("netrune-control", "show-batch", target, *wanted), timeout
+            self.legacy_cmd("netrune-control", "show-batch", target, *wanted), timeout,
+            **({"extra_env": extra_env} if extra_env else {}),
         )
         text = (out or "") + (err or "")
         if rc != 0 and not self.CMD_MARKER_RE.search(text):
@@ -6174,6 +6197,10 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             if row.get("status") not in {"saved", "unchanged"}:
                 items.append({"kind": "backup", "level": "warning", "title": row.get("hostname") or row.get("device_ip"), "text": row.get("message") or row.get("status"), "row": row})
         items.extend(identity_items[:20])
+        from netops_platform.map_cli import attention_item as _map_attention
+        map_item = _map_attention(self)
+        if map_item:  # one summary line, ahead of the per-device items
+            items.insert(0, map_item)
         # Weekly SSH steps that could not run because nobody unlocked the vault.
         deferred = json.loads(self.state.get_marker("workflow_deferred:weekly") or "{}")
         if deferred.get("steps"):
@@ -6248,6 +6275,14 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             CommandSpec("traffic-daemon", "Traffic collector", [tool("netrune"), "traffic", "daemon"], "Collect continuously until interrupted. Runs in a terminal you keep open.", writes_local=True, domain="traffic", output_type="terminal", run_supported=False, safety_class="network-read"),
             CommandSpec("path-findings", "Path findings", [tool("netrune"), "path", "findings"], "Query findings across every recorded path run with a frequency summary.", domain="path", output_type="table"),
             CommandSpec("path-history", "Path history", [tool("netrune"), "path", "history", "<endpoint>", "--vlan", "<vlan>"], "Show chronological path inspections with reusable run references.", args=["endpoint", "vlan"], domain="path", output_type="table"),
+            CommandSpec("map-show", "Show network map", [tool("netrune"), "map", "show"], "Summarise the operator's network map: devices per location and the last check.", domain="map", output_type="text"),
+            CommandSpec("map-check", "Check network map", [tool("netrune"), "map", "check"], "Compare the network map with discovered inventory and LLDP/CDP/spanning-tree links: what agrees, differs, is not seen, or is not on the map.", domain="map", output_type="text"),
+            CommandSpec("map-update", "Update network map", [tool("netrune"), "map", "update", "--dry-run"], "Fill blanks and add discovered links (and with flags, neighbouring switches, APs, and phones) into the map file. Apply explicitly in the CLI with --confirm.", writes_local=True, domain="map", risk_level="warning", output_type="text", run_supported=False, safety_class="local-write", state_effects=["network map file", "audit_events"]),
+            CommandSpec("map-import", "Import network map", [tool("netrune"), "map", "import", "<file>", "--dry-run"], "Merge a text, CSV, Excel, draw.io, or Visio map into the network map. Apply explicitly in the CLI with --confirm.", writes_local=True, args=["file"], domain="map", risk_level="warning", output_type="text", run_supported=False, safety_class="local-write", state_effects=["network map file", "audit_events"]),
+            CommandSpec("map-init", "Start network map", [tool("netrune"), "map", "init"], "Write an empty map template, or with --from-network a draft from discovered switches and links.", writes_local=True, domain="map", output_type="text", run_supported=False, safety_class="local-write", state_effects=["network map file", "audit_events"]),
+            CommandSpec("map-export", "Export network map", [tool("netrune"), "map", "export", "<file>"], "Write the map as CSV, text, or a draw.io diagram coloured by a fresh check.", writes_local=True, args=["file"], domain="map", output_type="text", run_supported=False, safety_class="local-write", state_effects=["export file", "audit_events"]),
+            CommandSpec("map-edit", "Edit network map", [tool("netrune"), "map", "edit"], "Open the network map in your editor, then validate it.", writes_local=True, domain="map", output_type="terminal", run_supported=False, safety_class="local-write", state_effects=["network map file", "audit_events"]),
+            CommandSpec("map-path", "Network map path", [tool("netrune"), "map", "path"], "Print where the active profile keeps its network map.", domain="map", output_type="text"),
             CommandSpec("excel-inspect", "Inspect Excel workbook", [tool("netrune"), "excel", "inspect", "<workbook>"], "Match a workbook's rows to Netrune switches and report what is out of date, without writing.", args=["workbook"], domain="excel", output_type="table", run_supported=False),
             CommandSpec("excel-sync", "Sync Excel workbook", [tool("netrune"), "excel", "sync", "<workbook>", "--dry-run"], "Fill and update a workbook's switch rows from Netrune's inventory. Apply explicitly in the CLI with --confirm.", writes_local=True, args=["workbook"], domain="excel", risk_level="warning", output_type="table", run_supported=False, safety_class="local-write", state_effects=["workbook file", "audit_events"]),
             CommandSpec("excel-report", "Write Excel reports", [tool("netrune"), "excel", "report", "<workbook>"], "Write active AP/switch, transition, and switch/AP history reports from Netrune's memory into one workbook.", writes_local=True, args=["workbook"], domain="excel", output_type="text", run_supported=False, safety_class="local-write", state_effects=["workbook file", "audit_events"]),
@@ -6332,7 +6367,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             CommandSpec("diagnose-interface", "Interface monitor", [tool("netrune"), "diagnose", "interface", "<device>", "on", "<interface>"], "Legacy interface rate monitor; command-center jobs default to one finite sample.", writes_local=True, args=["device", "interface", "chart", "once"], domain="diagnose"),
             CommandSpec("lookup-core", "Core lookup", [tool("netrune"), "lookup", "core", "<target>"], "Core IP/MAC lookup cached into memory.", writes_local=True, args=["target"], domain="lookup"),
             CommandSpec("lookup-mac", "MAC lookup", [tool("netrune"), "lookup", "mac", "<target>", "<mac>"], "MAC lookup from one target or from all current switches with target=all.", writes_local=True, args=["target", "mac"], domain="lookup", timeout_seconds=120),
-            CommandSpec("lookup-mac-all", "MAC search across switches", [tool("netrune"), "lookup", "mac", "all", "<mac>"], "Search every online switch for a MAC and separate the access port it is attached to from the uplinks it transits.", args=["mac"], writes_local=True, domain="lookup", output_type="table", safety_class="network-read"),
+            CommandSpec("lookup-mac-all", "MAC search across switches", [tool("netrune"), "lookup", "mac", "all", "<mac>"], "Search every online switch for a MAC, flag the access port it is plugged into, and ignore the trunks it passes through.", args=["mac"], writes_local=True, domain="lookup", output_type="table", safety_class="network-read"),
             CommandSpec("lookup-mac-inspect", "MAC evidence inspection", [tool("netrune"), "lookup", "mac", "inspect", "<mac>"], "Correlate cached MAC identity, location, IP, vendor, and history evidence.", args=["mac"], domain="lookup", output_type="table"),
             CommandSpec("lookup-mac-locate", "Direct MAC location", [tool("netrune"), "lookup", "mac", "locate", "<mac>"], "Search switch forwarding tables without requiring an endpoint IP.", writes_local=True, args=["mac", "scope"], domain="lookup", timeout_seconds=0),
             CommandSpec("lookup-mac-profile", "MAC edge profile", [tool("netrune"), "lookup", "mac", "profile", "<mac>"], "Locate a MAC and profile likely edge ports with interface, LLDP/CDP, PoE, device-tracking, and core evidence.", writes_local=True, args=["mac", "scope"], domain="lookup", timeout_seconds=0),
@@ -6360,7 +6395,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
                           check.tells, writes_local=check.writes, args=[re.sub(r"[<>]", "", arg) for arg in re.findall(r"<[^>]+>", check.args)],
                           domain="check", output_type="text", run_supported=False)
               for check in __import__("netops_platform.checks_cli", fromlist=["CHECKS"]).CHECKS],
-            CommandSpec("workflow-schedule", "Schedule weekly workflow", [tool("netrune"), "workflow", "schedule", "weekly"], "Install a persistent systemd user timer for the weekly workflow.", writes_local=True, domain="workflow", run_supported=False, safety_class="local-write"),
+            CommandSpec("workflow-schedule", "Schedule workflows", [tool("netrune"), "workflow", "schedule", "weekly"], "Install a persistent systemd user timer for the weekly workflow or the daily morning check; 'schedule status' shows them and their last runs.", writes_local=True, domain="workflow", run_supported=False, safety_class="local-write"),
             CommandSpec("workflow-weekly", "Weekly", [tool("netrune"), "workflow", "weekly"], "Every scan, SSH hardware/neighbour/STP reads of every switch, backups, realignment, and attention.", writes_local=True, domain="workflow", run_supported=False),
             CommandSpec("vlan-locate", "Locate VLAN", [tool("netrune"), "vlan", "locate", "<target>", "<vlan>"], "Locate one or many VLANs from one or many roots; optional depth traverses LLDP/CDP-confirmed switch links.", args=["target", "vlan", "depth", "max_nodes", "refresh_neighbors"], domain="vlan", safety_class="network-read"),
             CommandSpec("vlan-propagation", "VLAN propagation", [tool("netrune"), "vlan", "propagation", "<target>", "<vlan>"], "Trace a root-by-VLAN matrix with bounded breadth-first switch traversal.", args=["target", "vlan", "depth", "max_nodes", "refresh_neighbors"], domain="vlan", safety_class="network-read"),
@@ -6529,6 +6564,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
             "db-coherence": ["db", "coherence"], "db-integrity": ["db", "integrity"], "db-repair": ["db", "repair"], "db-vacuum": ["db", "vacuum"], "db-prune": ["db", "prune"], "db-history": ["db", "history"],
             "health-attention": ["health", "attention"], "ap-moves": ["ap", "moves"],
             "topology-changes": ["topology", "changes"], "memory-export": ["memory", "export", "--json"],
+            "map-show": ["map", "show"], "map-check": ["map", "check"], "map-path": ["map", "path"],
             "ask-patterns": ["ask", "patterns"], "ask-aliases": ["ask", "aliases"],
             "backup-verify": ["backup", "verify"], "commands-list": ["commands", "list"],
             "init-run": ["init"], "profile-list": ["profile", "list"], "profile-paths": ["profile", "paths"],
@@ -6966,6 +7002,11 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
                 step("stp", "Sweep spanning tree and uplinks", [tool("netrune"), "topology", "stp"], needs_vault=True),
                 step("backup", "Back up changed configurations", [tool("netrune"), "backup", "run", "--all", "--skip-recent"], needs_vault=True),
                 step("coherence", "Realign memory and check database coherence", [tool("netrune"), "db", "coherence", "--realign"]),
+                # The week's topology in review: what changed, then the
+                # operator's own map against what the scans just found. Both
+                # read local state only, so they run even when SSH deferred.
+                step("topology-changes", "Review this week's topology changes", [tool("netrune"), "topology", "changes", "--since", "7d"]),
+                step("map-check", "Check the network map against the network", [tool("netrune"), "map", "check"]),
                 step("attention", "Build attention queue", [tool("netrune"), "health", "attention"]),
             ]},
             "ap-audit": {"description": "Refresh AP evidence and surface movement or health findings.", "steps": [
@@ -7086,6 +7127,7 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         if attention:
             headline += f" | needing attention={len(attention)}"
         summary_text = headline + f" | recorded={payload['finished_at_iso']}\n" + self.render_table(results,["step","label","status","exit_code","duration_ms","on_failure","summary"])
+        self.record_workflow_run(payload, resume=resume)
         self.emit(payload,opts,summary_text)
         if name == "morning-check" and not stopped:
             # The steps ran without a terminal; the decisions they surfaced
@@ -7102,52 +7144,85 @@ class App(DeviceCommandsMixin, InventoryCommandsMixin, VlanCommandsMixin, Topolo
         return SUCCESS if not failed and not attention else PARTIAL
 
     WEEKLY_DEFAULT_WHEN = "Sun *-*-* 02:00:00"
+    WORKFLOW_RUNS_KEPT = 60
+
+    def record_workflow_run(self, payload: Dict[str, Any], *, resume: bool = False) -> None:
+        """Keep a short history of workflow runs, so 'did the weekly run?'
+        has an answer in Netrune itself and not only in the journal."""
+        with contextlib.suppress(Exception):
+            runs = json.loads(self.state.get_marker("workflow_runs") or "[]")
+            runs.append({
+                "workflow": payload["workflow"], "status": payload["status"], "resume": resume,
+                # systemd sets INVOCATION_ID for every unit it starts.
+                "trigger": "timer" if os.environ.get("INVOCATION_ID") else "manual",
+                "started_at": payload["started_at"], "finished_at": payload["finished_at"],
+                "steps": payload["completed_steps"], "total_steps": payload["total_steps"],
+                "failed": [item["id"] for item in payload["steps"] if item["status"] == "FAILED"],
+                "deferred": [item["id"] for item in payload["steps"] if item["status"] == "DEFERRED"],
+                "attention": [item["id"] for item in payload["steps"] if item["status"] == "ATTENTION"],
+            })
+            self.state.set_marker("workflow_runs", json.dumps(runs[-self.WORKFLOW_RUNS_KEPT:]))
+
+    # name -> (workflow it runs, default OnCalendar, what it does, start timeout, SSH steps)
+    SCHEDULES: Dict[str, Tuple[str, str, str, str, bool]] = {
+        "weekly": ("weekly", "Sun *-*-* 02:00:00", "scans, SSH reads of every switch, backups, topology and map review", "8h", True),
+        "daily": ("morning-check", "*-*-* 06:30:00", "reachability, topology, coherence, filtering, attention", "2h", False),
+    }
 
     def workflow_schedule(self, args: List[str], opts: GlobalOptions) -> int:
-        """`workflow schedule weekly [--when CALENDAR] [--remove]`: a systemd
-        user timer for the weekly workflow.
+        """`workflow schedule <weekly|daily> [--when CALENDAR] [--remove]`
+        and `workflow schedule status`: systemd user timers for the weekly
+        workflow and the daily morning check.
 
-        A timer rather than cron: Persistent=true runs a missed week as soon
-        as the laptop is back, which cron cannot do. The service may raise the
-        Windows Hello prompt once for the SSH steps; unanswered, those steps
-        are deferred (see cmd_workflow) and the attention queue says so.
+        A timer rather than cron: Persistent=true runs a missed run as soon
+        as the laptop is back, which cron cannot do. The weekly service may
+        raise the Windows Hello prompt once for the SSH steps; unanswered,
+        those steps are deferred (see cmd_workflow) and the attention queue
+        says so. Exit 3 (findings for the attention queue) is a success to
+        systemd, so a run that found something is not listed as failed.
         """
-        usage = "netrune workflow schedule weekly [--when 'Sun *-*-* 02:00:00'] [--remove]"
-        name = args[0] if args else ""
-        if name != "weekly":
-            return self.usage_error("workflow", "schedule", opts, "Only the weekly workflow can be scheduled.", usage, VALIDATION)
+        usage = "netrune workflow schedule <weekly|daily|status> [--when 'Sun *-*-* 02:00:00'] [--remove]"
+        name = args[0] if args else "status"
+        name = {"morning-check": "daily", "morning": "daily"}.get(name, name)
+        if name in {"status", "list", "show"}:
+            return self.workflow_schedule_status(opts)
+        if name not in self.SCHEDULES:
+            return self.usage_error("workflow", "schedule", opts, f"'{name}' cannot be scheduled; choose weekly or daily (the morning check).", usage, VALIDATION)
+        workflow, default_when, about, timeout, ssh = self.SCHEDULES[name]
         rest = args[1:]
         remove = "--remove" in rest
-        when = self.WEEKLY_DEFAULT_WHEN
+        when = default_when
         if "--when" in rest:
             index = rest.index("--when")
             if index + 1 >= len(rest):
                 return self.usage_error("workflow", "schedule", opts, "--when needs a systemd calendar expression.", usage, VALIDATION)
             when = rest[index + 1]
         unit_dir = Path(os.path.expanduser("~/.config/systemd/user"))
-        service, timer = unit_dir / "netrune-weekly.service", unit_dir / "netrune-weekly.timer"
+        service, timer = unit_dir / f"netrune-{name}.service", unit_dir / f"netrune-{name}.timer"
         netrune = self.paths.tool("netrune")
+        vault_lines = ("# The SSH steps may raise the Windows Hello prompt once; unanswered, they are\n"
+                       f"# deferred to `netrune workflow {workflow} --resume` instead of failing per switch.\n"
+                       "Environment=NETRUNE_VAULT_DESKTOP_PROMPT=1\n") if ssh else ""
         units = {
             service: f"""[Unit]
-Description=Netrune weekly workflow: scans, SSH reads of every switch, backups
+Description=Netrune {name} workflow: {about}
 Documentation=man:netrune(1)
 
 [Service]
 Type=oneshot
-ExecStart={netrune} workflow weekly
+ExecStart={netrune} workflow {workflow}
 Environment=NETRUNE_PROGRESS=0
-# The SSH steps may raise the Windows Hello prompt once; unanswered, they are
-# deferred to `netrune workflow weekly --resume` instead of failing per switch.
-Environment=NETRUNE_VAULT_DESKTOP_PROMPT=1
-TimeoutStartSec=8h
+{vault_lines}# 3 means the run finished and left findings in the attention queue.
+SuccessExitStatus=3
+TimeoutStartSec={timeout}
 Nice=10
 """,
             timer: f"""[Unit]
-Description=Netrune weekly workflow
+Description=Netrune {name} workflow
 
 [Timer]
 OnCalendar={when}
-# A laptop that was off or asleep at that time runs the missed week as soon as
+# A laptop that was off or asleep at that time runs the missed one as soon as
 # it is back, instead of waiting for the next one.
 Persistent=true
 RandomizedDelaySec=15m
@@ -7160,32 +7235,84 @@ WantedBy=timers.target
             text = "\n".join(f"# {path}\n{body}" for path, body in units.items()) if not remove else f"Would disable and remove {timer.name} and {service.name}."
             self.emit({"ok": True, "dry_run": True, "units": {str(path): body for path, body in units.items()}, "remove": remove}, opts, text)
             return SUCCESS
-        def systemctl(*command: str) -> Tuple[int, str]:
-            try:
-                done = subprocess.run(["systemctl", "--user", *command], capture_output=True, text=True, timeout=60)
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                return 1, str(exc)
-            return done.returncode, (done.stdout + done.stderr).strip()
         if remove:
-            systemctl("disable", "--now", timer.name)
+            self._systemctl_user("disable", "--now", timer.name)
             for path in units:
                 with contextlib.suppress(FileNotFoundError):
                     path.unlink()
-            systemctl("daemon-reload")
+            self._systemctl_user("daemon-reload")
             self.emit({"ok": True, "removed": [str(path) for path in units]}, opts, f"Removed {timer.name} and {service.name}.")
             return SUCCESS
-        rc, checked = systemctl("--no-pager", "list-timers", "--all")
+        rc, checked = self._systemctl_user("--no-pager", "list-timers", "--all")
         if rc != 0:
             return self.usage_error("workflow", "schedule", opts, f"systemctl --user is not available here: {checked[:200]}", usage, VALIDATION)
         unit_dir.mkdir(parents=True, exist_ok=True)
         for path, body in units.items():
             path.write_text(body, encoding="utf-8")
-        steps = [systemctl("daemon-reload"), systemctl("enable", "--now", timer.name)]
+        steps = [self._systemctl_user("daemon-reload"), self._systemctl_user("enable", "--now", timer.name)]
         if any(rc for rc, _ in steps):
             return self.usage_error("workflow", "schedule", opts, "systemctl failed: " + "; ".join(out for rc, out in steps if rc), usage, INTERNAL)
-        _, next_run = systemctl("--no-pager", "list-timers", timer.name)
+        _, next_run = self._systemctl_user("--no-pager", "list-timers", timer.name)
         self.emit({"ok": True, "service": str(service), "timer": str(timer), "when": when, "next": next_run}, opts,
-                  f"Scheduled the weekly workflow ({when}); a missed run happens when the machine is back.\n{next_run}")
+                  f"Scheduled the {name} workflow ({workflow}, {when}); a missed run happens when the machine is back.\n{next_run}")
+        return SUCCESS
+
+    @staticmethod
+    def _systemctl_user(*command: str) -> Tuple[int, str]:
+        try:
+            done = subprocess.run(["systemctl", "--user", *command], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 1, str(exc)
+        return done.returncode, (done.stdout + done.stderr).strip()
+
+    def workflow_schedule_status(self, opts: GlobalOptions) -> int:
+        """Which schedules are installed, when they next run, and what their
+        last runs did: systemd's view next to Netrune's own run history."""
+        unit_dir = Path(os.path.expanduser("~/.config/systemd/user"))
+        runs = json.loads(self.state.get_marker("workflow_runs") or "[]")
+        rows: List[Dict[str, Any]] = []
+        for name, (workflow, default_when, about, _, _) in self.SCHEDULES.items():
+            timer = unit_dir / f"netrune-{name}.timer"
+            row: Dict[str, Any] = {"schedule": name, "workflow": workflow, "installed": timer.is_file(), "when": "", "next": "",
+                                   "last_timer_run": "", "last_exit": "", "last_run": "", "last_result": ""}
+            if timer.is_file():
+                with contextlib.suppress(OSError):
+                    calendar = re.search(r"^OnCalendar=(.+)$", timer.read_text(encoding="utf-8"), re.MULTILINE)
+                    row["when"] = calendar.group(1).strip() if calendar else ""
+                _, shown = self._systemctl_user("show", timer.name, "-p", "NextElapseUSecRealtime", "-p", "LastTriggerUSec", "-p", "ActiveState")
+                values = dict(line.split("=", 1) for line in shown.splitlines() if "=" in line)
+                row["next"] = values.get("NextElapseUSecRealtime", "")
+                row["last_timer_run"] = values.get("LastTriggerUSec", "") if values.get("LastTriggerUSec") not in {"", "n/a", "0"} else "never"
+                row["active"] = values.get("ActiveState", "")
+                _, shown = self._systemctl_user("show", f"netrune-{name}.service", "-p", "ExecMainStatus", "-p", "Result")
+                values = dict(line.split("=", 1) for line in shown.splitlines() if "=" in line)
+                row["last_exit"] = values.get("ExecMainStatus", "")
+            mine = [run for run in runs if run.get("workflow") == workflow]
+            if mine:
+                last = mine[-1]
+                row["last_run"] = f"{fmt_time(last['started_at'])} ({last.get('trigger')})"
+                parts = [last["status"], f"{last['steps']}/{last['total_steps']} steps"]
+                if last.get("deferred"):
+                    parts.append("deferred: " + ",".join(last["deferred"]))
+                if last.get("failed"):
+                    parts.append("failed: " + ",".join(last["failed"]))
+                row["last_result"] = "; ".join(parts)
+                row["runs"] = mine[-10:]
+            rows.append(row)
+        lines = []
+        for row in rows:
+            if row["installed"]:
+                lines.append(f"{row['schedule']}: {row['workflow']} at '{row['when']}' | next {row['next'] or '?'} | "
+                             f"timer last fired {row['last_timer_run'] or '?'} (exit {row['last_exit'] or '?'})")
+            else:
+                lines.append(f"{row['schedule']}: not scheduled ({row['workflow']}); install with: netrune workflow schedule {row['schedule']}")
+            if row["last_run"]:
+                lines.append(f"  last {row['workflow']} run {row['last_run']}: {row['last_result']}")
+            for run in (row.get("runs") or [])[-6:-1][::-1]:
+                lines.append(f"    earlier {fmt_time(run['started_at'])} ({run.get('trigger')}): {run['status']}"
+                             + (f", deferred {','.join(run['deferred'])}" if run.get("deferred") else ""))
+        lines.append("Runs are recorded since this version; before it, 'journalctl --user -u netrune-weekly' holds them.")
+        self.emit({"ok": True, "schedules": rows}, opts, "\n".join(lines))
         return SUCCESS
 
     def cmd_backup(self,args:List[str],opts:GlobalOptions)->int:
@@ -7704,8 +7831,9 @@ WantedBy=timers.target
 
         A hop-by-hop walk follows one branch and stops when a forwarding table
         does not name a next hop. An exhaustive search does not: every switch
-        along the path reports the address, and the hit that is not on a known
-        uplink is the access port.
+        along the path reports the address, and the hit on an access port (or
+        on an AP's trunk, for a wireless client) is the attachment. The search
+        itself is lookup_mac_all's, so both read port modes the same way.
         """
         clean = norm_mac(mac)
         result: Dict[str, Any] = {"found": False, "attached": [], "transit": [], "searched": 0}
@@ -7714,46 +7842,27 @@ WantedBy=timers.target
         targets = self.current_switch_targets(opts)
         if not targets:
             return result
-        dotted = self.canonical_mac(clean, "dotted")
-        uplinks = self.known_uplink_ports()
-        workers = max(1, min(int(jobs or self._default_stp_jobs()), 32, len(targets)))
-
-        def probe(row: Dict[str, Any]) -> Tuple[str, str, List[Dict[str, Any]]]:
-            ip = str(row.get("ip") or "").strip()
-            name = clean_display_name(row.get("hostname") or ip)
-            _, out, err = self.capture(self.legacy_cmd("netrune-control", "mac-lookup", ip, dotted), opts.timeout or 90)
-            return ip, name, parse_mac_table_output((out or "") + (err or ""), clean)
-
-        attached: List[Dict[str, Any]] = []
-        transit: List[Dict[str, Any]] = []
-        completed = 0
-        lock = threading.Lock()
         # Without this the parallel probes each authenticate separately, which
         # on a Windows Hello stack means one prompt per worker.
         with self.vault_session_scope(opts, minutes=30):
-          try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="maclocate") as pool:
-                for future in concurrent.futures.as_completed([pool.submit(probe, row) for row in targets]):
-                    ip, name, parsed = future.result()
-                    with lock:
-                        completed += 1
-                        self._progress_step("locate endpoint", name, completed, len(targets), opts)
-                    for row in parsed:
-                        if vlan and str(row.get("vlan") or "") and str(row.get("vlan")) != str(vlan):
-                            continue
-                        port = str(row.get("port") or "")
-                        entry = {
-                            "switch_ip": ip, "switch_name": name, "port": port,
-                            "vlan": str(row.get("vlan") or ""), "entry_type": str(row.get("entry_type") or ""),
-                        }
-                        (transit if normalize_interface(port) in uplinks.get(ip, set()) else attached).append(entry)
-          finally:
-            self._progress_clear(opts)
-
+            sweep = self.sweep_mac(clean, opts, targets, jobs=jobs, label="locate endpoint")
+        rank = {placement: index for index, placement in enumerate(ATTACHED_PLACEMENTS)}
+        attached: List[Dict[str, Any]] = []
+        transit: List[Dict[str, Any]] = []
+        for hit in sorted(sweep["hits"], key=lambda row: rank.get(row["placement"], len(rank))):
+            if vlan and hit["vlan"] and hit["vlan"] != str(vlan):
+                continue
+            if hit["placement"] == "self":
+                continue
+            entry = {
+                "switch_ip": hit["switch_ip"], "switch_name": hit["switch"], "port": hit["port"],
+                "vlan": hit["vlan"], "entry_type": hit["entry_type"], "placement": hit["placement"],
+            }
+            (attached if hit["placement"] in rank else transit).append(entry)
         result.update({
             "found": bool(attached or transit),
             "attached": attached, "transit": transit,
-            "searched": len(targets), "uplink_data_available": bool(uplinks),
+            "searched": sweep["searched"], "uplink_data_available": sweep["neighbor_data_available"],
         })
         return result
 

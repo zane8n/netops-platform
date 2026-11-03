@@ -16,7 +16,7 @@ include ai/logs/.gitkeep
 recursive-include ai *.md *.py *.txt *.yaml
 recursive-include completions *
 recursive-include docs *.md
-recursive-include examples *.json *.jsonl *.toml *.csv *.md
+recursive-include examples *.json *.jsonl *.toml *.csv *.md *.txt
 recursive-include man *.1
 recursive-include scripts *.sh *.py
 include scripts/netrune

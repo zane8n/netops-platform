@@ -553,6 +553,64 @@ vlan 240
                 self.assertLessEqual(len(line), int(columns) - 1)
                 self.assertTrue(line.startswith("[STATUS] discovery |"))
 
+    def run_neighbor_commit(self, previous_links, found_links, *, env=None):
+        """Run discover_neighbors against a fixture: `previous_links` already
+        in the neighbour cache, the per-switch workers returning `found_links`."""
+        work = Path(self.temp.name) / "neighbors"
+        work.mkdir(exist_ok=True)
+        devices = work / "devices.db"
+        devices.write_text("198.51.100.1|SW-A|Cisco IOS|C9300|S1|aa|SSH|1000|ONLINE\n", encoding="utf-8")
+        neighbor_db = work / "neighbor.db"
+        neighbor_db.write_text("".join(f"198.51.100.1|SW-A|Gi1/0/{n}|OLD-{n}|Gi0/1|?.?.?.?\n" for n in range(previous_links)), encoding="utf-8")
+        raw = work / "raw.txt"
+        raw.write_text("".join(f"198.51.100.1|SW-A|Gi1/0/{n}|NEW-{n}|Gi0/1\n" for n in range(found_links)), encoding="utf-8")
+        script = (
+            "set -u\n"
+            f'DEVICES_DB="{devices}"; NEIGHBOR_DB="{neighbor_db}"; DRY_RUN=false\n'
+            f'DISCOVERY_RUNTIME="{work}"; declare -A CONFIG=(); DISCOVERY_TMP=()\n'
+            "log() { :; }; log_success() { echo \"OK $1\"; }; log_error() { echo \"ERR $1\" >&2; }\n"
+            "track_tmp() { :; }; discovery_workers() { echo 1; }\n"
+            f'xargs() {{ cat "{raw}"; }}\n'
+            "".join(f"eval \"$(sed -n '/^{name}() {{/,/^}}$/p' {shlex.quote(str(ROOT / 'netops-discovery'))})\"\n"
+                    for name in ("discovery_mktemp", "discovery_db_tmp", "discover_neighbors"))
+            + "discover_neighbors\n"
+        )
+        environment = dict(self.env)
+        environment.pop("NETOPS_TOPOLOGY_ACCEPT_DROP", None)
+        environment.update(env or {})
+        # $0 names nothing, so the trailing `netops db import` finds no CLI
+        # (and `|| true` absorbs that) instead of touching a real profile.
+        result = subprocess.run(["bash", "-c", f"cd {shlex.quote(str(work))}; {script}", str(work / "nowhere" / "x")],
+                                cwd=ROOT, env=environment, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        return result, neighbor_db.read_text(encoding="utf-8").splitlines()
+
+    def test_a_neighbor_scan_that_reached_nothing_keeps_the_previous_topology(self):
+        result, links = self.run_neighbor_commit(previous_links=30, found_links=0)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(len(links), 30)
+        self.assertTrue(all("OLD-" in line for line in links))
+        self.assertIn("kept the previous topology", result.stderr)
+        self.assertIn("NETRUNE_TOPOLOGY_ACCEPT_DROP=1", result.stderr)
+
+    def test_a_neighbor_scan_that_lost_most_links_keeps_the_previous_topology(self):
+        result, links = self.run_neighbor_commit(previous_links=30, found_links=10)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(len(links), 30)
+
+    def test_a_real_shrink_is_accepted_when_the_operator_says_so(self):
+        result, links = self.run_neighbor_commit(previous_links=30, found_links=10, env={"NETOPS_TOPOLOGY_ACCEPT_DROP": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(links), 10)
+        self.assertTrue(all("NEW-" in line for line in links))
+
+    def test_ordinary_link_changes_still_commit(self):
+        for previous, found in ((30, 28), (5, 1), (0, 0), (0, 12)):
+            with self.subTest(previous=previous, found=found):
+                result, links = self.run_neighbor_commit(previous_links=previous, found_links=found)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(links), found)
+
     def test_discovery_progress_matches_the_python_status_shape(self):
         result = self.run_discovery_progress('progress_note "AP switch scan"\n', columns="120")
         line = ANSI.sub("", result.stderr).replace("\r", "")
